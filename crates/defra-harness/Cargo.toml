@@ -15,4 +15,7 @@ tracing.workspace = true
 anyhow.workspace = true
 regex.workspace = true
 rand.workspace = true
+libc.workspace = true
 futures.workspace = true
+paste = "1.0"
+cosmrs = { version = "0.22", features = ["rpc"] }
