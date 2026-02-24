@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 
 use crate::client::DefraClient;
+use crate::divergences::NodeKind;
 use crate::node::{DefraNode, NodeConfig, RustNode};
 use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
@@ -13,13 +14,6 @@ use crate::run::TestRunDir;
 use crate::sourcehub::SourceHubNode;
 
 use super::health::health_check;
-
-/// Whether the node is backed by the Rust or Go binary.
-#[derive(Clone, Copy)]
-pub enum NodeKind {
-    Rust,
-    Go,
-}
 
 /// A running node within a test cluster.
 pub struct RunningNode {
@@ -76,7 +70,7 @@ impl TestCluster {
     /// Return a CLI-based client for the node at `index`.
     pub fn client(&self, index: usize) -> DefraClient {
         let node = &self.nodes[index];
-        DefraClient::new(&node.binary_path, &node.http_addr)
+        DefraClient::new(&node.binary_path, &node.http_addr, node.kind)
     }
 
     pub fn api_url(&self, index: usize) -> &str {

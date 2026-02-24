@@ -4,6 +4,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 use super::{DefraNode, NodeConfig};
+use crate::divergences::{self, NodeKind};
 
 /// A Go DefraDB node backed by the `defradb` binary from PATH.
 pub struct GoNode {
@@ -60,6 +61,10 @@ impl GoNode {
 }
 
 impl DefraNode for GoNode {
+    fn kind(&self) -> NodeKind {
+        NodeKind::Go
+    }
+
     fn command(&self, config: &NodeConfig) -> Command {
         let mut cmd = Command::new(&self.binary_path);
 
@@ -103,6 +108,11 @@ impl DefraNode for GoNode {
 
         if config.nac_enabled {
             cmd.arg("--node-acp-enable");
+        }
+
+        // DIVERGENCE: Go does not support --source-hub-* flags
+        if config.source_hub_address.is_some() && divergences::supports_source_hub_flags(NodeKind::Go) {
+            unreachable!("Go node does not support SourceHub flags");
         }
 
         if config.development {

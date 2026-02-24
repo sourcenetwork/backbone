@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 pub mod client;
 pub mod cluster;
+pub mod divergences;
 pub mod fixtures;
 pub mod identity;
 pub mod node;
@@ -13,6 +14,7 @@ pub mod run;
 pub mod sourcehub;
 
 pub use client::DefraClient;
+pub use divergences::NodeKind;
 pub use cluster::{TestCluster, TestClusterBuilder};
 pub use fixtures::{
     documents_schema_with_policy, interaction_schema_with_policy, multi_resource_policy,

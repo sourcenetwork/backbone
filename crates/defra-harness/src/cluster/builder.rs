@@ -3,6 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use reqwest::Client;
 
+use crate::divergences::NodeKind;
 use crate::node::{DefraNode, GoNode, NodeConfig, RustNode};
 use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
@@ -12,7 +13,7 @@ use crate::run::TestRunDir;
 use crate::sourcehub::SourceHubNode;
 
 use super::health::health_check_all;
-use super::runtime::{NodeKind, RunningNode, TestCluster};
+use super::runtime::{RunningNode, TestCluster};
 
 pub struct TestClusterBuilder {
     rust_nodes: usize,

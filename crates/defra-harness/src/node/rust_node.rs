@@ -4,6 +4,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 use super::{DefraNode, NodeConfig};
+use crate::divergences::{self, NodeKind};
 use crate::workspace_root;
 
 /// A Rust DefraDB node backed by the `defra` binary from this workspace.
@@ -54,6 +55,10 @@ impl RustNode {
 }
 
 impl DefraNode for RustNode {
+    fn kind(&self) -> NodeKind {
+        NodeKind::Rust
+    }
+
     fn command(&self, config: &NodeConfig) -> Command {
         let mut cmd = Command::new(&self.binary_path);
 
@@ -92,21 +97,24 @@ impl DefraNode for RustNode {
         }
 
         if let Some(ref acp_type) = config.acp_document_type {
-            cmd.arg("--acp-document-type").arg(acp_type);
+            cmd.arg("--document-acp-type").arg(acp_type);
         }
 
         if config.nac_enabled {
-            cmd.arg("--acp-node-enable");
+            cmd.arg("--node-acp-enable");
         }
 
-        if let Some(ref addr) = config.source_hub_address {
-            cmd.arg("--source-hub-address").arg(addr);
-        }
-        if let Some(ref addr) = config.source_hub_comet_address {
-            cmd.arg("--source-hub-comet-address").arg(addr);
-        }
-        if let Some(ref chain_id) = config.source_hub_chain_id {
-            cmd.arg("--source-hub-chain-id").arg(chain_id);
+        // DIVERGENCE: Only Rust supports --source-hub-* flags
+        if divergences::supports_source_hub_flags(NodeKind::Rust) {
+            if let Some(ref addr) = config.source_hub_address {
+                cmd.arg("--source-hub-address").arg(addr);
+            }
+            if let Some(ref addr) = config.source_hub_comet_address {
+                cmd.arg("--source-hub-comet-address").arg(addr);
+            }
+            if let Some(ref chain_id) = config.source_hub_chain_id {
+                cmd.arg("--source-hub-chain-id").arg(chain_id);
+            }
         }
 
         if config.development {

@@ -7,6 +7,8 @@ pub use rust_node::RustNode;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::divergences::NodeKind;
+
 /// Configuration for a single DefraDB node.
 #[derive(Clone)]
 pub struct NodeConfig {
@@ -32,6 +34,7 @@ pub struct NodeConfig {
 
 /// Trait for building a DefraDB command from config.
 pub trait DefraNode {
+    fn kind(&self) -> NodeKind;
     fn command(&self, config: &NodeConfig) -> Command;
     fn api_url(host: &str, port: u16) -> String
     where
