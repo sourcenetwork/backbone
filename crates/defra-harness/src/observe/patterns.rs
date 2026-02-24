@@ -6,32 +6,8 @@ pub struct NamedPattern {
     pub regex: Regex,
 }
 
-/// Standard log patterns emitted by Rust DefraDB nodes.
-pub fn rust_patterns() -> Vec<NamedPattern> {
-    vec![
-        NamedPattern {
-            name: "peer_connected",
-            regex: Regex::new(r"Peer connected: ").unwrap(),
-        },
-        NamedPattern {
-            name: "peer_disconnected",
-            regex: Regex::new(r"Peer disconnected: ").unwrap(),
-        },
-        NamedPattern {
-            name: "replication_started",
-            regex: Regex::new(r"Starting replication loop").unwrap(),
-        },
-        NamedPattern {
-            name: "p2p_listening",
-            regex: Regex::new(r"Now listening on: ").unwrap(),
-        },
-    ]
-}
-
-/// Standard log patterns emitted by Go DefraDB nodes.
-///
-/// Go DefraDB uses different log strings from its go-p2p library.
-pub fn go_patterns() -> Vec<NamedPattern> {
+/// Standard log patterns emitted by DefraDB nodes (Go and Rust converged).
+pub fn node_patterns() -> Vec<NamedPattern> {
     vec![
         NamedPattern {
             name: "peer_connected",
@@ -48,6 +24,28 @@ pub fn go_patterns() -> Vec<NamedPattern> {
         NamedPattern {
             name: "p2p_listening",
             regex: Regex::new(r"Created LibP2P host").unwrap(),
+        },
+    ]
+}
+
+/// Log patterns emitted by Rust DefraDB nodes using iroh transport.
+pub fn iroh_patterns() -> Vec<NamedPattern> {
+    vec![
+        NamedPattern {
+            name: "peer_connected",
+            regex: Regex::new(r"Peer connected \(iroh\)").unwrap(),
+        },
+        NamedPattern {
+            name: "peer_disconnected",
+            regex: Regex::new(r"Peer disconnected \(iroh\)").unwrap(),
+        },
+        NamedPattern {
+            name: "replication_started",
+            regex: Regex::new(r"Starting.*replication loop").unwrap(),
+        },
+        NamedPattern {
+            name: "p2p_listening",
+            regex: Regex::new(r"Iroh transport initialized").unwrap(),
         },
     ]
 }

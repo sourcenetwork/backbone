@@ -111,7 +111,9 @@ impl DefraNode for GoNode {
         }
 
         // DIVERGENCE: Go does not support --source-hub-* flags
-        if config.source_hub_address.is_some() && divergences::supports_source_hub_flags(NodeKind::Go) {
+        if config.source_hub_address.is_some()
+            && divergences::supports_source_hub_flags(NodeKind::Go)
+        {
             unreachable!("Go node does not support SourceHub flags");
         }
 

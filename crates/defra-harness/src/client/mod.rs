@@ -4,7 +4,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::divergences::{self, DocIdFormat, NodeKind};
+use crate::divergences::{self, NodeKind};
 
 /// CLI-based client for DefraDB.
 ///
@@ -78,29 +78,16 @@ impl DefraClient {
 
     /// Parse query output, handling the Go/Rust format divergence.
     ///
-    /// DIVERGENCE: Go wraps in `{"data": ...}` with a "Request Results" header.
-    /// Rust returns data directly.
+    /// Both Go and Rust wrap output in `{"data": ...}`.
+    /// Go also prefixes with a "Request Results" header line.
     fn parse_query_output(&self, out: &str) -> Result<Value> {
-        match self.kind {
-            NodeKind::Go => {
-                // Go CLI prefixes output with "------ Request Results ------\n"
-                let json_str = out.find('{').map(|i| &out[i..]).unwrap_or(out);
-                let val: Value =
-                    serde_json::from_str(json_str).context("failed to parse query output")?;
-                // Go CLI wraps in {"data": ...}
-                Ok(val.get("data").cloned().unwrap_or(val))
-            }
-            NodeKind::Rust => {
-                let json_str = out.find('{').map(|i| &out[i..]).unwrap_or(out);
-                let val: Value =
-                    serde_json::from_str(json_str).context("failed to parse query output")?;
-                // Rust returns data directly, but handle {"data":...} gracefully
-                if let Some(data) = val.get("data") {
-                    Ok(data.clone())
-                } else {
-                    Ok(val)
-                }
-            }
+        // Go CLI prefixes output with "------ Request Results ------\n"
+        let json_str = out.find('{').map(|i| &out[i..]).unwrap_or(out);
+        let val: Value = serde_json::from_str(json_str).context("failed to parse query output")?;
+        if let Some(data) = val.get("data") {
+            Ok(data.clone())
+        } else {
+            Ok(val)
         }
     }
 
@@ -155,45 +142,28 @@ impl DefraClient {
         Self::parse_collection_list(&out)
     }
 
-    /// List document IDs via `client collection doc-ids --name <n>`.
+    /// List document IDs via `client collection docIDs --name <n>`.
     ///
-    /// DIVERGENCE:
-    /// - Rust subcommand: `doc-ids`, output: `{"doc_ids": ["id1", ...]}`
-    /// - Go subcommand: `docIDs`, output: line-separated `{"DocID": "id1"}\n...`
+    /// Both Go and Rust output line-separated `{"docID": "..."}` objects.
     pub fn collection_doc_ids(&self, name: &str) -> Result<Vec<String>> {
         let subcmd = divergences::doc_ids_subcommand(self.kind);
         let out = self.exec(&["client", "collection", subcmd, "--name", name])?;
         let trimmed = out.trim();
 
-        match divergences::doc_id_format(self.kind) {
-            DocIdFormat::RustArray => {
-                let val: Value = serde_json::from_str(trimmed)
-                    .context("failed to parse doc_ids output as JSON")?;
-                if let Some(arr) = val.get("doc_ids").and_then(|v| v.as_array()) {
-                    Ok(arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect())
-                } else {
-                    Ok(Vec::new())
-                }
+        let doc_id_key = divergences::doc_id_key(self.kind);
+        let mut ids = Vec::new();
+        for line in trimmed.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
             }
-            DocIdFormat::GoLineObjects => {
-                let mut ids = Vec::new();
-                for line in trimmed.lines() {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    if let Ok(obj) = serde_json::from_str::<Value>(line) {
-                        if let Some(id) = obj.get("DocID").and_then(|v| v.as_str()) {
-                            ids.push(id.to_string());
-                        }
-                    }
+            if let Ok(obj) = serde_json::from_str::<Value>(line) {
+                if let Some(id) = obj.get(doc_id_key).and_then(|v| v.as_str()) {
+                    ids.push(id.to_string());
                 }
-                Ok(ids)
             }
         }
+        Ok(ids)
     }
 
     /// Truncate a collection via `client collection truncate --name <n>`.
@@ -1130,10 +1100,7 @@ impl DefraClient {
             if divergences::index_uses_positional_args(self.kind) {
                 self.exec_with_identity(hex_key, &["client", "index", "list", c])?
             } else {
-                self.exec_with_identity(
-                    hex_key,
-                    &["client", "index", "list", "--collection", c],
-                )?
+                self.exec_with_identity(hex_key, &["client", "index", "list", "--collection", c])?
             }
         } else {
             self.exec_with_identity(hex_key, &["client", "index", "list"])?

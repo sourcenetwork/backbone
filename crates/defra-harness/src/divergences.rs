@@ -56,60 +56,34 @@ pub fn encrypted_index_uses_positional_args(_kind: NodeKind) -> bool {
     false
 }
 
-// -- Output format (DIVERGENT) --
+// -- Output format (CONVERGED) --
 
-/// Whether the query command wraps output in `{"data": ...}`.
-/// Go: yes (also prefixes with "Request Results" header)
-/// Rust: no (returns data directly)
-pub fn query_wraps_in_data(kind: NodeKind) -> bool {
-    match kind {
-        NodeKind::Rust => false,
-        NodeKind::Go => true,
-    }
+/// Both Go and Rust wrap query output in `{"data": ...}`.
+/// Go also prefixes with a "Request Results" header line.
+pub fn query_wraps_in_data(_kind: NodeKind) -> bool {
+    true
 }
 
-/// Doc ID output format.
-/// Rust: `{"doc_ids": ["id1", ...]}`
-/// Go: line-separated `{"DocID": "id1"}\n{"DocID": "id2"}\n...`
-#[derive(Debug, Clone, Copy)]
-pub enum DocIdFormat {
-    /// `{"doc_ids": ["id1", ...]}`
-    RustArray,
-    /// Line-separated `{"DocID": "..."}`
-    GoLineObjects,
+/// Both Go and Rust output line-separated `{"docID": "..."}` objects.
+pub fn doc_id_key(_kind: NodeKind) -> &'static str {
+    "docID"
 }
 
-pub fn doc_id_format(kind: NodeKind) -> DocIdFormat {
-    match kind {
-        NodeKind::Rust => DocIdFormat::RustArray,
-        NodeKind::Go => DocIdFormat::GoLineObjects,
-    }
-}
-
-// -- Log patterns --
+// -- Log patterns (CONVERGED) --
 
 /// The log line substring that indicates the HTTP server is ready.
-/// Both use the same pattern currently.
 pub fn ready_log_pattern(_kind: NodeKind) -> &'static str {
     "Providing HTTP API at"
 }
 
-/// Peer-connected log pattern regex.
-/// Rust: `"Peer connected: "`, Go: `"Peer connected|PeerConnect"`
-pub fn peer_connected_pattern(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Rust => r"Peer connected: ",
-        NodeKind::Go => r"Peer connected|PeerConnect",
-    }
+/// Peer-connected log pattern regex. Both use "Peer connected".
+pub fn peer_connected_pattern(_kind: NodeKind) -> &'static str {
+    r"Peer connected|PeerConnect"
 }
 
-/// P2P listening log pattern regex.
-/// Rust: `"Now listening on: "`, Go: `"Created LibP2P host"`
-pub fn p2p_listening_pattern(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Rust => r"Now listening on: ",
-        NodeKind::Go => r"Created LibP2P host",
-    }
+/// P2P listening log pattern regex. Both use "Created LibP2P host".
+pub fn p2p_listening_pattern(_kind: NodeKind) -> &'static str {
+    r"Created LibP2P host"
 }
 
 // -- SourceHub support --
@@ -117,6 +91,17 @@ pub fn p2p_listening_pattern(kind: NodeKind) -> &'static str {
 /// Whether the node supports `--source-hub-*` start flags.
 /// Rust: yes, Go: not yet
 pub fn supports_source_hub_flags(kind: NodeKind) -> bool {
+    match kind {
+        NodeKind::Rust => true,
+        NodeKind::Go => false,
+    }
+}
+
+// -- Transport support --
+
+/// Whether the node supports `--p2p-transport` flag.
+/// Rust: yes (libp2p + iroh), Go: no (libp2p only)
+pub fn supports_p2p_transport_flag(kind: NodeKind) -> bool {
     match kind {
         NodeKind::Rust => true,
         NodeKind::Go => false,

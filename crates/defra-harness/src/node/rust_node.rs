@@ -32,6 +32,19 @@ impl RustNode {
         Ok(())
     }
 
+    /// Build the Rust binary with additional cargo features enabled.
+    pub fn build_with_features(features: &[&str]) -> Result<()> {
+        let features_str = features.join(",");
+        let status = Command::new("cargo")
+            .args(["build", "-p", "cli", "--features", &features_str])
+            .current_dir(workspace_root())
+            .status()
+            .context("failed to run cargo build with features")?;
+
+        anyhow::ensure!(status.success(), "cargo build failed with {}", status);
+        Ok(())
+    }
+
     /// Verify the Rust binary is built and returns parseable version info.
     pub fn check_available() -> Result<()> {
         let binary = workspace_root().join("target/debug/defra");
@@ -66,7 +79,12 @@ impl DefraNode for RustNode {
         cmd.arg("--url").arg(&config.http_addr);
         cmd.arg("--no-log-color");
         cmd.arg("--log-output").arg("stdout");
-        cmd.arg("--no-keyring");
+
+        if config.keyring_enabled {
+            cmd.env("DEFRA_KEYRING_SECRET", "integration-test-secret");
+        } else {
+            cmd.arg("--no-keyring");
+        }
 
         cmd.arg("start");
         cmd.arg("--store")
@@ -115,6 +133,10 @@ impl DefraNode for RustNode {
             if let Some(ref chain_id) = config.source_hub_chain_id {
                 cmd.arg("--source-hub-chain-id").arg(chain_id);
             }
+        }
+
+        if let Some(ref transport) = config.p2p_transport {
+            cmd.arg("--p2p-transport").arg(transport);
         }
 
         if config.development {
