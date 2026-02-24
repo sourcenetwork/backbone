@@ -102,7 +102,12 @@ impl BinaryResolver {
         // 1. Explicit path override
         if let Some(path) = self.env("BINARY") {
             let path = PathBuf::from(&path);
-            anyhow::ensure!(path.exists(), "{} does not exist: {}", self.prefix, path.display());
+            anyhow::ensure!(
+                path.exists(),
+                "{} does not exist: {}",
+                self.prefix,
+                path.display()
+            );
             return Ok(ResolvedBinary {
                 path,
                 version: None,
@@ -113,7 +118,8 @@ impl BinaryResolver {
         // 2. Local workspace build
         if let Some(workspace) = self.env("WORKSPACE") {
             let workspace = PathBuf::from(&workspace);
-            let pkg = self.env("CARGO_PACKAGE")
+            let pkg = self
+                .env("CARGO_PACKAGE")
                 .or_else(|| self.default_cargo_package.clone())
                 .context(format!(
                     "{}_CARGO_PACKAGE not set and no default configured",
@@ -135,7 +141,10 @@ impl BinaryResolver {
 
         anyhow::bail!(
             "Cannot resolve binary '{}'. Set {}_BINARY, {}_WORKSPACE, or ensure '{}' is on PATH.",
-            self.binary_name, self.prefix, self.prefix, self.binary_name
+            self.binary_name,
+            self.prefix,
+            self.prefix,
+            self.binary_name
         )
     }
 
@@ -151,7 +160,10 @@ impl BinaryResolver {
             .args(["build", "-p", package])
             .current_dir(workspace)
             .status()
-            .context(format!("failed to run cargo build in {}", workspace.display()))?;
+            .context(format!(
+                "failed to run cargo build in {}",
+                workspace.display()
+            ))?;
 
         anyhow::ensure!(status.success(), "cargo build -p {} failed", package);
 
@@ -167,7 +179,9 @@ impl BinaryResolver {
         Ok(ResolvedBinary {
             path: binary_path,
             version,
-            source: BinarySource::LocalBuild { workspace: workspace.to_path_buf() },
+            source: BinarySource::LocalBuild {
+                workspace: workspace.to_path_buf(),
+            },
         })
     }
 
@@ -177,7 +191,11 @@ impl BinaryResolver {
             .output()
             .context(format!("'{}' not found on PATH", self.binary_name))?;
 
-        anyhow::ensure!(output.status.success(), "'{}' not found on PATH", self.binary_name);
+        anyhow::ensure!(
+            output.status.success(),
+            "'{}' not found on PATH",
+            self.binary_name
+        );
 
         let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
         let version = self.extract_version(&path);
@@ -198,7 +216,10 @@ impl BinaryResolver {
                         anyhow::bail!(
                             "Version mismatch for {}: expected prefix '{}', got '{}'. \
                              Set {}_SKIP_VERSION_CHECK=1 to bypass.",
-                            self.binary_name, pin, ver, self.prefix
+                            self.binary_name,
+                            pin,
+                            ver,
+                            self.prefix
                         );
                     }
                 }
@@ -219,7 +240,11 @@ impl BinaryResolver {
             .join(git_ref.replace('/', "_"));
 
         if !build_dir.exists() {
-            tracing::info!(repo = repo, git_ref = git_ref, "Cloning and building from source");
+            tracing::info!(
+                repo = repo,
+                git_ref = git_ref,
+                "Cloning and building from source"
+            );
 
             let status = Command::new("git")
                 .args(["clone", "--depth", "1", "--branch", git_ref, repo])
@@ -227,12 +252,21 @@ impl BinaryResolver {
                 .status()
                 .context("git clone failed")?;
 
-            anyhow::ensure!(status.success(), "git clone failed for {} @ {}", repo, git_ref);
+            anyhow::ensure!(
+                status.success(),
+                "git clone failed for {} @ {}",
+                repo,
+                git_ref
+            );
         }
 
-        let pkg = self.env("CARGO_PACKAGE")
+        let pkg = self
+            .env("CARGO_PACKAGE")
             .or_else(|| self.default_cargo_package.clone())
-            .context(format!("{}_CARGO_PACKAGE not set for source build", self.prefix))?;
+            .context(format!(
+                "{}_CARGO_PACKAGE not set for source build",
+                self.prefix
+            ))?;
 
         let status = Command::new("cargo")
             .args(["build", "-p", &pkg])
