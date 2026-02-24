@@ -775,11 +775,56 @@ impl DefraClient {
         }
     }
 
+    /// Get collection version info using an identity (for NAC-enabled nodes).
+    pub fn collection_describe_version_with_identity(
+        &self,
+        name: &str,
+        hex_key: &str,
+    ) -> Result<Value> {
+        let out = self.exec_with_identity(
+            hex_key,
+            &["client", "collection", "describe", "--name", name],
+        )?;
+        let val: Value =
+            serde_json::from_str(&out).context("failed to parse collection describe output")?;
+        if val.get("CollectionID").is_none() && val.get("VersionID").is_none() {
+            if let Some(id) = val.get("ID").and_then(|v| v.as_str()) {
+                let mut out_val = val.clone();
+                out_val["CollectionID"] = serde_json::Value::String(id.to_string());
+                if let Some(ver) = val
+                    .get("SchemaVersionID")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| val.get("VersionID").and_then(|v| v.as_str()))
+                {
+                    out_val["VersionID"] = serde_json::Value::String(ver.to_string());
+                }
+                return Ok(out_val);
+            }
+        }
+        Ok(val)
+    }
+
     // ---- View operations ----
 
     /// Add a view.
     pub fn view_add(&self, gql_query: &str, sdl: &str) -> Result<Value> {
         let out = self.exec(&["client", "view", "add", "--query", gql_query, "--sdl", sdl])?;
+        serde_json::from_str(&out).context("failed to parse view_add output")
+    }
+
+    /// Add a view with a lens transform CID.
+    pub fn view_add_with_lens(&self, gql_query: &str, sdl: &str, lens_cid: &str) -> Result<Value> {
+        let out = self.exec(&[
+            "client",
+            "view",
+            "add",
+            "--query",
+            gql_query,
+            "--sdl",
+            sdl,
+            "--lens-cid",
+            lens_cid,
+        ])?;
         serde_json::from_str(&out).context("failed to parse view_add output")
     }
 
