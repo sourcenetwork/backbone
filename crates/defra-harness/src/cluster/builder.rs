@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 
 use crate::divergences::NodeKind;
-use crate::node::{DefraNode, GoNode, NodeConfig, RustNode};
+use crate::node::{BinarySource, DefraNode, GoNode, NodeConfig, RustNode};
 use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
 use crate::ports::{allocate_node_ports, allocate_source_hub_ports};
@@ -24,7 +24,8 @@ pub struct TestClusterBuilder {
     go_nodes: usize,
     p2p_enabled: bool,
     health_timeout: Duration,
-    build_rust: bool,
+    rust_binary: Option<BinarySource>,
+    go_binary: Option<BinarySource>,
     acp_document_type: Option<String>,
     node_identity: Option<String>,
     node_identities: Vec<Option<String>>,
@@ -52,7 +53,8 @@ impl TestClusterBuilder {
             go_nodes: 0,
             p2p_enabled: false,
             health_timeout: Duration::from_secs(30),
-            build_rust: true,
+            rust_binary: None,
+            go_binary: None,
             acp_document_type: None,
             node_identity: None,
             node_identities: Vec::new(),
@@ -88,8 +90,26 @@ impl TestClusterBuilder {
         self
     }
 
+    /// Set the binary source for Rust nodes.
+    ///
+    /// Defaults to `BinarySource::Workspace` (builds from workspace via cargo).
+    pub fn with_rust_binary(mut self, source: BinarySource) -> Self {
+        self.rust_binary = Some(source);
+        self
+    }
+
+    /// Set the binary source for Go nodes.
+    ///
+    /// Defaults to `BinarySource::Path("defradb")` (found via PATH).
+    pub fn with_go_binary(mut self, source: BinarySource) -> Self {
+        self.go_binary = Some(source);
+        self
+    }
+
+    /// Skip the cargo build step for Rust nodes.
+    /// Equivalent to `.with_rust_binary(BinarySource::Path(workspace_binary_path()))`.
     pub fn skip_build(mut self) -> Self {
-        self.build_rust = false;
+        self.rust_binary = Some(BinarySource::Path(RustNode::workspace_binary_path()));
         self
     }
 
@@ -163,32 +183,65 @@ impl TestClusterBuilder {
         let total = self.rust_nodes + self.go_nodes;
         anyhow::ensure!(total > 0, "must have at least one node");
 
-        // Build Rust binary if needed (once per process, even under parallel tests)
         let is_iroh = self.p2p_transport.as_deref() == Some("iroh");
-        if self.rust_nodes > 0 && self.build_rust {
-            if is_iroh {
-                IROH_BUILD_DONE.get_or_init(|| {
-                    RustNode::build_with_features(&["iroh"])
-                        .expect("failed to build Rust binary with iroh feature");
-                });
-            } else {
-                RUST_BUILD_DONE.get_or_init(|| {
-                    RustNode::build().expect("failed to build Rust binary");
-                });
-            }
-        }
 
-        // Check Go binary if needed
-        if self.go_nodes > 0 {
-            GoNode::check_available().context("Go defradb binary not available")?;
-        }
+        // Resolve Rust binary source
+        let rust_binary_path = if self.rust_nodes > 0 {
+            let source = self.rust_binary.clone().unwrap_or_else(|| {
+                if is_iroh {
+                    BinarySource::WorkspaceWithFeatures(vec!["iroh".to_string()])
+                } else {
+                    BinarySource::Workspace
+                }
+            });
+            // Use OnceLock for workspace builds to avoid parallel rebuilds
+            let path = match &source {
+                BinarySource::Workspace => {
+                    RUST_BUILD_DONE.get_or_init(|| {
+                        RustNode::build().expect("failed to build Rust binary");
+                    });
+                    RustNode::workspace_binary_path()
+                }
+                BinarySource::WorkspaceWithFeatures(features) => {
+                    let features_clone = features.clone();
+                    IROH_BUILD_DONE.get_or_init(|| {
+                        let refs: Vec<&str> = features_clone.iter().map(|s| s.as_str()).collect();
+                        RustNode::build_with_features(&refs)
+                            .expect("failed to build Rust binary with features");
+                    });
+                    RustNode::workspace_binary_path()
+                }
+                _ => source.resolve(NodeKind::Rust)?,
+            };
+            Some(path)
+        } else {
+            None
+        };
+
+        // Resolve Go binary source
+        let go_binary_path = if self.go_nodes > 0 {
+            let source = self.go_binary.clone().unwrap_or(BinarySource::Workspace);
+            let path = match &source {
+                BinarySource::Workspace => {
+                    // Default Go behavior: PATH lookup + version check
+                    GoNode::check_available().context("Go defradb binary not available")?;
+                    GoNode::path_binary()
+                }
+                _ => source.resolve(NodeKind::Go)?,
+            };
+            Some(path)
+        } else {
+            None
+        };
 
         // Source Hub or NAC requires an identity at startup.
         if (self.nac_enabled || self.source_hub_enabled) && self.node_identity.is_none() {
-            let binary = if self.go_nodes > 0 {
-                std::path::PathBuf::from("defradb")
+            let binary = if let Some(ref p) = go_binary_path {
+                p.clone()
+            } else if let Some(ref p) = rust_binary_path {
+                p.clone()
             } else {
-                RustNode::from_workspace().binary_path().to_path_buf()
+                anyhow::bail!("no binary available for identity generation");
             };
             let id = crate::identity::generate_identity(&binary)
                 .context("auto-generating identity for NAC/SourceHub")?;
@@ -240,7 +293,7 @@ impl TestClusterBuilder {
         // Spawn Rust nodes
         for (i, ports) in all_ports.iter_mut().enumerate().take(self.rust_nodes) {
             let name = format!("rust-{}", i);
-            let node = RustNode::from_workspace();
+            let node = RustNode::from_binary(rust_binary_path.as_ref().unwrap());
             let identity = self
                 .node_identities
                 .get(i)
@@ -285,7 +338,7 @@ impl TestClusterBuilder {
         // Spawn Go nodes
         for (i, ports) in all_ports.iter_mut().skip(self.rust_nodes).enumerate() {
             let name = format!("go-{}", i);
-            let node = GoNode::from_path();
+            let node = GoNode::from_binary(go_binary_path.as_ref().unwrap());
             let go_index = self.rust_nodes + i;
             let identity = self
                 .node_identities

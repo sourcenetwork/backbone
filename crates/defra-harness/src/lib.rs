@@ -16,6 +16,7 @@ pub mod sourcehub;
 pub use client::DefraClient;
 pub use cluster::{TestCluster, TestClusterBuilder};
 pub use divergences::NodeKind;
+pub use node::BinarySource;
 pub use fixtures::{
     documents_schema_with_policy, interaction_schema_with_policy, multi_resource_policy,
     peak_schema_with_policy, secret_schema_with_policy, tweet_schema_with_policy, typed_schema,

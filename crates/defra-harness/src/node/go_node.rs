@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use super::{DefraNode, NodeConfig};
 use crate::divergences::{self, NodeKind};
 
-/// A Go DefraDB node backed by the `defradb` binary from PATH.
+/// A Go DefraDB node backed by the `defradb` binary.
 pub struct GoNode {
     binary_path: PathBuf,
 }
@@ -15,8 +15,20 @@ impl GoNode {
     /// Create a GoNode using the `defradb` binary from PATH.
     pub fn from_path() -> Self {
         Self {
-            binary_path: PathBuf::from("defradb"),
+            binary_path: Self::path_binary(),
         }
+    }
+
+    /// Use a pre-existing binary at the given path.
+    pub fn from_binary(path: impl Into<PathBuf>) -> Self {
+        Self {
+            binary_path: path.into(),
+        }
+    }
+
+    /// The default PATH-based binary name.
+    pub fn path_binary() -> PathBuf {
+        PathBuf::from("defradb")
     }
 
     /// Verify the Go binary is available and version-compatible.

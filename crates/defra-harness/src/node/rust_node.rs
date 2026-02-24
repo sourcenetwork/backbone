@@ -7,7 +7,7 @@ use super::{DefraNode, NodeConfig};
 use crate::divergences::{self, NodeKind};
 use crate::workspace_root;
 
-/// A Rust DefraDB node backed by the `defra` binary from this workspace.
+/// A Rust DefraDB node backed by the `defra` binary.
 pub struct RustNode {
     binary_path: PathBuf,
 }
@@ -16,8 +16,20 @@ impl RustNode {
     /// Point to the debug binary in the workspace target dir.
     pub fn from_workspace() -> Self {
         Self {
-            binary_path: workspace_root().join("target/debug/defra"),
+            binary_path: Self::workspace_binary_path(),
         }
+    }
+
+    /// Use a pre-existing binary at the given path.
+    pub fn from_binary(path: impl Into<PathBuf>) -> Self {
+        Self {
+            binary_path: path.into(),
+        }
+    }
+
+    /// The default workspace binary path (`target/debug/defra`).
+    pub fn workspace_binary_path() -> PathBuf {
+        workspace_root().join("target/debug/defra")
     }
 
     /// Build the Rust binary via cargo (debug mode for fast iteration).
