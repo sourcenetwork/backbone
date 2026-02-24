@@ -1,0 +1,20 @@
+[package]
+name = "orbis-harness"
+version = "0.1.0"
+description = "Orbis ring builder, DKG fixtures, and event subscriptions"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+test-infra = { path = "../test-infra" }
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+eyre.workspace = true
+regex.workspace = true
+rand.workspace = true
+libc.workspace = true
+futures.workspace = true

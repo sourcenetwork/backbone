@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/test-infra",
+    "crates/defra-harness",
+    "crates/hub-harness",
+    "crates/orbis-harness",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+[workspace.dependencies]
+tokio = { version = "1.35", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+eyre = "0.6"
+tracing = "0.1"
+regex = "1"
+rand = "0.8"
+libc = "0.2"
+futures = "0.3"

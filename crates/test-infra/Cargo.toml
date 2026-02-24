@@ -1,0 +1,15 @@
+[package]
+name = "test-infra"
+version = "0.1.0"
+description = "Shared integration test primitives for Source Network components"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+regex.workspace = true
+rand.workspace = true
+libc.workspace = true
+futures.workspace = true
+anyhow.workspace = true

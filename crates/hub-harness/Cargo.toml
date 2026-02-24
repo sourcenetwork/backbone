@@ -1,0 +1,19 @@
+[package]
+name = "hub-harness"
+version = "0.1.0"
+description = "Hub.rs node manager, cluster builder, and observability"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+test-infra = { path = "../test-infra" }
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+eyre.workspace = true
+regex.workspace = true
+rand.workspace = true
+futures.workspace = true
