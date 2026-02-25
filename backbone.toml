@@ -1,0 +1,35 @@
+# Component version manifest.
+#
+# Declares the expected version of each binary dependency. BinaryResolver
+# reads this as a fallback when no env var override is set, inserting it
+# between "PATH lookup" and "give up" in the resolution chain.
+#
+# Env vars always win — set DEFRA_BINARY=/path/to/defra to bypass this file.
+
+[components.defra]
+prefix = "DEFRA"
+repo = "https://github.com/sourcenetwork/defradb.rs"
+ref = "main"
+cargo_package = "cli"
+
+[components.orbis-node]
+prefix = "ORBIS"
+repo = "https://github.com/sourcenetwork/orbis-rs"
+ref = "jack/integration-testing"
+cargo_package = "orbis-node"
+
+[components.cli-tool]
+prefix = "ORBIS_CLI"
+repo = "https://github.com/sourcenetwork/orbis-rs"
+ref = "jack/integration-testing"
+cargo_package = "cli-tool"
+
+[components.sourcehubd]
+prefix = "SOURCEHUBD"
+# Go binary — no cargo_package, must be on PATH or set via env var
+
+[components.hubd]
+prefix = "HUBD"
+repo = "https://github.com/sourcenetwork/hub.rs"
+ref = "main"
+cargo_package = "hubd"

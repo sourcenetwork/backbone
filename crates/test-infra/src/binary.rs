@@ -7,7 +7,8 @@
 //! 1. **Env var override** — explicit path, skips all checks
 //! 2. **Local workspace build** — `cargo build` in a workspace directory
 //! 3. **PATH lookup** — find binary on PATH, optionally version-check
-//! 4. **Build from source** — clone a specific commit and build
+//! 4. **Manifest lookup** — read `backbone.toml` for repo/ref, build from source
+//! 5. **Env var git build** — `{PREFIX}_GIT_REPO` + `{PREFIX}_GIT_REF`
 //!
 //! When a version pin is set (via env var), the resolver verifies the binary's
 //! reported version matches. This keeps the stack in sync across repos.
@@ -16,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use eyre::{ContextCompat, Result, WrapErr};
+
+use crate::manifest::Manifest;
 
 /// How a binary was resolved.
 #[derive(Debug, Clone)]
@@ -134,9 +137,14 @@ impl BinaryResolver {
             return Ok(resolved);
         }
 
-        // 4. Build from source (git clone + cargo build)
+        // 4. Manifest lookup (backbone.toml)
+        if let Some(resolved) = self.resolve_from_manifest()? {
+            return Ok(resolved);
+        }
+
+        // 5. Build from source via env vars (git clone + cargo build)
         if let (Some(repo), Some(git_ref)) = (self.env("GIT_REPO"), self.env("GIT_REF")) {
-            return self.build_from_git(&repo, &git_ref);
+            return self.build_from_git(&repo, &git_ref, None);
         }
 
         eyre::bail!(
@@ -233,7 +241,44 @@ impl BinaryResolver {
         })
     }
 
-    fn build_from_git(&self, repo: &str, git_ref: &str) -> Result<ResolvedBinary> {
+    fn resolve_from_manifest(&self) -> Result<Option<ResolvedBinary>> {
+        let manifest = match Manifest::discover() {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        let pin = match manifest.find_by_prefix(&self.prefix) {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+
+        let (repo, git_ref) = match (&pin.repo, &pin.git_ref) {
+            (Some(r), Some(g)) => (r.as_str(), g.as_str()),
+            _ => return Ok(None),
+        };
+
+        let pkg = pin
+            .cargo_package
+            .as_deref()
+            .or(self.default_cargo_package.as_deref());
+
+        tracing::info!(
+            prefix = %self.prefix,
+            repo = repo,
+            git_ref = git_ref,
+            "Resolving {} from backbone.toml manifest",
+            self.binary_name
+        );
+
+        self.build_from_git(repo, git_ref, pkg).map(Some)
+    }
+
+    fn build_from_git(
+        &self,
+        repo: &str,
+        git_ref: &str,
+        cargo_package: Option<&str>,
+    ) -> Result<ResolvedBinary> {
         let build_dir = std::env::temp_dir()
             .join("backbone-builds")
             .join(&self.binary_name)
@@ -260,8 +305,9 @@ impl BinaryResolver {
             );
         }
 
-        let pkg = self
-            .env("CARGO_PACKAGE")
+        let pkg = cargo_package
+            .map(|s| s.to_string())
+            .or_else(|| self.env("CARGO_PACKAGE"))
             .or_else(|| self.default_cargo_package.clone())
             .wrap_err(format!(
                 "{}_CARGO_PACKAGE not set for source build",

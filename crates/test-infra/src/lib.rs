@@ -10,6 +10,7 @@
 
 pub mod binary;
 pub mod log_tracker;
+pub mod manifest;
 pub mod poll;
 pub mod ports;
 pub mod process;
@@ -17,6 +18,7 @@ pub mod run;
 
 pub use binary::{BinaryResolver, BinarySource, ResolvedBinary};
 pub use log_tracker::{LogEvent, LogTracker, NamedPattern};
+pub use manifest::{ComponentPin, Manifest};
 pub use poll::poll_until;
 pub use ports::allocate_ports;
 pub use process::ManagedProcess;

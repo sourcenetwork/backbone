@@ -5257,7 +5257,9 @@ dependencies = [
  "libc",
  "rand 0.8.5",
  "regex",
+ "serde",
  "tokio",
+ "toml 0.8.23",
  "tracing",
 ]
 
