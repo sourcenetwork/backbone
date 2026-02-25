@@ -8,8 +8,6 @@ license.workspace = true
 [dependencies]
 test-infra = { path = "../test-infra" }
 
-hub-client = { git = "https://github.com/sourcenetwork/hub.rs" }
-
 commonware-codec.workspace = true
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
