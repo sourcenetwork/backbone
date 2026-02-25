@@ -1,6 +1,6 @@
 use std::net::TcpListener;
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 
 /// Ports assigned to a single node, with guard listeners held until release.
 ///
@@ -27,7 +27,7 @@ pub fn allocate_node_ports(n: usize) -> Result<Vec<NodePorts>> {
     let listeners: Vec<TcpListener> = (0..count)
         .map(|i| {
             TcpListener::bind("127.0.0.1:0")
-                .with_context(|| format!("failed to bind ephemeral port {}/{}", i + 1, count))
+                .wrap_err_with(|| format!("failed to bind ephemeral port {}/{}", i + 1, count))
         })
         .collect::<Result<_>>()?;
 
@@ -48,24 +48,6 @@ pub fn allocate_node_ports(n: usize) -> Result<Vec<NodePorts>> {
     Ok(result)
 }
 
-/// Allocate `n` unique ephemeral ports using bind-hold-release.
-pub fn allocate_ports(n: usize) -> Result<Vec<u16>> {
-    let listeners: Vec<TcpListener> = (0..n)
-        .map(|i| {
-            TcpListener::bind("127.0.0.1:0")
-                .with_context(|| format!("failed to bind ephemeral port {}/{}", i + 1, n))
-        })
-        .collect::<Result<_>>()?;
-
-    let ports = listeners
-        .iter()
-        .map(|l| l.local_addr().map(|a| a.port()))
-        .collect::<std::io::Result<Vec<u16>>>()
-        .context("failed to get local address")?;
-
-    Ok(ports)
-}
-
 /// Ports assigned to a Source Hub node.
 pub struct SourceHubPorts {
     pub lcd: u16,
@@ -76,7 +58,7 @@ pub struct SourceHubPorts {
 
 /// Allocate ports for a single Source Hub instance.
 pub fn allocate_source_hub_ports() -> Result<SourceHubPorts> {
-    let ports = allocate_ports(4)?;
+    let ports = test_infra::allocate_ports(4)?;
     Ok(SourceHubPorts {
         lcd: ports[0],
         comet_rpc: ports[1],

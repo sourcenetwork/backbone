@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 use reqwest::Client;
 
 use crate::client::DefraClient;
@@ -9,8 +9,6 @@ use crate::divergences::NodeKind;
 use crate::node::{DefraNode, NodeConfig, RustNode};
 use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
-use crate::process::ManagedProcess;
-use crate::run::TestRunDir;
 use crate::sourcehub::SourceHubNode;
 
 use super::health::health_check;
@@ -21,7 +19,7 @@ pub struct RunningNode {
     pub api_url: String,
     pub http_addr: String,
     pub binary_path: PathBuf,
-    pub process: ManagedProcess,
+    pub process: test_infra::ManagedProcess,
     pub log_tracker: LogTracker,
     pub rootdir: PathBuf,
     pub(crate) config: NodeConfig,
@@ -36,7 +34,7 @@ pub struct TestCluster {
     pub nodes: Vec<RunningNode>,
     source_hub: Option<SourceHubNode>,
     #[allow(dead_code)]
-    run_dir: TestRunDir,
+    run_dir: test_infra::TestRunDir,
     startup_identity: Option<String>,
     node_identities: Vec<Option<String>>,
 }
@@ -44,7 +42,7 @@ pub struct TestCluster {
 impl TestCluster {
     pub(crate) fn new(
         nodes: Vec<RunningNode>,
-        run_dir: TestRunDir,
+        run_dir: test_infra::TestRunDir,
         startup_identity: Option<String>,
         node_identities: Vec<Option<String>>,
         source_hub: Option<SourceHubNode>,
@@ -102,7 +100,7 @@ impl TestCluster {
         if self.source_hub.take().is_some() {
             Ok(())
         } else {
-            anyhow::bail!("no SourceHub node to stop")
+            eyre::bail!("no SourceHub node to stop")
         }
     }
 
@@ -140,7 +138,7 @@ impl TestCluster {
                 api_url: String::new(),
                 http_addr: String::new(),
                 binary_path: PathBuf::new(),
-                process: ManagedProcess::empty(),
+                process: test_infra::ManagedProcess::empty(),
                 log_tracker: LogTracker::empty(),
                 rootdir: PathBuf::new(),
                 config: config.clone(),
@@ -163,22 +161,29 @@ impl TestCluster {
             NodeKind::Go => Box::new(crate::node::GoNode::from_path()),
         };
 
-        let cmd = node.command(&config);
+        let (program, args_owned, envs_owned) = node.command_parts(&config);
+        let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+        let envs: Vec<(&str, &str)> = envs_owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
 
         let stdout_path = config.log_dir.join("stdout.log");
-        let log_tracker = LogTracker::start(stdout_path, named_patterns);
+        let log_tracker =
+            LogTracker::start(stdout_path, patterns::DEFRA_READY_PATTERN, named_patterns);
 
-        let process = ManagedProcess::spawn(&name, cmd, &config.log_dir)?;
+        let process =
+            test_infra::ManagedProcess::spawn(&name, &program, &args, &envs, &config.log_dir)?;
 
         log_tracker
             .wait_for_ready(timeout)
             .await
-            .with_context(|| format!("{}: did not become ready after restart", name))?;
+            .wrap_err_with(|| format!("{}: did not become ready after restart", name))?;
 
         let client = Client::new();
         health_check(&client, &api_url, timeout)
             .await
-            .with_context(|| format!("{}: health check failed after restart", name))?;
+            .wrap_err_with(|| format!("{}: health check failed after restart", name))?;
 
         self.nodes[index] = RunningNode {
             name,

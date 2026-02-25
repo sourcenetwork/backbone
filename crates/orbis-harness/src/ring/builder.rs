@@ -164,8 +164,7 @@ impl OrbisRingBuilder {
 
         let binary = test_infra::BinaryResolver::new("ORBIS", "orbis-node")
             .cargo_package("orbis-node")
-            .resolve()
-            .map_err(|e| eyre::eyre!("{:#}", e))?;
+            .resolve()?;
 
         let base_dir = self
             .base_dir
@@ -183,7 +182,7 @@ impl OrbisRingBuilder {
             ));
         }
 
-        let grpc_ports = test_infra::allocate_ports(n).map_err(|e| eyre::eyre!("{:#}", e))?;
+        let grpc_ports = test_infra::allocate_ports(n)?;
         let mut nodes = Vec::with_capacity(n);
 
         for i in 0..n {
@@ -236,8 +235,7 @@ impl OrbisRingBuilder {
 
             let name = format!("node{}", i);
             let process =
-                test_infra::ManagedProcess::spawn(&name, &binary.path, &args, &envs, &log_dir)
-                    .map_err(|e| eyre::eyre!("{:#}", e))?;
+                test_infra::ManagedProcess::spawn(&name, &binary.path, &args, &envs, &log_dir)?;
 
             nodes.push(OrbisNode {
                 index: i,

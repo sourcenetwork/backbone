@@ -21,6 +21,8 @@ pub struct HubGenesis {
     pub contracts: Vec<GenesisContract>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_storage: Vec<GenesisStorage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch_length: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -70,6 +72,7 @@ pub struct GenesisBuilder {
     validators: Vec<ValidatorConfig>,
     contracts: Vec<GenesisContract>,
     extra_storage: Vec<GenesisStorage>,
+    epoch_length: Option<u64>,
 }
 
 impl Default for GenesisBuilder {
@@ -82,6 +85,7 @@ impl Default for GenesisBuilder {
             validators: Vec::new(),
             contracts: Vec::new(),
             extra_storage: Vec::new(),
+            epoch_length: None,
         }
     }
 }
@@ -114,6 +118,7 @@ impl GenesisBuilder {
             validators: Vec::new(),
             contracts: Vec::new(),
             extra_storage: Vec::new(),
+            epoch_length: None,
         }
     }
 
@@ -206,6 +211,7 @@ impl GenesisBuilder {
             validators: self.validators,
             contracts: self.contracts,
             extra_storage: self.extra_storage,
+            epoch_length: self.epoch_length,
         }
     }
 
@@ -220,6 +226,7 @@ impl GenesisBuilder {
             validators: self.validators.clone(),
             contracts: self.contracts.clone(),
             extra_storage: self.extra_storage.clone(),
+            epoch_length: self.epoch_length,
         };
 
         let json = serde_json::to_string_pretty(&genesis)?;

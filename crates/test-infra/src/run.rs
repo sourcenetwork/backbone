@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 
 /// Isolated directory for a single test run.
 ///
@@ -19,14 +19,14 @@ impl TestRunDir {
     /// that, when set to `"1"`, preserves the directory on drop.
     pub fn new(base_dir: &Path, keep_env_var: &str) -> Result<Self> {
         fs::create_dir_all(base_dir)
-            .with_context(|| format!("failed to create base dir {}", base_dir.display()))?;
+            .wrap_err_with(|| format!("failed to create base dir {}", base_dir.display()))?;
 
         let now = chrono_lite_timestamp();
         let rand_hex = format!("{:08x}", rand::random::<u32>());
         let dir_name = format!("{}-{}", now, rand_hex);
         let path = base_dir.join(dir_name);
         fs::create_dir_all(&path)
-            .with_context(|| format!("failed to create run dir {}", path.display()))?;
+            .wrap_err_with(|| format!("failed to create run dir {}", path.display()))?;
 
         let keep = std::env::var(keep_env_var).is_ok_and(|v| v == "1");
 
@@ -41,7 +41,7 @@ impl TestRunDir {
     pub fn node_dir(&self, name: &str) -> Result<PathBuf> {
         let dir = self.path.join(name);
         fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create node dir {}", dir.display()))?;
+            .wrap_err_with(|| format!("failed to create node dir {}", dir.display()))?;
         Ok(dir)
     }
 }

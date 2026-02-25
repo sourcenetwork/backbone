@@ -13,7 +13,7 @@ pub struct DefraDbPorts {
 
 /// Allocate ports for a single DefraDB instance.
 pub fn allocate_defra_ports() -> eyre::Result<DefraDbPorts> {
-    let ports = test_infra::allocate_ports(2).map_err(|e| eyre::eyre!("{:#}", e))?;
+    let ports = test_infra::allocate_ports(2)?;
     Ok(DefraDbPorts {
         http: ports[0],
         p2p: ports[1],
@@ -27,7 +27,6 @@ pub fn allocate_defra_ports() -> eyre::Result<DefraDbPorts> {
 pub fn resolve_binary() -> eyre::Result<std::path::PathBuf> {
     let resolved = test_infra::BinaryResolver::new("DEFRA", "defra")
         .cargo_package("cli")
-        .resolve()
-        .map_err(|e| eyre::eyre!("{:#}", e))?;
+        .resolve()?;
     Ok(resolved.path)
 }

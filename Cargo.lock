@@ -2886,8 +2886,8 @@ dependencies = [
 name = "defra-harness"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "cosmrs 0.22.0",
+ "eyre",
  "futures",
  "libc",
  "paste",
@@ -8054,7 +8054,7 @@ dependencies = [
 name = "test-infra"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "eyre",
  "futures",
  "libc",
  "rand 0.8.5",

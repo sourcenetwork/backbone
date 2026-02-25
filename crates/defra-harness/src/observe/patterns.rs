@@ -1,10 +1,8 @@
 use regex::Regex;
 
-/// A named log pattern for event-driven test verification.
-pub struct NamedPattern {
-    pub name: &'static str,
-    pub regex: Regex,
-}
+pub use test_infra::NamedPattern;
+
+pub const DEFRA_READY_PATTERN: &str = "Providing HTTP API at";
 
 /// Standard log patterns emitted by DefraDB nodes (Go and Rust converged).
 pub fn node_patterns() -> Vec<NamedPattern> {

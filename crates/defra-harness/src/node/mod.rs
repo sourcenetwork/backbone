@@ -29,7 +29,7 @@ pub enum BinarySource {
 
 impl BinarySource {
     /// Resolve the binary source to an absolute path, building or downloading as needed.
-    pub fn resolve(&self, kind: NodeKind) -> anyhow::Result<PathBuf> {
+    pub fn resolve(&self, kind: NodeKind) -> eyre::Result<PathBuf> {
         match self {
             BinarySource::Workspace => match kind {
                 NodeKind::Rust => {
@@ -44,7 +44,7 @@ impl BinarySource {
                 Ok(RustNode::workspace_binary_path())
             }
             BinarySource::Path(p) => {
-                anyhow::ensure!(p.exists(), "binary not found at {}", p.display());
+                eyre::ensure!(p.exists(), "binary not found at {}", p.display());
                 Ok(p.clone())
             }
             BinarySource::Release(version) => resolve_release(version, kind),
@@ -53,7 +53,7 @@ impl BinarySource {
 }
 
 /// Download (or return cached) a release binary for the given version and node kind.
-fn resolve_release(version: &str, kind: NodeKind) -> anyhow::Result<PathBuf> {
+fn resolve_release(version: &str, kind: NodeKind) -> eyre::Result<PathBuf> {
     let cache_dir = dirs_cache().join("defra-harness").join(version);
     let binary_name = match kind {
         NodeKind::Rust => "defra",
@@ -83,9 +83,9 @@ fn resolve_release(version: &str, kind: NodeKind) -> anyhow::Result<PathBuf> {
         .arg(&cached)
         .arg(&url)
         .output()
-        .with_context(|| format!("failed to download {}", url))?;
+        .wrap_err_with(|| format!("failed to download {}", url))?;
 
-    anyhow::ensure!(
+    eyre::ensure!(
         output.status.success(),
         "download failed ({}): {}",
         url,
@@ -101,7 +101,7 @@ fn resolve_release(version: &str, kind: NodeKind) -> anyhow::Result<PathBuf> {
     Ok(cached)
 }
 
-fn release_asset_name(version: &str, kind: NodeKind) -> anyhow::Result<String> {
+fn release_asset_name(version: &str, kind: NodeKind) -> eyre::Result<String> {
     let (os, arch) = current_platform()?;
     let ver_num = version.strip_prefix('v').unwrap_or(version);
     let name = match kind {
@@ -122,7 +122,7 @@ fn os_arch_suffix(os: &str, arch: &str) -> String {
     }
 }
 
-fn current_platform() -> anyhow::Result<(&'static str, &'static str)> {
+fn current_platform() -> eyre::Result<(&'static str, &'static str)> {
     let os = if cfg!(target_os = "macos") {
         "macos"
     } else if cfg!(target_os = "linux") {
@@ -130,7 +130,7 @@ fn current_platform() -> anyhow::Result<(&'static str, &'static str)> {
     } else if cfg!(target_os = "windows") {
         "windows"
     } else {
-        anyhow::bail!("unsupported OS for release download")
+        eyre::bail!("unsupported OS for release download")
     };
 
     let arch = if cfg!(target_arch = "x86_64") {
@@ -138,7 +138,7 @@ fn current_platform() -> anyhow::Result<(&'static str, &'static str)> {
     } else if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else {
-        anyhow::bail!("unsupported architecture for release download")
+        eyre::bail!("unsupported architecture for release download")
     };
 
     Ok((os, arch))
@@ -154,7 +154,7 @@ fn dirs_cache() -> PathBuf {
     PathBuf::from("/tmp")
 }
 
-use anyhow::Context;
+use eyre::WrapErr;
 
 /// Configuration for a single DefraDB node.
 #[derive(Clone)]
@@ -184,14 +184,15 @@ pub struct NodeConfig {
 /// Trait for building a DefraDB command from config.
 pub trait DefraNode {
     fn kind(&self) -> NodeKind;
-    fn command(&self, config: &NodeConfig) -> Command;
+    /// Return (program, args, envs) for spawning via ManagedProcess.
+    fn command_parts(&self, config: &NodeConfig) -> (PathBuf, Vec<String>, Vec<(String, String)>);
     fn api_url(host: &str, port: u16) -> String
     where
         Self: Sized,
     {
         format!("http://{}:{}", host, port)
     }
-    fn prepare(&self) -> anyhow::Result<()> {
+    fn prepare(&self) -> eyre::Result<()> {
         Ok(())
     }
     fn binary_path(&self) -> &Path;

@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 use reqwest::Client;
 
 use crate::divergences::NodeKind;
@@ -9,8 +9,6 @@ use crate::node::{BinarySource, DefraNode, GoNode, NodeConfig, RustNode};
 use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
 use crate::ports::{allocate_node_ports, allocate_source_hub_ports};
-use crate::process::ManagedProcess;
-use crate::run::TestRunDir;
 use crate::sourcehub::SourceHubNode;
 
 use super::health::health_check_all;
@@ -181,7 +179,7 @@ impl TestClusterBuilder {
 
     pub async fn build(mut self) -> Result<TestCluster> {
         let total = self.rust_nodes + self.go_nodes;
-        anyhow::ensure!(total > 0, "must have at least one node");
+        eyre::ensure!(total > 0, "must have at least one node");
 
         let is_iroh = self.p2p_transport.as_deref() == Some("iroh");
 
@@ -224,7 +222,7 @@ impl TestClusterBuilder {
             let path = match &source {
                 BinarySource::Workspace => {
                     // Default Go behavior: PATH lookup + version check
-                    GoNode::check_available().context("Go defradb binary not available")?;
+                    GoNode::check_available().wrap_err("Go defradb binary not available")?;
                     GoNode::path_binary()
                 }
                 _ => source.resolve(NodeKind::Go)?,
@@ -241,10 +239,10 @@ impl TestClusterBuilder {
             } else if let Some(ref p) = rust_binary_path {
                 p.clone()
             } else {
-                anyhow::bail!("no binary available for identity generation");
+                eyre::bail!("no binary available for identity generation");
             };
             let id = crate::identity::generate_identity(&binary)
-                .context("auto-generating identity for NAC/SourceHub")?;
+                .wrap_err("auto-generating identity for NAC/SourceHub")?;
             self.node_identity = Some(id.private_key_hex);
         }
 
@@ -252,11 +250,14 @@ impl TestClusterBuilder {
         let mut all_ports = allocate_node_ports(total)?;
 
         // Create run directory
-        let run_dir = TestRunDir::new()?;
+        let run_dir = test_infra::TestRunDir::new(
+            &crate::workspace_root().join("target/e2e"),
+            "DEFRA_E2E_KEEP",
+        )?;
 
         // Start Source Hub if enabled
         let source_hub = if self.source_hub_enabled {
-            let sh_ports = allocate_source_hub_ports().context("allocating source hub ports")?;
+            let sh_ports = allocate_source_hub_ports().wrap_err("allocating source hub ports")?;
 
             let sh_home = run_dir.node_dir("sourcehub")?;
             let sh_log_dir = sh_home.join("logs");
@@ -272,7 +273,7 @@ impl TestClusterBuilder {
                 Duration::from_secs(60),
             )
             .await
-            .context("failed to start source hub node")?;
+            .wrap_err("failed to start source hub node")?;
 
             Some(sh_node)
         } else {
@@ -331,7 +332,7 @@ impl TestClusterBuilder {
                 self.keyring_enabled,
             )
             .await
-            .with_context(|| format!("failed to start {}", name))?;
+            .wrap_err_with(|| format!("failed to start {}", name))?;
             nodes.push(running);
         }
 
@@ -373,7 +374,7 @@ impl TestClusterBuilder {
                 false,
             )
             .await
-            .with_context(|| format!("failed to start {}", name))?;
+            .wrap_err_with(|| format!("failed to start {}", name))?;
             nodes.push(running);
         }
 
@@ -382,7 +383,7 @@ impl TestClusterBuilder {
         let urls: Vec<String> = nodes.iter().map(|n| n.api_url.clone()).collect();
         health_check_all(&client, &urls, self.health_timeout)
             .await
-            .context("health check failed")?;
+            .wrap_err("health check failed")?;
 
         // Collect effective per-node identities for test assertions
         let effective_identities: Vec<Option<String>> = (0..total)
@@ -412,7 +413,7 @@ async fn spawn_node(
     http_port: u16,
     p2p_port: u16,
     p2p_enabled: bool,
-    run_dir: &TestRunDir,
+    run_dir: &test_infra::TestRunDir,
     ready_timeout: Duration,
     named_patterns: Vec<NamedPattern>,
     acp_document_type: Option<String>,
@@ -466,19 +467,24 @@ async fn spawn_node(
         keyring_enabled,
     };
 
-    let cmd = node.command(&config);
+    let (program, args_owned, envs_owned) = node.command_parts(&config);
+    let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+    let envs: Vec<(&str, &str)> = envs_owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
 
     // Start log tracker before spawning so it catches early output
     let stdout_path = log_dir.join("stdout.log");
-    let log_tracker = LogTracker::start(stdout_path, named_patterns);
+    let log_tracker = LogTracker::start(stdout_path, patterns::DEFRA_READY_PATTERN, named_patterns);
 
-    let process = ManagedProcess::spawn(name, cmd, &log_dir)?;
+    let process = test_infra::ManagedProcess::spawn(name, &program, &args, &envs, &log_dir)?;
 
     // Wait for ready signal from logs
     log_tracker
         .wait_for_ready(ready_timeout)
         .await
-        .with_context(|| format!("{}: did not become ready", name))?;
+        .wrap_err_with(|| format!("{}: did not become ready", name))?;
 
     Ok(RunningNode {
         name: name.to_string(),

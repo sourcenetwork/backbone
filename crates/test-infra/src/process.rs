@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 
 /// A child process that is killed on drop.
 ///
@@ -33,12 +33,12 @@ impl ManagedProcess {
         log_dir: &Path,
     ) -> Result<Self> {
         fs::create_dir_all(log_dir)
-            .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
+            .wrap_err_with(|| format!("failed to create log dir {}", log_dir.display()))?;
 
         let stdout_file = File::create(log_dir.join("stdout.log"))
-            .with_context(|| format!("failed to create stdout.log in {}", log_dir.display()))?;
+            .wrap_err_with(|| format!("failed to create stdout.log in {}", log_dir.display()))?;
         let stderr_file = File::create(log_dir.join("stderr.log"))
-            .with_context(|| format!("failed to create stderr.log in {}", log_dir.display()))?;
+            .wrap_err_with(|| format!("failed to create stderr.log in {}", log_dir.display()))?;
 
         let mut cmd = Command::new(program);
         cmd.args(args);
@@ -50,7 +50,7 @@ impl ManagedProcess {
 
         let child = cmd
             .spawn()
-            .with_context(|| format!("failed to spawn {}", name))?;
+            .wrap_err_with(|| format!("failed to spawn {}", name))?;
 
         tracing::info!("{}: spawned pid={}", name, child.id());
 
@@ -90,12 +90,12 @@ impl ManagedProcess {
             .create(true)
             .append(true)
             .open(self.log_dir.join("stdout.log"))
-            .with_context(|| "failed to open stdout.log for append")?;
+            .wrap_err_with(|| "failed to open stdout.log for append")?;
         let stderr_file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.log_dir.join("stderr.log"))
-            .with_context(|| "failed to open stderr.log for append")?;
+            .wrap_err_with(|| "failed to open stderr.log for append")?;
 
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
@@ -107,7 +107,7 @@ impl ManagedProcess {
 
         let child = cmd
             .spawn()
-            .with_context(|| format!("failed to respawn {}", self.name))?;
+            .wrap_err_with(|| format!("failed to respawn {}", self.name))?;
 
         tracing::info!("{}: respawned pid={}", self.name, child.id());
         self.child = Some(child);

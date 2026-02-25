@@ -12,4 +12,4 @@ regex.workspace = true
 rand.workspace = true
 libc.workspace = true
 futures.workspace = true
-anyhow.workspace = true
+eyre.workspace = true

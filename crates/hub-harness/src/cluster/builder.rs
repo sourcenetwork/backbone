@@ -107,8 +107,7 @@ impl TestClusterBuilder {
         let base_dir = PathBuf::from(
             std::env::var("HUB_E2E_DIR").unwrap_or_else(|_| "target/e2e".to_string()),
         );
-        let run_dir =
-            TestRunDir::new(&base_dir, "HUB_E2E_KEEP").map_err(|e| eyre::eyre!("{}", e))?;
+        let run_dir = TestRunDir::new(&base_dir, "HUB_E2E_KEEP")?;
 
         let genesis_builder = self.genesis.unwrap_or_else(GenesisBuilder::devnet);
         let genesis = genesis_builder.chain_id(chain_id).build();
@@ -125,16 +124,12 @@ impl TestClusterBuilder {
         }
         let keys = key_builder.build()?;
 
-        let all_ports = test_infra::allocate_ports(n * 2).map_err(|e| eyre::eyre!("{}", e))?;
+        let all_ports = test_infra::allocate_ports(n * 2)?;
         let p2p_ports = &all_ports[0..n];
         let rpc_ports = &all_ports[n..n * 2];
 
         let node_dirs: Vec<PathBuf> = (0..n)
-            .map(|i| {
-                run_dir
-                    .node_dir(&format!("node{}", i))
-                    .map_err(|e| eyre::eyre!("{}", e))
-            })
+            .map(|i| run_dir.node_dir(&format!("node{}", i)))
             .collect::<eyre::Result<Vec<_>>>()?;
 
         keys.write_to(&node_dirs)?;
@@ -232,8 +227,7 @@ impl TestClusterBuilder {
             let envs: Vec<(&str, &str)> = vec![("RUST_LOG", &rust_log), ("NO_COLOR", "1")];
 
             let process =
-                ManagedProcess::spawn(&format!("node{}", i), &binary, &args, &envs, &log_dir)
-                    .map_err(|e| eyre::eyre!("{}", e))?;
+                ManagedProcess::spawn(&format!("node{}", i), &binary, &args, &envs, &log_dir)?;
 
             nodes.push(TestNode {
                 rpc_port: rpc_ports[i],
@@ -255,6 +249,6 @@ impl TestClusterBuilder {
 /// Find the hubd binary via BinaryResolver.
 fn find_hub_binary() -> eyre::Result<PathBuf> {
     let resolver = BinaryResolver::new("HUBD", "hubd").cargo_package("hubd");
-    let resolved = resolver.resolve().map_err(|e| eyre::eyre!("{}", e))?;
+    let resolved = resolver.resolve()?;
     Ok(resolved.path)
 }

@@ -1,13 +1,11 @@
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 
 use crate::observe::patterns::NamedPattern;
 use crate::observe::LogTracker;
 use crate::ports::SourceHubPorts;
-use crate::process::ManagedProcess;
 
 use super::genesis;
 use super::identity::source_hub_address;
@@ -17,7 +15,7 @@ const DEFAULT_CHAIN_ID: &str = "sourcehub-test";
 /// A running Source Hub single-node devnet.
 pub struct SourceHubNode {
     #[allow(dead_code)]
-    process: ManagedProcess,
+    process: test_infra::ManagedProcess,
     #[allow(dead_code)]
     log_tracker: LogTracker,
     pub lcd_url: String,
@@ -45,35 +43,40 @@ impl SourceHubNode {
             .iter()
             .map(|key| source_hub_address(key))
             .collect::<Result<_>>()
-            .context("deriving source hub addresses from identity keys")?;
+            .wrap_err("deriving source hub addresses from identity keys")?;
 
         genesis::provision_genesis(&home_dir, &chain_id, &funded_addresses, ports)
-            .context("provisioning source hub genesis")?;
+            .wrap_err("provisioning source hub genesis")?;
 
-        let mut cmd = Command::new("sourcehubd");
-        cmd.arg("start");
-        cmd.arg("--home").arg(&home_dir);
-        cmd.arg("--rpc.laddr")
-            .arg(format!("tcp://0.0.0.0:{}", ports.comet_rpc));
-        cmd.arg("--grpc.address")
-            .arg(format!("0.0.0.0:{}", ports.grpc));
-        cmd.arg("--api.address")
-            .arg(format!("tcp://0.0.0.0:{}", ports.lcd));
-        cmd.arg("--p2p.laddr")
-            .arg(format!("tcp://0.0.0.0:{}", ports.p2p));
-        cmd.arg("--minimum-gas-prices").arg("0uopen");
-        cmd.arg("--log_no_color");
+        let program = Path::new("sourcehubd");
+        let args_owned = vec![
+            "start".to_string(),
+            "--home".to_string(),
+            home_dir.display().to_string(),
+            "--rpc.laddr".to_string(),
+            format!("tcp://0.0.0.0:{}", ports.comet_rpc),
+            "--grpc.address".to_string(),
+            format!("0.0.0.0:{}", ports.grpc),
+            "--api.address".to_string(),
+            format!("tcp://0.0.0.0:{}", ports.lcd),
+            "--p2p.laddr".to_string(),
+            format!("tcp://0.0.0.0:{}", ports.p2p),
+            "--minimum-gas-prices".to_string(),
+            "0uopen".to_string(),
+            "--log_no_color".to_string(),
+        ];
+        let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
 
         let stdout_path = log_dir.join("stdout.log");
-        let log_tracker = LogTracker::start(stdout_path, sourcehub_patterns());
+        let log_tracker = LogTracker::start(stdout_path, "committed state", sourcehub_patterns());
 
-        let process = ManagedProcess::spawn("sourcehub", cmd, &log_dir)
-            .context("failed to spawn sourcehubd")?;
+        let process = test_infra::ManagedProcess::spawn("sourcehub", program, &args, &[], &log_dir)
+            .wrap_err("failed to spawn sourcehubd")?;
 
         let _first_block: String = log_tracker
             .wait_for_pattern("first_block", ready_timeout)
             .await
-            .context("sourcehubd did not produce first block")?;
+            .wrap_err("sourcehubd did not produce first block")?;
 
         let lcd_url = format!("http://127.0.0.1:{}", ports.lcd);
 
@@ -87,7 +90,7 @@ impl SourceHubNode {
                 _ => {}
             }
             if tokio::time::Instant::now() >= deadline {
-                anyhow::bail!("sourcehubd LCD health check timed out at {}", health_url);
+                eyre::bail!("sourcehubd LCD health check timed out at {}", health_url);
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }

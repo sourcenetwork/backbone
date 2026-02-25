@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use eyre::{ContextCompat, Result, WrapErr};
 
 /// A generated test identity with hex-encoded private key and DID string.
 pub struct TestIdentity {
@@ -22,9 +22,9 @@ pub fn generate_identity(binary_path: &Path) -> Result<TestIdentity> {
     let output = Command::new(binary_path)
         .args(["identity", "new"])
         .output()
-        .context("failed to run identity new")?;
+        .wrap_err("failed to run identity new")?;
 
-    anyhow::ensure!(
+    eyre::ensure!(
         output.status.success(),
         "identity new failed: {}",
         String::from_utf8_lossy(&output.stderr)
@@ -39,9 +39,9 @@ pub fn generate_secp256r1_identity(binary_path: &Path) -> Result<TestIdentity> {
     let output = Command::new(binary_path)
         .args(["identity", "new", "--type", "secp256r1"])
         .output()
-        .context("failed to run identity new --type secp256r1")?;
+        .wrap_err("failed to run identity new --type secp256r1")?;
 
-    anyhow::ensure!(
+    eyre::ensure!(
         output.status.success(),
         "identity new --type secp256r1 failed: {}",
         String::from_utf8_lossy(&output.stderr)
@@ -56,9 +56,9 @@ pub fn generate_ed25519_identity(binary_path: &Path) -> Result<TestIdentity> {
     let output = Command::new(binary_path)
         .args(["identity", "new", "--type", "ed25519"])
         .output()
-        .context("failed to run identity new --type ed25519")?;
+        .wrap_err("failed to run identity new --type ed25519")?;
 
-    anyhow::ensure!(
+    eyre::ensure!(
         output.status.success(),
         "identity new --type ed25519 failed: {}",
         String::from_utf8_lossy(&output.stderr)
@@ -74,7 +74,7 @@ fn parse_identity_output(output: &str) -> Result<TestIdentity> {
     // Try JSON first (works for both Go and Rust --output json)
     if trimmed.starts_with('{') {
         let val: serde_json::Value =
-            serde_json::from_str(trimmed).context("failed to parse identity JSON")?;
+            serde_json::from_str(trimmed).wrap_err("failed to parse identity JSON")?;
 
         // Rust JSON (new): {"PrivateKey": ..., "PublicKey": ..., "DID": ..., "KeyType": ...}
         // Rust JSON (old): {"private_key": ..., "did": ...}
@@ -83,13 +83,13 @@ fn parse_identity_output(output: &str) -> Result<TestIdentity> {
             .get("private_key")
             .or_else(|| val.get("PrivateKey"))
             .and_then(|v| v.as_str())
-            .context("missing private_key in identity JSON")?;
+            .wrap_err("missing private_key in identity JSON")?;
 
         let did = val
             .get("did")
             .or_else(|| val.get("DID"))
             .and_then(|v| v.as_str())
-            .context("missing did in identity JSON")?;
+            .wrap_err("missing did in identity JSON")?;
 
         let public_key = val
             .get("PublicKey")
@@ -124,8 +124,8 @@ fn parse_identity_output(output: &str) -> Result<TestIdentity> {
     }
 
     Ok(TestIdentity {
-        private_key_hex: private_key.context("missing 'Private key:' in identity output")?,
-        did: did.context("missing 'DID:' in identity output")?,
+        private_key_hex: private_key.wrap_err("missing 'Private key:' in identity output")?,
+        did: did.wrap_err("missing 'DID:' in identity output")?,
         public_key_hex: None,
         key_type: None,
     })

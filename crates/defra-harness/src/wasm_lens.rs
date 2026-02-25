@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 
 static BUILD_DONE: OnceLock<()> = OnceLock::new();
 
@@ -38,9 +38,9 @@ impl WasmLens {
         let target_check = Command::new("rustup")
             .args(["target", "list", "--installed"])
             .output()
-            .context("failed to run rustup")?;
+            .wrap_err("failed to run rustup")?;
         let installed = String::from_utf8_lossy(&target_check.stdout);
-        anyhow::ensure!(
+        eyre::ensure!(
             installed.contains("wasm32-unknown-unknown"),
             "wasm32-unknown-unknown target not installed. Run: rustup target add wasm32-unknown-unknown"
         );
@@ -55,11 +55,11 @@ impl WasmLens {
             ])
             .arg(self.source_dir.join("Cargo.toml"))
             .status()
-            .context("failed to run cargo build for WASM lens")?;
+            .wrap_err("failed to run cargo build for WASM lens")?;
 
-        anyhow::ensure!(status.success(), "cargo build failed for WASM lens");
+        eyre::ensure!(status.success(), "cargo build failed for WASM lens");
 
-        anyhow::ensure!(
+        eyre::ensure!(
             wasm_path.exists(),
             "WASM file not found after build at {}",
             wasm_path.display()

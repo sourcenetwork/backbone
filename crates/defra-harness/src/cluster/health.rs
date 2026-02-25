@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::Result;
+use eyre::Result;
 use reqwest::Client;
 
 /// Poll a node's health endpoint until it returns 200.
@@ -15,7 +15,7 @@ pub async fn health_check(client: &Client, url: &str, timeout: Duration) -> Resu
         }
 
         if tokio::time::Instant::now() >= deadline {
-            return Err(anyhow::anyhow!("health check timed out for {}", health_url));
+            return Err(eyre::eyre!("health check timed out for {}", health_url));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

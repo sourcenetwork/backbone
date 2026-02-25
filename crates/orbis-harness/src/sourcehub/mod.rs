@@ -19,7 +19,7 @@ pub struct SourceHubPorts {
 
 /// Allocate ports for a single SourceHub instance.
 pub fn allocate_source_hub_ports() -> eyre::Result<SourceHubPorts> {
-    let ports = test_infra::allocate_ports(4).map_err(|e| eyre::eyre!("{:#}", e))?;
+    let ports = test_infra::allocate_ports(4)?;
     Ok(SourceHubPorts {
         lcd: ports[0],
         comet_rpc: ports[1],
@@ -33,8 +33,6 @@ pub fn allocate_source_hub_ports() -> eyre::Result<SourceHubPorts> {
 /// Uses `BinaryResolver` with the `SOURCEHUB` prefix. Set `SOURCEHUB_BINARY`
 /// to an explicit path, or ensure `sourcehubd` is on PATH.
 pub fn resolve_binary() -> eyre::Result<std::path::PathBuf> {
-    let resolved = test_infra::BinaryResolver::new("SOURCEHUB", "sourcehubd")
-        .resolve()
-        .map_err(|e| eyre::eyre!("{:#}", e))?;
+    let resolved = test_infra::BinaryResolver::new("SOURCEHUB", "sourcehubd").resolve()?;
     Ok(resolved.path)
 }

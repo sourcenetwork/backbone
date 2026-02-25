@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 use regex::Regex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast;
@@ -81,12 +81,12 @@ impl LogTracker {
                 match rx.recv().await {
                     Ok(LogEvent::Ready) => return Ok(()),
                     Ok(LogEvent::Error(e)) => {
-                        return Err(anyhow::anyhow!("node error: {}", e));
+                        return Err(eyre::eyre!("node error: {}", e));
                     }
                     Ok(LogEvent::Pattern { .. }) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => {
-                        return Err(anyhow::anyhow!("log tracker closed"));
+                        return Err(eyre::eyre!("log tracker closed"));
                     }
                 }
             }
@@ -95,7 +95,7 @@ impl LogTracker {
 
         match result {
             Ok(inner) => inner,
-            Err(_) => Err(anyhow::anyhow!("timed out waiting for node ready")),
+            Err(_) => Err(eyre::eyre!("timed out waiting for node ready")),
         }
     }
 
@@ -132,7 +132,7 @@ impl LogTracker {
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        return Err(anyhow::anyhow!("log tracker closed"));
+                        return Err(eyre::eyre!("log tracker closed"));
                     }
                 }
             }
@@ -141,7 +141,7 @@ impl LogTracker {
 
         match result {
             Ok(inner) => inner,
-            Err(_) => Err(anyhow::anyhow!("timed out waiting for pattern '{}'", name)),
+            Err(_) => Err(eyre::eyre!("timed out waiting for pattern '{}'", name)),
         }
     }
 }
@@ -169,7 +169,7 @@ async fn tail_loop(
 
     let file = tokio::fs::File::open(&log_path)
         .await
-        .with_context(|| format!("failed to open {}", log_path.display()))?;
+        .wrap_err_with(|| format!("failed to open {}", log_path.display()))?;
 
     let mut reader = BufReader::new(file);
     let mut line = String::new();
@@ -202,7 +202,7 @@ async fn tail_loop(
                 }
             }
             Err(e) => {
-                return Err(anyhow::anyhow!("error reading log: {}", e));
+                return Err(eyre::eyre!("error reading log: {}", e));
             }
         }
     }

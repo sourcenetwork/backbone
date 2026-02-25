@@ -108,8 +108,7 @@ impl DefraDbNode {
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
 
-        let process = test_infra::ManagedProcess::spawn("defra", binary, &args, &envs, &log_dir)
-            .map_err(|e| eyre::eyre!("{:#}", e))?;
+        let process = test_infra::ManagedProcess::spawn("defra", binary, &args, &envs, &log_dir)?;
 
         let http_url = format!("http://{}", http_addr);
 

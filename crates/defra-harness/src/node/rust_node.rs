@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 
 use super::{DefraNode, NodeConfig};
 use crate::divergences::{self, NodeKind};
 use crate::workspace_root;
+
+type Parts = (PathBuf, Vec<String>, Vec<(String, String)>);
 
 /// A Rust DefraDB node backed by the `defra` binary.
 pub struct RustNode {
@@ -38,9 +40,9 @@ impl RustNode {
             .args(["build", "-p", "cli"])
             .current_dir(workspace_root())
             .status()
-            .context("failed to run cargo build")?;
+            .wrap_err("failed to run cargo build")?;
 
-        anyhow::ensure!(status.success(), "cargo build failed with {}", status);
+        eyre::ensure!(status.success(), "cargo build failed with {}", status);
         Ok(())
     }
 
@@ -51,9 +53,9 @@ impl RustNode {
             .args(["build", "-p", "cli", "--features", &features_str])
             .current_dir(workspace_root())
             .status()
-            .context("failed to run cargo build with features")?;
+            .wrap_err("failed to run cargo build with features")?;
 
-        anyhow::ensure!(status.success(), "cargo build failed with {}", status);
+        eyre::ensure!(status.success(), "cargo build failed with {}", status);
         Ok(())
     }
 
@@ -64,16 +66,16 @@ impl RustNode {
         let output = Command::new(&binary)
             .args(["version", "--format", "json"])
             .output()
-            .context("defra binary not found — run `cargo build -p cli` first")?;
+            .wrap_err("defra binary not found — run `cargo build -p cli` first")?;
 
-        anyhow::ensure!(
+        eyre::ensure!(
             output.status.success(),
             "defra version failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let _json: serde_json::Value =
-            serde_json::from_slice(&output.stdout).context("failed to parse defra version JSON")?;
+        let _json: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .wrap_err("failed to parse defra version JSON")?;
 
         Ok(())
     }
@@ -84,82 +86,99 @@ impl DefraNode for RustNode {
         NodeKind::Rust
     }
 
-    fn command(&self, config: &NodeConfig) -> Command {
-        let mut cmd = Command::new(&self.binary_path);
+    fn command_parts(&self, config: &NodeConfig) -> Parts {
+        let mut args = vec![
+            "--rootdir".to_string(),
+            config.rootdir.display().to_string(),
+            "--url".to_string(),
+            config.http_addr.clone(),
+            "--no-log-color".to_string(),
+            "--log-output".to_string(),
+            "stdout".to_string(),
+        ];
 
-        cmd.arg("--rootdir").arg(&config.rootdir);
-        cmd.arg("--url").arg(&config.http_addr);
-        cmd.arg("--no-log-color");
-        cmd.arg("--log-output").arg("stdout");
+        let mut envs: Vec<(String, String)> = Vec::new();
 
         if config.keyring_enabled {
-            cmd.env("DEFRA_KEYRING_SECRET", "integration-test-secret");
+            envs.push((
+                "DEFRA_KEYRING_SECRET".to_string(),
+                "integration-test-secret".to_string(),
+            ));
         } else {
-            cmd.arg("--no-keyring");
+            args.push("--no-keyring".to_string());
         }
 
-        cmd.arg("start");
-        cmd.arg("--store")
-            .arg(config.store.as_deref().unwrap_or("memory"));
-        cmd.arg("--no-telemetry");
+        args.push("start".to_string());
+        args.push("--store".to_string());
+        args.push(config.store.as_deref().unwrap_or("memory").to_string());
+        args.push("--no-telemetry".to_string());
 
         if !config.encryption_enabled {
-            cmd.arg("--no-encryption");
-            cmd.arg("--no-searchable-encryption");
+            args.push("--no-encryption".to_string());
+            args.push("--no-searchable-encryption".to_string());
         }
         if !config.signing_enabled {
-            cmd.arg("--no-signing");
+            args.push("--no-signing".to_string());
         }
 
         if config.p2p_enabled {
             if let Some(ref addr) = config.p2p_addr {
-                cmd.arg("--p2paddr").arg(addr);
+                args.push("--p2paddr".to_string());
+                args.push(addr.clone());
             }
             for peer in &config.peers {
-                cmd.arg("--peers").arg(peer);
+                args.push("--peers".to_string());
+                args.push(peer.clone());
             }
         } else {
-            cmd.arg("--no-p2p");
+            args.push("--no-p2p".to_string());
         }
 
         if let Some(ref identity) = config.identity {
-            cmd.arg("--identity").arg(identity);
+            args.push("--identity".to_string());
+            args.push(identity.clone());
         }
 
         if let Some(ref acp_type) = config.acp_document_type {
-            cmd.arg("--document-acp-type").arg(acp_type);
+            args.push("--document-acp-type".to_string());
+            args.push(acp_type.clone());
         }
 
         if config.nac_enabled {
-            cmd.arg("--node-acp-enable");
+            args.push("--node-acp-enable".to_string());
         }
 
         // DIVERGENCE: Only Rust supports --source-hub-* flags
         if divergences::supports_source_hub_flags(NodeKind::Rust) {
             if let Some(ref addr) = config.source_hub_address {
-                cmd.arg("--source-hub-address").arg(addr);
+                args.push("--source-hub-address".to_string());
+                args.push(addr.clone());
             }
             if let Some(ref addr) = config.source_hub_comet_address {
-                cmd.arg("--source-hub-comet-address").arg(addr);
+                args.push("--source-hub-comet-address".to_string());
+                args.push(addr.clone());
             }
             if let Some(ref chain_id) = config.source_hub_chain_id {
-                cmd.arg("--source-hub-chain-id").arg(chain_id);
+                args.push("--source-hub-chain-id".to_string());
+                args.push(chain_id.clone());
             }
         }
 
         if let Some(ref transport) = config.p2p_transport {
-            cmd.arg("--p2p-transport").arg(transport);
+            args.push("--p2p-transport".to_string());
+            args.push(transport.clone());
         }
 
         if config.development {
-            cmd.arg("--development");
+            args.push("--development".to_string());
         }
 
         if let Some(timeout) = config.query_timeout {
-            cmd.arg("--query-timeout").arg(timeout.to_string());
+            args.push("--query-timeout".to_string());
+            args.push(timeout.to_string());
         }
 
-        cmd
+        (self.binary_path.clone(), args, envs)
     }
 
     fn binary_path(&self) -> &Path {

@@ -1,6 +1,6 @@
 use std::net::TcpListener;
 
-use anyhow::{Context, Result};
+use eyre::{Result, WrapErr};
 
 /// Allocate `n` unique ephemeral ports using bind-hold-release.
 ///
@@ -10,7 +10,7 @@ pub fn allocate_ports(n: usize) -> Result<Vec<u16>> {
     let listeners: Vec<TcpListener> = (0..n)
         .map(|i| {
             TcpListener::bind("127.0.0.1:0")
-                .with_context(|| format!("failed to bind ephemeral port {}/{}", i + 1, n))
+                .wrap_err_with(|| format!("failed to bind ephemeral port {}/{}", i + 1, n))
         })
         .collect::<Result<_>>()?;
 
@@ -18,7 +18,7 @@ pub fn allocate_ports(n: usize) -> Result<Vec<u16>> {
         .iter()
         .map(|l| l.local_addr().map(|a| a.port()))
         .collect::<std::io::Result<Vec<u16>>>()
-        .context("failed to get local address")?;
+        .wrap_err("failed to get local address")?;
 
     // All listeners drop here, releasing ports simultaneously
     Ok(ports)

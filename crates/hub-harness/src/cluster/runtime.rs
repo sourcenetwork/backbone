@@ -98,10 +98,7 @@ impl TestCluster {
     }
 
     pub fn restart_node(&mut self, index: usize) -> eyre::Result<()> {
-        self.nodes[index]
-            .process
-            .respawn()
-            .map_err(|e| eyre::eyre!("{}", e))
+        self.nodes[index].process.respawn()
     }
 
     /// Create an observability handle for this cluster.

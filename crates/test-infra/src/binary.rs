@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use eyre::{ContextCompat, Result, WrapErr};
 
 /// How a binary was resolved.
 #[derive(Debug, Clone)]
@@ -102,7 +102,7 @@ impl BinaryResolver {
         // 1. Explicit path override
         if let Some(path) = self.env("BINARY") {
             let path = PathBuf::from(&path);
-            anyhow::ensure!(
+            eyre::ensure!(
                 path.exists(),
                 "{} does not exist: {}",
                 self.prefix,
@@ -121,7 +121,7 @@ impl BinaryResolver {
             let pkg = self
                 .env("CARGO_PACKAGE")
                 .or_else(|| self.default_cargo_package.clone())
-                .context(format!(
+                .wrap_err(format!(
                     "{}_CARGO_PACKAGE not set and no default configured",
                     self.prefix
                 ))?;
@@ -139,7 +139,7 @@ impl BinaryResolver {
             return self.build_from_git(&repo, &git_ref);
         }
 
-        anyhow::bail!(
+        eyre::bail!(
             "Cannot resolve binary '{}'. Set {}_BINARY, {}_WORKSPACE, or ensure '{}' is on PATH.",
             self.binary_name,
             self.prefix,
@@ -160,15 +160,15 @@ impl BinaryResolver {
             .args(["build", "-p", package])
             .current_dir(workspace)
             .status()
-            .context(format!(
+            .wrap_err(format!(
                 "failed to run cargo build in {}",
                 workspace.display()
             ))?;
 
-        anyhow::ensure!(status.success(), "cargo build -p {} failed", package);
+        eyre::ensure!(status.success(), "cargo build -p {} failed", package);
 
         let binary_path = workspace.join("target/debug").join(&self.binary_name);
-        anyhow::ensure!(
+        eyre::ensure!(
             binary_path.exists(),
             "Built binary not found at {}",
             binary_path.display()
@@ -189,9 +189,9 @@ impl BinaryResolver {
         let output = Command::new("which")
             .arg(&self.binary_name)
             .output()
-            .context(format!("'{}' not found on PATH", self.binary_name))?;
+            .wrap_err(format!("'{}' not found on PATH", self.binary_name))?;
 
-        anyhow::ensure!(
+        eyre::ensure!(
             output.status.success(),
             "'{}' not found on PATH",
             self.binary_name
@@ -213,7 +213,7 @@ impl BinaryResolver {
                             self.binary_name, self.prefix
                         );
                     } else {
-                        anyhow::bail!(
+                        eyre::bail!(
                             "Version mismatch for {}: expected prefix '{}', got '{}'. \
                              Set {}_SKIP_VERSION_CHECK=1 to bypass.",
                             self.binary_name,
@@ -250,9 +250,9 @@ impl BinaryResolver {
                 .args(["clone", "--depth", "1", "--branch", git_ref, repo])
                 .arg(&build_dir)
                 .status()
-                .context("git clone failed")?;
+                .wrap_err("git clone failed")?;
 
-            anyhow::ensure!(
+            eyre::ensure!(
                 status.success(),
                 "git clone failed for {} @ {}",
                 repo,
@@ -263,7 +263,7 @@ impl BinaryResolver {
         let pkg = self
             .env("CARGO_PACKAGE")
             .or_else(|| self.default_cargo_package.clone())
-            .context(format!(
+            .wrap_err(format!(
                 "{}_CARGO_PACKAGE not set for source build",
                 self.prefix
             ))?;
@@ -272,12 +272,12 @@ impl BinaryResolver {
             .args(["build", "-p", &pkg])
             .current_dir(&build_dir)
             .status()
-            .context("cargo build from source failed")?;
+            .wrap_err("cargo build from source failed")?;
 
-        anyhow::ensure!(status.success(), "cargo build from source failed");
+        eyre::ensure!(status.success(), "cargo build from source failed");
 
         let binary_path = build_dir.join("target/debug").join(&self.binary_name);
-        anyhow::ensure!(binary_path.exists(), "Binary not found after source build");
+        eyre::ensure!(binary_path.exists(), "Binary not found after source build");
 
         let version = self.extract_version(&binary_path);
 

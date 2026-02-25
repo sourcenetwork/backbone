@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use eyre::{ContextCompat, Result, WrapErr};
 use serde_json::Value;
 
 use crate::divergences::{self, NodeKind};
@@ -40,7 +40,7 @@ impl DefraClient {
             .arg(&self.url)
             .args(args)
             .output()
-            .with_context(|| {
+            .wrap_err_with(|| {
                 format!(
                     "failed to exec: {} --url {} {}",
                     self.binary_path.display(),
@@ -54,7 +54,7 @@ impl DefraClient {
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            Err(anyhow::anyhow!(
+            Err(eyre::eyre!(
                 "command failed (exit {}): stderr={}, stdout={}",
                 output.status,
                 stderr.trim(),
@@ -83,7 +83,7 @@ impl DefraClient {
     fn parse_query_output(&self, out: &str) -> Result<Value> {
         // Go CLI prefixes output with "------ Request Results ------\n"
         let json_str = out.find('{').map(|i| &out[i..]).unwrap_or(out);
-        let val: Value = serde_json::from_str(json_str).context("failed to parse query output")?;
+        let val: Value = serde_json::from_str(json_str).wrap_err("failed to parse query output")?;
         if let Some(data) = val.get("data") {
             Ok(data.clone())
         } else {
@@ -96,7 +96,7 @@ impl DefraClient {
     /// Deploy a schema via `client schema add '<sdl>'`.
     pub fn schema_add(&self, sdl: &str) -> Result<Value> {
         let out = self.exec(&["client", "schema", "add", sdl])?;
-        serde_json::from_str(&out).context("failed to parse schema_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse schema_add output")
     }
 
     /// Execute a GraphQL query/mutation via `client query '<gql>'`.
@@ -114,13 +114,13 @@ impl DefraClient {
         if trimmed.is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_str(trimmed).context("failed to parse collection_create output")
+        serde_json::from_str(trimmed).wrap_err("failed to parse collection_create output")
     }
 
     /// Get a document via `client collection get --name <n> <id>`.
     pub fn collection_get(&self, name: &str, doc_id: &str) -> Result<Value> {
         let out = self.exec(&["client", "collection", "get", "--name", name, doc_id])?;
-        serde_json::from_str(&out).context("failed to parse collection_get output")
+        serde_json::from_str(&out).wrap_err("failed to parse collection_get output")
     }
 
     /// Delete a document via `client collection delete --name <n> --docID <id>`.
@@ -189,7 +189,7 @@ impl DefraClient {
     /// Describe a collection via `client collection describe --name <n>`.
     pub fn collection_describe(&self, name: &str) -> Result<Value> {
         let out = self.exec(&["client", "collection", "describe", "--name", name])?;
-        serde_json::from_str(&out).context("failed to parse collection_describe output")
+        serde_json::from_str(&out).wrap_err("failed to parse collection_describe output")
     }
 
     // ---- Schema operations ----
@@ -217,7 +217,7 @@ impl DefraClient {
         let fields_csv = fields.join(",");
         let use_flag = !divergences::index_uses_positional_args(self.kind);
         let out = self.build_index_create_args(collection, &fields_csv, name, unique, use_flag)?;
-        serde_json::from_str(&out).context("failed to parse index_create output")
+        serde_json::from_str(&out).wrap_err("failed to parse index_create output")
     }
 
     fn build_index_create_args(
@@ -258,7 +258,7 @@ impl DefraClient {
         } else {
             self.exec(&["client", "index", "list"])?
         };
-        serde_json::from_str(&out).context("failed to parse index_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse index_list output")
     }
 
     /// Delete an index.
@@ -314,10 +314,10 @@ impl DefraClient {
     fn parse_tx_id(output: &str) -> Result<String> {
         let trimmed = output.trim();
         let val: Value =
-            serde_json::from_str(trimmed).context("failed to parse tx create output as JSON")?;
+            serde_json::from_str(trimmed).wrap_err("failed to parse tx create output as JSON")?;
         let id = val
             .get("id")
-            .context("tx create output missing 'id' field")?;
+            .wrap_err("tx create output missing 'id' field")?;
         Ok(id.to_string())
     }
 
@@ -342,7 +342,7 @@ impl DefraClient {
     /// Get P2P node info via `client p2p info`.
     pub fn p2p_info(&self) -> Result<Value> {
         let out = self.exec(&["client", "p2p", "info"])?;
-        serde_json::from_str(&out).context("failed to parse p2p_info output")
+        serde_json::from_str(&out).wrap_err("failed to parse p2p_info output")
     }
 
     /// Connect to peers via `client p2p connect <addr>...`.
@@ -367,13 +367,13 @@ impl DefraClient {
     /// List active peers via `client p2p active-peers`.
     pub fn p2p_active_peers(&self) -> Result<Value> {
         let out = self.exec(&["client", "p2p", "active-peers"])?;
-        serde_json::from_str(&out).context("failed to parse p2p_active_peers output")
+        serde_json::from_str(&out).wrap_err("failed to parse p2p_active_peers output")
     }
 
     /// List P2P collections via `client p2p collection list`.
     pub fn p2p_collection_list(&self) -> Result<Value> {
         let out = self.exec(&["client", "p2p", "collection", "list"])?;
-        serde_json::from_str(&out).context("failed to parse p2p_collection_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse p2p_collection_list output")
     }
 
     /// Delete P2P collections via `client p2p collection delete <cols>`.
@@ -385,7 +385,7 @@ impl DefraClient {
     /// List replicators via `client p2p replicator list`.
     pub fn p2p_replicator_list(&self) -> Result<Value> {
         let out = self.exec(&["client", "p2p", "replicator", "list"])?;
-        serde_json::from_str(&out).context("failed to parse p2p_replicator_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse p2p_replicator_list output")
     }
 
     /// Delete a replicator via `client p2p replicator delete -c <cols> [peerID]`.
@@ -421,7 +421,7 @@ impl DefraClient {
     /// List P2P document subscriptions.
     pub fn p2p_document_list(&self) -> Result<Value> {
         let out = self.exec(&["client", "p2p", "document", "list"])?;
-        serde_json::from_str(&out).context("failed to parse p2p_document_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse p2p_document_list output")
     }
 
     /// Sync documents via `client p2p document sync <collection> <docIDs...>`.
@@ -460,7 +460,7 @@ impl DefraClient {
     /// Deploy a schema with identity.
     pub fn schema_add_with_identity(&self, sdl: &str, hex_key: &str) -> Result<Value> {
         let out = self.exec(&["client", "-i", hex_key, "schema", "add", sdl])?;
-        serde_json::from_str(&out).context("failed to parse schema_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse schema_add output")
     }
 
     // ---- ACP Document operations ----
@@ -470,7 +470,7 @@ impl DefraClient {
         let out = self.exec(&[
             "client", "-i", hex_key, "acp", "document", "policy", "add", policy,
         ])?;
-        serde_json::from_str(&out).context("failed to parse acp_policy_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse acp_policy_add output")
     }
 
     /// Add an ACP document relationship.
@@ -499,7 +499,7 @@ impl DefraClient {
             "-a",
             actor_did,
         ])?;
-        serde_json::from_str(&out).context("failed to parse acp_relationship_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse acp_relationship_add output")
     }
 
     /// Delete an ACP document relationship.
@@ -528,7 +528,7 @@ impl DefraClient {
             "-a",
             actor_did,
         ])?;
-        serde_json::from_str(&out).context("failed to parse acp_relationship_delete output")
+        serde_json::from_str(&out).wrap_err("failed to parse acp_relationship_delete output")
     }
 
     // ---- ACP Node (NAC) operations ----
@@ -553,7 +553,7 @@ impl DefraClient {
             "-a",
             actor_did,
         ])?;
-        serde_json::from_str(&out).context("failed to parse acp_node_relationship_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse acp_node_relationship_add output")
     }
 
     /// Delete an ACP node relationship.
@@ -576,25 +576,25 @@ impl DefraClient {
             "-a",
             actor_did,
         ])?;
-        serde_json::from_str(&out).context("failed to parse acp_node_relationship_delete output")
+        serde_json::from_str(&out).wrap_err("failed to parse acp_node_relationship_delete output")
     }
 
     /// Get ACP node status.
     pub fn acp_node_status(&self) -> Result<Value> {
         let out = self.exec(&["client", "acp", "node", "status"])?;
-        serde_json::from_str(&out).context("failed to parse acp_node_status output")
+        serde_json::from_str(&out).wrap_err("failed to parse acp_node_status output")
     }
 
     /// Disable ACP node.
     pub fn acp_node_disable(&self) -> Result<Value> {
         let out = self.exec(&["client", "acp", "node", "disable"])?;
-        serde_json::from_str(&out).context("failed to parse acp_node_disable output")
+        serde_json::from_str(&out).wrap_err("failed to parse acp_node_disable output")
     }
 
     /// Re-enable ACP node.
     pub fn acp_node_reenable(&self) -> Result<Value> {
         let out = self.exec(&["client", "acp", "node", "re-enable"])?;
-        serde_json::from_str(&out).context("failed to parse acp_node_reenable output")
+        serde_json::from_str(&out).wrap_err("failed to parse acp_node_reenable output")
     }
 
     // ---- Encrypted Index operations ----
@@ -618,7 +618,7 @@ impl DefraClient {
                 field,
             ])?
         };
-        serde_json::from_str(&out).context("failed to parse encrypted_index_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse encrypted_index_add output")
     }
 
     /// Delete an encrypted index.
@@ -655,7 +655,7 @@ impl DefraClient {
                 collection,
             ])?
         };
-        serde_json::from_str(&out).context("failed to parse encrypted_index_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse encrypted_index_list output")
     }
 
     // ---- Node/Block operations ----
@@ -687,19 +687,19 @@ impl DefraClient {
     /// Add a lens migration.
     pub fn lens_add(&self, config: &str) -> Result<Value> {
         let out = self.exec(&["client", "lens", "add", config])?;
-        serde_json::from_str(&out).context("failed to parse lens_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse lens_add output")
     }
 
     /// List lens migrations.
     pub fn lens_list(&self) -> Result<Value> {
         let out = self.exec(&["client", "lens", "list"])?;
-        serde_json::from_str(&out).context("failed to parse lens_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse lens_list output")
     }
 
     /// Set a lens migration between schema versions.
     pub fn lens_set(&self, src: &str, dst: &str, config: &str) -> Result<Value> {
         let out = self.exec(&["client", "lens", "set", src, dst, config])?;
-        serde_json::from_str(&out).context("failed to parse lens_set output")
+        serde_json::from_str(&out).wrap_err("failed to parse lens_set output")
     }
 
     /// Reload lens migrations.
@@ -756,7 +756,7 @@ impl DefraClient {
                     .arg("-f")
                     .arg(&url)
                     .output()
-                    .with_context(|| format!("failed to curl {}", url))?;
+                    .wrap_err_with(|| format!("failed to curl {}", url))?;
 
                 if output.status.success() {
                     let body = String::from_utf8_lossy(&output.stdout);
@@ -766,11 +766,11 @@ impl DefraClient {
                 }
                 // Fall back to CLI
                 let out = self.exec(&["client", "collection", "describe", "--name", name])?;
-                serde_json::from_str(&out).context("failed to parse collection describe output")
+                serde_json::from_str(&out).wrap_err("failed to parse collection describe output")
             }
             NodeKind::Go => {
                 let out = self.exec(&["client", "collection", "describe", "--name", name])?;
-                serde_json::from_str(&out).context("failed to parse collection describe output")
+                serde_json::from_str(&out).wrap_err("failed to parse collection describe output")
             }
         }
     }
@@ -786,7 +786,7 @@ impl DefraClient {
             &["client", "collection", "describe", "--name", name],
         )?;
         let val: Value =
-            serde_json::from_str(&out).context("failed to parse collection describe output")?;
+            serde_json::from_str(&out).wrap_err("failed to parse collection describe output")?;
         if val.get("CollectionID").is_none() && val.get("VersionID").is_none() {
             if let Some(id) = val.get("ID").and_then(|v| v.as_str()) {
                 let mut out_val = val.clone();
@@ -809,7 +809,7 @@ impl DefraClient {
     /// Add a view.
     pub fn view_add(&self, gql_query: &str, sdl: &str) -> Result<Value> {
         let out = self.exec(&["client", "view", "add", "--query", gql_query, "--sdl", sdl])?;
-        serde_json::from_str(&out).context("failed to parse view_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse view_add output")
     }
 
     /// Add a view with a lens transform CID.
@@ -825,7 +825,7 @@ impl DefraClient {
             "--lens-cid",
             lens_cid,
         ])?;
-        serde_json::from_str(&out).context("failed to parse view_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse view_add output")
     }
 
     /// Refresh views.
@@ -835,7 +835,7 @@ impl DefraClient {
         } else {
             self.exec(&["client", "view", "refresh"])?
         };
-        serde_json::from_str(&out).context("failed to parse view_refresh output")
+        serde_json::from_str(&out).wrap_err("failed to parse view_refresh output")
     }
 
     // ---- Dump operations ----
@@ -843,19 +843,19 @@ impl DefraClient {
     /// Dump database contents.
     pub fn dump(&self) -> Result<Value> {
         let out = self.exec(&["client", "dump"])?;
-        serde_json::from_str(&out).context("failed to parse dump output")
+        serde_json::from_str(&out).wrap_err("failed to parse dump output")
     }
 
     // ---- Identity-aware variants (NAC testing) ----
 
     pub fn p2p_info_with_identity(&self, hex_key: &str) -> Result<Value> {
         let out = self.exec_with_identity(hex_key, &["client", "p2p", "info"])?;
-        serde_json::from_str(&out).context("failed to parse p2p_info output")
+        serde_json::from_str(&out).wrap_err("failed to parse p2p_info output")
     }
 
     pub fn p2p_active_peers_with_identity(&self, hex_key: &str) -> Result<Value> {
         let out = self.exec_with_identity(hex_key, &["client", "p2p", "active-peers"])?;
-        serde_json::from_str(&out).context("failed to parse p2p_active_peers output")
+        serde_json::from_str(&out).wrap_err("failed to parse p2p_active_peers output")
     }
 
     pub fn encrypted_index_add_with_identity(
@@ -883,7 +883,7 @@ impl DefraClient {
                 ],
             )?
         };
-        serde_json::from_str(&out).context("failed to parse encrypted_index_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse encrypted_index_add output")
     }
 
     pub fn encrypted_index_list_with_identity(
@@ -905,7 +905,7 @@ impl DefraClient {
                 ],
             )?
         };
-        serde_json::from_str(&out).context("failed to parse encrypted_index_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse encrypted_index_list output")
     }
 
     pub fn encrypted_index_delete_with_identity(
@@ -937,12 +937,12 @@ impl DefraClient {
 
     pub fn lens_add_with_identity(&self, config: &str, hex_key: &str) -> Result<Value> {
         let out = self.exec_with_identity(hex_key, &["client", "lens", "add", config])?;
-        serde_json::from_str(&out).context("failed to parse lens_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse lens_add output")
     }
 
     pub fn lens_list_with_identity(&self, hex_key: &str) -> Result<Value> {
         let out = self.exec_with_identity(hex_key, &["client", "lens", "list"])?;
-        serde_json::from_str(&out).context("failed to parse lens_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse lens_list output")
     }
 
     pub fn lens_set_with_identity(
@@ -953,7 +953,7 @@ impl DefraClient {
         hex_key: &str,
     ) -> Result<Value> {
         let out = self.exec_with_identity(hex_key, &["client", "lens", "set", src, dst, config])?;
-        serde_json::from_str(&out).context("failed to parse lens_set output")
+        serde_json::from_str(&out).wrap_err("failed to parse lens_set output")
     }
 
     pub fn view_add_with_identity(
@@ -966,7 +966,7 @@ impl DefraClient {
             hex_key,
             &["client", "view", "add", "--query", gql_query, "--sdl", sdl],
         )?;
-        serde_json::from_str(&out).context("failed to parse view_add output")
+        serde_json::from_str(&out).wrap_err("failed to parse view_add output")
     }
 
     pub fn view_refresh_with_identity(&self, name: Option<&str>, hex_key: &str) -> Result<Value> {
@@ -979,7 +979,7 @@ impl DefraClient {
         if trimmed.is_empty() {
             return Ok(serde_json::json!({}));
         }
-        serde_json::from_str(trimmed).context("failed to parse view_refresh output")
+        serde_json::from_str(trimmed).wrap_err("failed to parse view_refresh output")
     }
 
     pub fn p2p_document_sync_with_identity(
@@ -1032,7 +1032,7 @@ impl DefraClient {
             hex_key,
             &["client", "collection", "describe", "--name", name],
         )?;
-        serde_json::from_str(&out).context("failed to parse collection_describe output")
+        serde_json::from_str(&out).wrap_err("failed to parse collection_describe output")
     }
 
     pub fn collection_create_with_identity(
@@ -1049,7 +1049,7 @@ impl DefraClient {
         if trimmed.is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_str(trimmed).context("failed to parse collection_create output")
+        serde_json::from_str(trimmed).wrap_err("failed to parse collection_create output")
     }
 
     pub fn collection_delete_with_identity(
@@ -1133,7 +1133,7 @@ impl DefraClient {
             args.push("--unique");
         }
         let out = self.exec_with_identity(hex_key, &args)?;
-        serde_json::from_str(&out).context("failed to parse index_create output")
+        serde_json::from_str(&out).wrap_err("failed to parse index_create output")
     }
 
     pub fn index_list_with_identity(
@@ -1150,7 +1150,7 @@ impl DefraClient {
         } else {
             self.exec_with_identity(hex_key, &["client", "index", "list"])?
         };
-        serde_json::from_str(&out).context("failed to parse index_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse index_list output")
     }
 
     pub fn index_delete_with_identity(
@@ -1196,7 +1196,7 @@ impl DefraClient {
 
     pub fn p2p_collection_list_with_identity(&self, hex_key: &str) -> Result<Value> {
         let out = self.exec_with_identity(hex_key, &["client", "p2p", "collection", "list"])?;
-        serde_json::from_str(&out).context("failed to parse p2p_collection_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse p2p_collection_list output")
     }
 
     pub fn p2p_collection_delete_with_identity(
@@ -1220,7 +1220,7 @@ impl DefraClient {
 
     pub fn p2p_document_list_with_identity(&self, hex_key: &str) -> Result<Value> {
         let out = self.exec_with_identity(hex_key, &["client", "p2p", "document", "list"])?;
-        serde_json::from_str(&out).context("failed to parse p2p_document_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse p2p_document_list output")
     }
 
     pub fn p2p_document_delete_with_identity(
@@ -1248,7 +1248,7 @@ impl DefraClient {
 
     pub fn p2p_replicator_list_with_identity(&self, hex_key: &str) -> Result<Value> {
         let out = self.exec_with_identity(hex_key, &["client", "p2p", "replicator", "list"])?;
-        serde_json::from_str(&out).context("failed to parse p2p_replicator_list output")
+        serde_json::from_str(&out).wrap_err("failed to parse p2p_replicator_list output")
     }
 
     pub fn p2p_replicator_delete_with_identity(

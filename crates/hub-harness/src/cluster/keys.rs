@@ -1,24 +1,17 @@
 //! Key management for e2e test clusters.
 //!
-//! Generates ed25519 identity keys and deterministic BLS12-381 threshold
+//! Generates ed25519 identity keys and deterministic ed25519 multisig signing
 //! schemes using commonware-cryptography directly (no hub-runner dependency).
 
 use std::{collections::BTreeMap, path::Path};
 
 use commonware_codec::Encode;
-use commonware_consensus::simplex::scheme::bls12381_threshold::vrf;
-use commonware_cryptography::{
-    bls12381::{
-        dkg,
-        primitives::{sharing::Mode, variant::MinSig},
-    },
-    ed25519, Signer as _,
-};
-use commonware_utils::{ordered::Set, N3f1, TryCollect as _};
-use rand::{rngs::StdRng, SeedableRng as _};
+use commonware_consensus::simplex::scheme::ed25519::Scheme;
+use commonware_cryptography::{ed25519, Signer as _};
+use commonware_utils::{ordered::Set, TryCollect as _};
 
-/// BLS12-381 threshold signature scheme used for consensus.
-pub type ThresholdScheme = vrf::Scheme<ed25519::PublicKey, MinSig>;
+/// Ed25519 multisig signing scheme used for consensus.
+pub type Ed25519Scheme = Scheme;
 
 const SIMPLEX_NAMESPACE: &[u8] = b"_COMMONWARE_HUB_SIMPLEX";
 
@@ -28,7 +21,7 @@ pub struct KeySet {
     identity_keys: Vec<ed25519::PrivateKey>,
     participants: Vec<ed25519::PublicKey>,
     threshold: u32,
-    schemes: Vec<ThresholdScheme>,
+    schemes: Vec<Ed25519Scheme>,
     seed: u64,
 }
 
@@ -57,15 +50,8 @@ impl KeySet {
         &self.participants
     }
 
-    pub fn scheme(&self, index: usize) -> &ThresholdScheme {
+    pub fn scheme(&self, index: usize) -> &Ed25519Scheme {
         &self.schemes[index]
-    }
-
-    /// Serialized BLS12-381 group public key (G2, 96 bytes compressed).
-    pub fn group_public_key(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        commonware_codec::Write::write(self.schemes[0].identity(), &mut buf);
-        buf
     }
 
     /// Write `validator.key` (raw 32-byte ed25519 private key) per node.
@@ -177,7 +163,7 @@ impl KeySetBuilder {
             .threshold
             .unwrap_or(if n == 1 { 1 } else { (n - f) as u32 });
 
-        let (participants, schemes) = generate_threshold_schemes(seed, n)?;
+        let (participants, schemes) = generate_ed25519_schemes(seed, n)?;
 
         let seed_keys: Vec<_> = (0..n)
             .map(|i| {
@@ -208,33 +194,34 @@ impl KeySetBuilder {
     }
 }
 
-/// Generate deterministic threshold BLS signing schemes using trusted-dealer mode.
-fn generate_threshold_schemes(
+/// Generate deterministic ed25519 signing schemes.
+fn generate_ed25519_schemes(
     seed: u64,
     n: usize,
-) -> eyre::Result<(Vec<ed25519::PublicKey>, Vec<ThresholdScheme>)> {
-    let participants: Set<ed25519::PublicKey> = (0..n)
-        .map(|i| ed25519::PrivateKey::from_seed(seed.wrapping_add(i as u64)).public_key())
+) -> eyre::Result<(Vec<ed25519::PublicKey>, Vec<Ed25519Scheme>)> {
+    let private_keys: Vec<ed25519::PrivateKey> = (0..n)
+        .map(|i| ed25519::PrivateKey::from_seed(seed.wrapping_add(i as u64)))
+        .collect();
+
+    let participants: Set<ed25519::PublicKey> = private_keys
+        .iter()
+        .map(|k| k.public_key())
         .try_collect()
         .expect("participant public keys are unique");
 
-    let mut rng = StdRng::seed_from_u64(seed);
-    let (output, shares) =
-        dkg::deal::<MinSig, _, N3f1>(&mut rng, Mode::default(), participants.clone())
-            .map_err(|e| eyre::eyre!("dkg deal failed: {}", e))?;
+    let ordered_pks: Vec<ed25519::PublicKey> = participants.iter().cloned().collect();
 
     let mut schemes = Vec::with_capacity(n);
     for pk in participants.iter() {
-        let share = shares.get_value(pk).expect("share exists").clone();
-        let scheme = vrf::Scheme::signer(
-            SIMPLEX_NAMESPACE,
-            participants.clone(),
-            output.public().clone(),
-            share,
-        )
-        .ok_or_else(|| eyre::eyre!("failed to create signer for participant"))?;
+        let private_key = private_keys
+            .iter()
+            .find(|k| k.public_key() == *pk)
+            .expect("private key exists for participant")
+            .clone();
+        let scheme = Scheme::signer(SIMPLEX_NAMESPACE, participants.clone(), private_key)
+            .ok_or_else(|| eyre::eyre!("failed to create signer for participant"))?;
         schemes.push(scheme);
     }
 
-    Ok((participants.into(), schemes))
+    Ok((ordered_pks, schemes))
 }

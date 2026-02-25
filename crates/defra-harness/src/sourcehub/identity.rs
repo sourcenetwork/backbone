@@ -1,5 +1,5 @@
-use anyhow::Result;
 use cosmrs::crypto::secp256k1::SigningKey;
+use eyre::Result;
 
 /// Derive a `source1...` bech32 address from a secp256k1 private key hex string.
 ///
@@ -8,11 +8,11 @@ use cosmrs::crypto::secp256k1::SigningKey;
 pub fn source_hub_address(private_key_hex: &str) -> Result<String> {
     let key_bytes = hex_decode(private_key_hex)?;
     let signing_key = SigningKey::from_slice(&key_bytes)
-        .map_err(|e| anyhow::anyhow!("invalid secp256k1 private key: {}", e))?;
+        .map_err(|e| eyre::eyre!("invalid secp256k1 private key: {}", e))?;
     let public_key = signing_key.public_key();
     let account_id = public_key
         .account_id("source")
-        .map_err(|e| anyhow::anyhow!("failed to derive source address: {}", e))?;
+        .map_err(|e| eyre::eyre!("failed to derive source address: {}", e))?;
     Ok(account_id.to_string())
 }
 
@@ -21,7 +21,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>> {
         .step_by(2)
         .map(|i| {
             u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|e| anyhow::anyhow!("invalid hex at offset {}: {}", i, e))
+                .map_err(|e| eyre::eyre!("invalid hex at offset {}: {}", i, e))
         })
         .collect()
 }

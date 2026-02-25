@@ -90,8 +90,8 @@ impl SourceHubNode {
         ];
         let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
 
-        let process = test_infra::ManagedProcess::spawn("sourcehub", &binary, &args, &[], &log_dir)
-            .map_err(|e| eyre::eyre!("{:#}", e))?;
+        let process =
+            test_infra::ManagedProcess::spawn("sourcehub", &binary, &args, &[], &log_dir)?;
 
         let lcd_url = format!("http://127.0.0.1:{}", ports.lcd);
 
