@@ -6,25 +6,12 @@ use reqwest::Client;
 
 use crate::client::DefraClient;
 use crate::divergences::NodeKind;
-use crate::node::{DefraNode, NodeConfig, RustNode};
+use crate::node::{DefraNode, RunningNode, RustNode};
 use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
 use sourcehub_harness::SourceHubNode;
 
 use super::health::health_check;
-
-/// A running node within a test cluster.
-pub struct RunningNode {
-    pub name: String,
-    pub api_url: String,
-    pub http_addr: String,
-    pub binary_path: PathBuf,
-    pub process: test_infra::ManagedProcess,
-    pub log_tracker: LogTracker,
-    pub rootdir: PathBuf,
-    pub(crate) config: NodeConfig,
-    pub(crate) kind: NodeKind,
-}
 
 /// A cluster of running DefraDB nodes.
 ///

@@ -11,8 +11,9 @@ use common::blockchain::ChainConfig;
 use sourcehub_harness::SourceHubNode;
 use std::time::Duration;
 
-use crate::ring::{OrbisRing, SourceHubUrls};
+use crate::ring::OrbisRing;
 use crate::{allocate_source_hub_ports, generate_identity_keys, generate_run_id};
+use sourcehub_harness::SourceHubConfig;
 
 /// The bulletin namespace used for ring payloads (must match orbis-node constant).
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
@@ -77,7 +78,7 @@ pub async fn setup_dkg() -> DkgFixture {
         .log_level("info")
         .base_dir(run_dir.path())
         .identity_keys(identity_keys)
-        .sourcehub_urls(SourceHubUrls::from(&sourcehub))
+        .sourcehub_config(SourceHubConfig::from(&sourcehub))
         .build()
         .await
         .expect("fixture: ring should start");

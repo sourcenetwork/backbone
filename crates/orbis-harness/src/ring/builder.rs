@@ -4,27 +4,7 @@ use std::time::Duration;
 
 use super::health::{self, HealthCheckConfig};
 use super::node::OrbisNode;
-use sourcehub_harness::SourceHubNode;
-
-/// SourceHub URLs needed by orbis-node CLI args.
-///
-/// Data-only carrier — does not own or manage the SourceHub process.
-#[derive(Clone, Debug)]
-pub struct SourceHubUrls {
-    pub grpc_url: String,
-    pub comet_rpc_url: String,
-    pub lcd_url: String,
-}
-
-impl From<&SourceHubNode> for SourceHubUrls {
-    fn from(sh: &SourceHubNode) -> Self {
-        Self {
-            grpc_url: sh.grpc_url.clone(),
-            comet_rpc_url: sh.comet_rpc_url.clone(),
-            lcd_url: sh.lcd_url.clone(),
-        }
-    }
-}
+use sourcehub_harness::SourceHubConfig;
 
 /// A running Orbis ring with managed node processes.
 ///
@@ -89,7 +69,7 @@ pub struct OrbisRingBuilder {
     log_level: String,
     base_dir: Option<PathBuf>,
     identity_keys: Option<Vec<String>>,
-    sourcehub_urls: Option<SourceHubUrls>,
+    sourcehub_config: Option<SourceHubConfig>,
 }
 
 impl fmt::Debug for OrbisRingBuilder {
@@ -100,7 +80,7 @@ impl fmt::Debug for OrbisRingBuilder {
             .field("log_level", &self.log_level)
             .field("has_base_dir", &self.base_dir.is_some())
             .field("has_identity_keys", &self.identity_keys.is_some())
-            .field("has_sourcehub_urls", &self.sourcehub_urls.is_some())
+            .field("has_sourcehub_config", &self.sourcehub_config.is_some())
             .finish()
     }
 }
@@ -113,7 +93,7 @@ impl Default for OrbisRingBuilder {
             log_level: "info".to_string(),
             base_dir: None,
             identity_keys: None,
-            sourcehub_urls: None,
+            sourcehub_config: None,
         }
     }
 }
@@ -150,8 +130,8 @@ impl OrbisRingBuilder {
     }
 
     #[must_use]
-    pub fn sourcehub_urls(mut self, urls: SourceHubUrls) -> Self {
-        self.sourcehub_urls = Some(urls);
+    pub fn sourcehub_config(mut self, config: SourceHubConfig) -> Self {
+        self.sourcehub_config = Some(config);
         self
     }
 
@@ -204,16 +184,16 @@ impl OrbisRingBuilder {
                 data_dir.to_str().unwrap_or("data").to_string(),
             ];
 
-            if let Some(ref urls) = self.sourcehub_urls {
+            if let Some(ref sh) = self.sourcehub_config {
                 args_owned.extend([
                     "--authz-grpc".to_string(),
-                    urls.grpc_url.clone(),
+                    sh.grpc_url.clone(),
                     "--bulletin-grpc".to_string(),
-                    urls.grpc_url.clone(),
+                    sh.grpc_url.clone(),
                     "--chain-rpc".to_string(),
-                    urls.comet_rpc_url.clone(),
+                    sh.comet_rpc_url.clone(),
                     "--chain-rest".to_string(),
-                    urls.lcd_url.clone(),
+                    sh.lcd_url.clone(),
                 ]);
             }
 

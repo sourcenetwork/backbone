@@ -1,7 +1,9 @@
 mod go_node;
+mod running;
 mod rust_node;
 
 pub use go_node::GoNode;
+pub use running::{start_node, RunningNode};
 pub use rust_node::RustNode;
 
 use std::path::{Path, PathBuf};
@@ -156,8 +158,33 @@ fn dirs_cache() -> PathBuf {
 
 use eyre::WrapErr;
 
+/// How the DefraDB keyring is configured.
+#[derive(Clone, Debug)]
+pub enum KeyringBackend {
+    /// No keyring (`--no-keyring` flag).
+    None,
+    /// Environment-based keyring (`DEFRA_KEYRING_SECRET` env var).
+    Env { secret: String },
+    /// File-based keyring (`--keyring-backend file --keyring-path <path>`).
+    File { path: PathBuf, secret: String },
+}
+
+/// Configuration for DefraDB's Orbis signer integration.
+///
+/// When provided, DefraDB delegates document signing to an Orbis ring
+/// via gRPC threshold signing instead of using a local key.
+#[derive(Clone, Debug)]
+pub struct OrbisSignerConfig {
+    /// gRPC endpoint of an Orbis node (e.g. `"http://127.0.0.1:8081"`).
+    pub endpoint: String,
+    /// Ring ID to sign with (from DKG bulletin post).
+    pub ring_id: String,
+    /// Derivation label (e.g. `"x-archive"`) for derived key signing.
+    pub derivation: String,
+}
+
 /// Configuration for a single DefraDB node.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NodeConfig {
     pub name: String,
     pub rootdir: PathBuf,
@@ -171,14 +198,44 @@ pub struct NodeConfig {
     pub encryption_enabled: bool,
     pub signing_enabled: bool,
     pub nac_enabled: bool,
-    pub source_hub_address: Option<String>,
-    pub source_hub_comet_address: Option<String>,
-    pub source_hub_chain_id: Option<String>,
+    pub source_hub: Option<sourcehub_harness::SourceHubConfig>,
+    pub orbis_signer: Option<OrbisSignerConfig>,
+    pub keyring: KeyringBackend,
     pub development: bool,
     pub store: Option<String>,
     pub query_timeout: Option<u64>,
     pub p2p_transport: Option<String>,
-    pub keyring_enabled: bool,
+}
+
+impl NodeConfig {
+    pub fn new(
+        name: impl Into<String>,
+        rootdir: PathBuf,
+        log_dir: PathBuf,
+        http_addr: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            rootdir,
+            log_dir,
+            http_addr: http_addr.into(),
+            p2p_enabled: false,
+            p2p_addr: None,
+            peers: vec![],
+            identity: None,
+            acp_document_type: None,
+            encryption_enabled: false,
+            signing_enabled: false,
+            nac_enabled: false,
+            source_hub: None,
+            orbis_signer: None,
+            keyring: KeyringBackend::None,
+            development: false,
+            store: None,
+            query_timeout: None,
+            p2p_transport: None,
+        }
+    }
 }
 
 /// Trait for building a DefraDB command from config.

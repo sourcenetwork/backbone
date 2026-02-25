@@ -5,14 +5,12 @@ use eyre::{Result, WrapErr};
 use reqwest::Client;
 
 use crate::divergences::NodeKind;
-use crate::node::{BinarySource, DefraNode, GoNode, NodeConfig, RustNode};
-use crate::observe::patterns::{self, NamedPattern};
-use crate::observe::LogTracker;
+use crate::node::{start_node, BinarySource, GoNode, KeyringBackend, NodeConfig, RustNode};
 use crate::ports::allocate_node_ports;
-use sourcehub_harness::{allocate_source_hub_ports, SourceHubNode};
+use sourcehub_harness::{allocate_source_hub_ports, SourceHubConfig, SourceHubNode};
 
 use super::health::health_check_all;
-use super::runtime::{RunningNode, TestCluster};
+use super::runtime::TestCluster;
 
 static RUST_BUILD_DONE: OnceLock<()> = OnceLock::new();
 static IROH_BUILD_DONE: OnceLock<()> = OnceLock::new();
@@ -35,7 +33,7 @@ pub struct TestClusterBuilder {
     store: Option<String>,
     query_timeout: Option<u64>,
     p2p_transport: Option<String>,
-    keyring_enabled: bool,
+    keyring: KeyringBackend,
 }
 
 impl Default for TestClusterBuilder {
@@ -64,7 +62,7 @@ impl TestClusterBuilder {
             store: None,
             query_timeout: None,
             p2p_transport: None,
-            keyring_enabled: false,
+            keyring: KeyringBackend::None,
         }
     }
 
@@ -173,7 +171,9 @@ impl TestClusterBuilder {
     }
 
     pub fn with_keyring(mut self) -> Self {
-        self.keyring_enabled = true;
+        self.keyring = KeyringBackend::Env {
+            secret: "integration-test-secret".to_string(),
+        };
         self
     }
 
@@ -280,14 +280,7 @@ impl TestClusterBuilder {
             None
         };
 
-        let (sh_lcd, sh_comet, sh_chain_id) = match &source_hub {
-            Some(sh) => (
-                Some(sh.lcd_url.clone()),
-                Some(sh.comet_rpc_url.clone()),
-                Some(sh.chain_id.clone()),
-            ),
-            None => (None, None, None),
-        };
+        let sh_config: Option<SourceHubConfig> = source_hub.as_ref().map(SourceHubConfig::from);
 
         let mut nodes = Vec::with_capacity(total);
 
@@ -301,38 +294,44 @@ impl TestClusterBuilder {
                 .cloned()
                 .flatten()
                 .or_else(|| self.node_identity.clone());
+
+            let node_dir = run_dir.node_dir(&name)?;
+            let log_dir = node_dir.join("logs");
+            let rootdir = node_dir.join("data");
+
+            let p2p_addr = if self.p2p_enabled && !is_iroh {
+                Some(format!("/ip4/127.0.0.1/tcp/{}", ports.p2p))
+            } else {
+                None
+            };
+
+            let config = NodeConfig {
+                name: name.clone(),
+                rootdir,
+                log_dir,
+                http_addr: format!("127.0.0.1:{}", ports.http),
+                p2p_enabled: self.p2p_enabled,
+                p2p_addr,
+                peers: vec![],
+                identity,
+                acp_document_type: self.acp_document_type.clone(),
+                encryption_enabled: self.encryption_enabled,
+                signing_enabled: self.signing_enabled,
+                nac_enabled: self.nac_enabled,
+                source_hub: sh_config.clone(),
+                orbis_signer: None,
+                keyring: self.keyring.clone(),
+                development: self.development,
+                store: self.store.clone(),
+                query_timeout: self.query_timeout,
+                p2p_transport: self.p2p_transport.clone(),
+            };
+
             // Release port guards right before spawn so the child process can bind
             ports.release();
-            let running = spawn_node(
-                &name,
-                &node,
-                ports.http,
-                ports.p2p,
-                self.p2p_enabled,
-                &run_dir,
-                self.health_timeout,
-                if is_iroh {
-                    patterns::iroh_patterns()
-                } else {
-                    patterns::node_patterns()
-                },
-                self.acp_document_type.clone(),
-                identity,
-                self.encryption_enabled,
-                self.signing_enabled,
-                self.nac_enabled,
-                sh_lcd.clone(),
-                sh_comet.clone(),
-                sh_chain_id.clone(),
-                self.development,
-                self.store.clone(),
-                self.query_timeout,
-                NodeKind::Rust,
-                self.p2p_transport.clone(),
-                self.keyring_enabled,
-            )
-            .await
-            .wrap_err_with(|| format!("failed to start {}", name))?;
+            let running = start_node(&node, config, self.health_timeout)
+                .await
+                .wrap_err_with(|| format!("failed to start {}", name))?;
             nodes.push(running);
         }
 
@@ -347,34 +346,44 @@ impl TestClusterBuilder {
                 .cloned()
                 .flatten()
                 .or_else(|| self.node_identity.clone());
+
+            let node_dir = run_dir.node_dir(&name)?;
+            let log_dir = node_dir.join("logs");
+            let rootdir = node_dir.join("data");
+
+            let p2p_addr = if self.p2p_enabled {
+                Some(format!("/ip4/127.0.0.1/tcp/{}", ports.p2p))
+            } else {
+                None
+            };
+
+            let config = NodeConfig {
+                name: name.clone(),
+                rootdir,
+                log_dir,
+                http_addr: format!("127.0.0.1:{}", ports.http),
+                p2p_enabled: self.p2p_enabled,
+                p2p_addr,
+                peers: vec![],
+                identity,
+                acp_document_type: self.acp_document_type.clone(),
+                encryption_enabled: self.encryption_enabled,
+                signing_enabled: self.signing_enabled,
+                nac_enabled: self.nac_enabled,
+                source_hub: sh_config.clone(),
+                orbis_signer: None,
+                keyring: KeyringBackend::None,
+                development: self.development,
+                store: self.store.clone(),
+                query_timeout: self.query_timeout,
+                p2p_transport: None,
+            };
+
             // Release port guards right before spawn so the child process can bind
             ports.release();
-            let running = spawn_node(
-                &name,
-                &node,
-                ports.http,
-                ports.p2p,
-                self.p2p_enabled,
-                &run_dir,
-                self.health_timeout,
-                patterns::node_patterns(),
-                self.acp_document_type.clone(),
-                identity,
-                self.encryption_enabled,
-                self.signing_enabled,
-                self.nac_enabled,
-                sh_lcd.clone(),
-                sh_comet.clone(),
-                sh_chain_id.clone(),
-                self.development,
-                self.store.clone(),
-                self.query_timeout,
-                NodeKind::Go,
-                None,
-                false,
-            )
-            .await
-            .wrap_err_with(|| format!("failed to start {}", name))?;
+            let running = start_node(&node, config, self.health_timeout)
+                .await
+                .wrap_err_with(|| format!("failed to start {}", name))?;
             nodes.push(running);
         }
 
@@ -404,97 +413,4 @@ impl TestClusterBuilder {
             source_hub,
         ))
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn spawn_node(
-    name: &str,
-    node: &dyn DefraNode,
-    http_port: u16,
-    p2p_port: u16,
-    p2p_enabled: bool,
-    run_dir: &test_infra::TestRunDir,
-    ready_timeout: Duration,
-    named_patterns: Vec<NamedPattern>,
-    acp_document_type: Option<String>,
-    node_identity: Option<String>,
-    encryption_enabled: bool,
-    signing_enabled: bool,
-    nac_enabled: bool,
-    source_hub_address: Option<String>,
-    source_hub_comet_address: Option<String>,
-    source_hub_chain_id: Option<String>,
-    development: bool,
-    store: Option<String>,
-    query_timeout: Option<u64>,
-    kind: NodeKind,
-    p2p_transport: Option<String>,
-    keyring_enabled: bool,
-) -> Result<RunningNode> {
-    let node_dir = run_dir.node_dir(name)?;
-    let log_dir = node_dir.join("logs");
-    let rootdir = node_dir.join("data");
-    std::fs::create_dir_all(&rootdir)?;
-
-    let http_addr = format!("127.0.0.1:{}", http_port);
-    let api_url = format!("http://{}", http_addr);
-
-    let is_iroh = p2p_transport.as_deref() == Some("iroh");
-    let config = NodeConfig {
-        name: name.to_string(),
-        rootdir: rootdir.clone(),
-        log_dir: log_dir.clone(),
-        http_addr: http_addr.clone(),
-        p2p_enabled,
-        p2p_addr: if p2p_enabled && !is_iroh {
-            Some(format!("/ip4/127.0.0.1/tcp/{}", p2p_port))
-        } else {
-            None
-        },
-        peers: vec![],
-        identity: node_identity,
-        acp_document_type,
-        encryption_enabled,
-        signing_enabled,
-        nac_enabled,
-        source_hub_address,
-        source_hub_comet_address,
-        source_hub_chain_id,
-        development,
-        store,
-        query_timeout,
-        p2p_transport,
-        keyring_enabled,
-    };
-
-    let (program, args_owned, envs_owned) = node.command_parts(&config);
-    let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
-    let envs: Vec<(&str, &str)> = envs_owned
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    // Start log tracker before spawning so it catches early output
-    let stdout_path = log_dir.join("stdout.log");
-    let log_tracker = LogTracker::start(stdout_path, patterns::DEFRA_READY_PATTERN, named_patterns);
-
-    let process = test_infra::ManagedProcess::spawn(name, &program, &args, &envs, &log_dir)?;
-
-    // Wait for ready signal from logs
-    log_tracker
-        .wait_for_ready(ready_timeout)
-        .await
-        .wrap_err_with(|| format!("{}: did not become ready", name))?;
-
-    Ok(RunningNode {
-        name: name.to_string(),
-        api_url,
-        http_addr,
-        binary_path: node.binary_path().to_path_buf(),
-        process,
-        log_tracker,
-        rootdir,
-        config,
-        kind,
-    })
 }

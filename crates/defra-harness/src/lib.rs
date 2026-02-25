@@ -25,7 +25,9 @@ pub use fixtures::{
 pub use identity::{
     generate_ed25519_identity, generate_identity, generate_secp256r1_identity, TestIdentity,
 };
-pub use node::BinarySource;
+pub use node::{
+    start_node, BinarySource, KeyringBackend, NodeConfig, OrbisSignerConfig, RunningNode,
+};
 pub use p2p_helpers::{
     extract_doc_id, extract_p2p_addr, extract_p2p_addr_with_identity, extract_peer_id,
     setup_three_node_chain, setup_two_node_iroh, setup_two_node_replicated, wait_for_doc_count,

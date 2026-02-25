@@ -5488,6 +5488,7 @@ dependencies = [
  "cli-tool",
  "common",
  "crypto 0.0.1",
+ "defra-harness",
  "eyre",
  "futures",
  "hex",

@@ -42,12 +42,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use common::blockchain::events::BulletinEventSubscription;
+use defra_harness::node::RustNode;
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
-use orbis_harness::defradb::{self, DefraDbNode, OrbisSignerConfig};
-use orbis_harness::ring::{OrbisRing, SourceHubUrls};
+use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
     allocate_source_hub_ports, chain_config_from, generate_identity_keys, generate_run_id,
-    source_hub_address, SourceHubConfig, SourceHubNode,
+    source_hub_address, start_node, KeyringBackend, NodeConfig, OrbisSignerConfig, SourceHubConfig,
+    SourceHubNode,
 };
 
 // ============================================================================
@@ -214,7 +215,7 @@ async fn xarchive_full_service_key_architecture() {
         .log_level("info")
         .base_dir(run_dir.path())
         .identity_keys(orbis_operator_keys.clone())
-        .sourcehub_urls(SourceHubUrls::from(&sourcehub))
+        .sourcehub_config(SourceHubConfig::from(&sourcehub))
         .build()
         .await
         .expect("ring should start");
@@ -458,44 +459,48 @@ async fn xarchive_full_service_key_architecture() {
     // ================================================================
     // 10. Start DefraDB with Orbis signer
     // ================================================================
-    let defra_binary = defradb::resolve_binary().expect("find defra binary");
-    let defra_ports = defradb::allocate_defra_ports().expect("defra ports");
+    let defra_binary = test_infra::BinaryResolver::new("DEFRA", "defra")
+        .cargo_package("cli")
+        .resolve()
+        .expect("find defra binary");
+    let defra_ports = test_infra::allocate_ports(2).expect("defra ports");
     let defra_dir = run_dir.node_dir("defra0").expect("defra dir");
     let defra_log_dir = defra_dir.join("logs");
     let defra_root = defra_dir.join("data");
-    std::fs::create_dir_all(&defra_root).expect("defra data dir");
+    let defra_keyring_path = defra_root.join("keys");
 
-    let sh_config = SourceHubConfig {
-        lcd_url: sourcehub.lcd_url.clone(),
-        comet_rpc_url: sourcehub.comet_rpc_url.clone(),
-        chain_id: sourcehub.chain_id.clone(),
+    let defra_node = RustNode::from_binary(&defra_binary.path);
+    let mut defra_config = NodeConfig::new(
+        "defra0",
+        defra_root,
+        defra_log_dir,
+        format!("127.0.0.1:{}", defra_ports[0]),
+    );
+    defra_config.p2p_enabled = true;
+    defra_config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", defra_ports[1]));
+    defra_config.source_hub = Some(SourceHubConfig::from(&sourcehub));
+    defra_config.acp_document_type = Some("source-hub".to_string());
+    defra_config.identity = Some(defra_svc.private_key_hex.clone());
+    defra_config.keyring = KeyringBackend::File {
+        path: defra_keyring_path,
+        secret: "e2e-test-password".to_string(),
     };
-
-    let orbis_signer = OrbisSignerConfig {
+    defra_config.orbis_signer = Some(OrbisSignerConfig {
         endpoint: ring.node(0).grpc_addr(),
         ring_id: ring_id.clone(),
         derivation: "x-archive".to_string(),
-    };
+    });
 
-    let defra = DefraDbNode::start(
-        defra_root,
-        defra_log_dir,
-        &defra_ports,
-        &defra_binary,
-        Some(&sh_config),
-        Some(&defra_svc.private_key_hex),
-        Some(&orbis_signer),
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("defra should start with Orbis signer");
+    let defra = start_node(&defra_node, defra_config, Duration::from_secs(30))
+        .await
+        .expect("defra should start with Orbis signer");
 
-    eprintln!("[xarchive] DefraDB ready: {}", defra.http_url);
+    eprintln!("[xarchive] DefraDB ready: {}", defra.api_url);
 
     // ================================================================
     // 11. Create Tweet + Bookmark schemas with @policy directives
     // ================================================================
-    let xarchive_client = DefraHttpClient::new(&defra.http_url);
+    let xarchive_client = DefraHttpClient::new(&defra.api_url);
 
     let tweet_schema = format!(
         r#"type Tweet @policy(id: "{}", resource: "tweet") {{ tweet_id: String  text: String }}"#,
@@ -849,33 +854,44 @@ async fn xarchive_full_service_key_architecture() {
         .unwrap_or_else(|e| panic!("grant hiking_app_svc {} on trail: {}", relation, e));
     }
 
-    let hiking_defra_ports = defradb::allocate_defra_ports().expect("hiking defra ports");
+    let hiking_defra_ports = test_infra::allocate_ports(2).expect("hiking defra ports");
     let hiking_defra_dir = run_dir.node_dir("defra-hiking").expect("hiking defra dir");
     let hiking_defra_log_dir = hiking_defra_dir.join("logs");
     let hiking_defra_root = hiking_defra_dir.join("data");
-    std::fs::create_dir_all(&hiking_defra_root).expect("hiking defra data dir");
+    let hiking_keyring_path = hiking_defra_root.join("keys");
 
-    let hiking_orbis_signer = OrbisSignerConfig {
+    let hiking_defra_node = RustNode::from_binary(&defra_binary.path);
+    let mut hiking_defra_config = NodeConfig::new(
+        "defra-hiking",
+        hiking_defra_root,
+        hiking_defra_log_dir,
+        format!("127.0.0.1:{}", hiking_defra_ports[0]),
+    );
+    hiking_defra_config.p2p_enabled = true;
+    hiking_defra_config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", hiking_defra_ports[1]));
+    hiking_defra_config.source_hub = Some(SourceHubConfig::from(&sourcehub));
+    hiking_defra_config.acp_document_type = Some("source-hub".to_string());
+    hiking_defra_config.identity = Some(hiking_defra_svc.private_key_hex.clone());
+    hiking_defra_config.keyring = KeyringBackend::File {
+        path: hiking_keyring_path,
+        secret: "e2e-test-password".to_string(),
+    };
+    hiking_defra_config.orbis_signer = Some(OrbisSignerConfig {
         endpoint: ring.node(0).grpc_addr(),
         ring_id: ring_id.clone(),
         derivation: "hiking".to_string(),
-    };
+    });
 
-    let hiking_defra = DefraDbNode::start(
-        hiking_defra_root,
-        hiking_defra_log_dir,
-        &hiking_defra_ports,
-        &defra_binary,
-        Some(&sh_config),
-        Some(&hiking_defra_svc.private_key_hex),
-        Some(&hiking_orbis_signer),
+    let hiking_defra = start_node(
+        &hiking_defra_node,
+        hiking_defra_config,
         Duration::from_secs(30),
     )
     .await
     .expect("hiking defra should start");
-    eprintln!("[hiking] DefraDB ready: {}", hiking_defra.http_url);
+    eprintln!("[hiking] DefraDB ready: {}", hiking_defra.api_url);
 
-    let hiking_client = DefraHttpClient::new(&hiking_defra.http_url);
+    let hiking_client = DefraHttpClient::new(&hiking_defra.api_url);
 
     // ================================================================
     // 19. Create Trail schema + write a trail document

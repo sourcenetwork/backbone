@@ -3,7 +3,7 @@ use std::process::Command;
 
 use eyre::{Result, WrapErr};
 
-use super::{DefraNode, NodeConfig};
+use super::{DefraNode, KeyringBackend, NodeConfig};
 use crate::divergences::{self, NodeKind};
 use crate::workspace_root;
 
@@ -99,13 +99,20 @@ impl DefraNode for RustNode {
 
         let mut envs: Vec<(String, String)> = Vec::new();
 
-        if config.keyring_enabled {
-            envs.push((
-                "DEFRA_KEYRING_SECRET".to_string(),
-                "integration-test-secret".to_string(),
-            ));
-        } else {
-            args.push("--no-keyring".to_string());
+        match &config.keyring {
+            KeyringBackend::None => args.push("--no-keyring".to_string()),
+            KeyringBackend::Env { secret } => {
+                envs.push(("DEFRA_KEYRING_SECRET".to_string(), secret.clone()));
+            }
+            KeyringBackend::File { path, secret } => {
+                args.extend([
+                    "--keyring-backend".into(),
+                    "file".into(),
+                    "--keyring-path".into(),
+                    path.display().to_string(),
+                ]);
+                envs.push(("DEFRA_KEYRING_SECRET".to_string(), secret.clone()));
+            }
         }
 
         args.push("start".to_string());
@@ -117,7 +124,18 @@ impl DefraNode for RustNode {
             args.push("--no-encryption".to_string());
             args.push("--no-searchable-encryption".to_string());
         }
-        if !config.signing_enabled {
+        if let Some(ref signer) = config.orbis_signer {
+            args.extend([
+                "--signer-type".into(),
+                "orbis".into(),
+                "--signer-orbis-endpoint".into(),
+                signer.endpoint.clone(),
+                "--signer-orbis-ring-id".into(),
+                signer.ring_id.clone(),
+                "--signer-orbis-derivation".into(),
+                signer.derivation.clone(),
+            ]);
+        } else if !config.signing_enabled {
             args.push("--no-signing".to_string());
         }
 
@@ -150,17 +168,15 @@ impl DefraNode for RustNode {
 
         // DIVERGENCE: Only Rust supports --source-hub-* flags
         if divergences::supports_source_hub_flags(NodeKind::Rust) {
-            if let Some(ref addr) = config.source_hub_address {
-                args.push("--source-hub-address".to_string());
-                args.push(addr.clone());
-            }
-            if let Some(ref addr) = config.source_hub_comet_address {
-                args.push("--source-hub-comet-address".to_string());
-                args.push(addr.clone());
-            }
-            if let Some(ref chain_id) = config.source_hub_chain_id {
-                args.push("--source-hub-chain-id".to_string());
-                args.push(chain_id.clone());
+            if let Some(ref sh) = config.source_hub {
+                args.extend([
+                    "--source-hub-address".into(),
+                    sh.lcd_url.clone(),
+                    "--source-hub-comet-address".into(),
+                    sh.comet_rpc_url.clone(),
+                    "--source-hub-chain-id".into(),
+                    sh.chain_id.clone(),
+                ]);
             }
         }
 

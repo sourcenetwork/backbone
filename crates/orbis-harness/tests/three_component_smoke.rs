@@ -3,11 +3,11 @@
 use std::time::Duration;
 
 use common::blockchain::events::BulletinEventSubscription;
-use orbis_harness::defradb::{self, DefraDbNode};
-use orbis_harness::ring::{OrbisRing, SourceHubUrls};
+use defra_harness::node::RustNode;
+use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
     allocate_source_hub_ports, chain_config_from, generate_identity_keys, generate_run_id,
-    SourceHubConfig, SourceHubNode,
+    start_node, KeyringBackend, NodeConfig, SourceHubConfig, SourceHubNode,
 };
 
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
@@ -62,35 +62,38 @@ async fn three_component_smoke() {
     // 2. Start DefraDB with identity + file keyring + SourceHub ACP
     // ================================================================
     eprintln!("[smoke] Starting DefraDB with identity...");
-    let defra_binary = defradb::resolve_binary().expect("find defra binary");
-    let defra_ports = defradb::allocate_defra_ports().expect("allocate defra ports");
+    let defra_binary = test_infra::BinaryResolver::new("DEFRA", "defra")
+        .cargo_package("cli")
+        .resolve()
+        .expect("find defra binary");
+    let ports = test_infra::allocate_ports(2).expect("allocate defra ports");
     let defra_dir = run_dir.node_dir("defra0").expect("create defra dir");
     let defra_log_dir = defra_dir.join("logs");
     let defra_root = defra_dir.join("data");
-    std::fs::create_dir_all(&defra_root).expect("create defra data dir");
+    let keyring_path = defra_root.join("keys");
 
-    let sh_config = SourceHubConfig {
-        lcd_url: sourcehub.lcd_url.clone(),
-        comet_rpc_url: sourcehub.comet_rpc_url.clone(),
-        chain_id: sourcehub.chain_id.clone(),
-    };
-    let defra = DefraDbNode::start(
+    let node = RustNode::from_binary(&defra_binary.path);
+    let mut config = NodeConfig::new(
+        "defra0",
         defra_root,
         defra_log_dir,
-        &defra_ports,
-        &defra_binary,
-        Some(&sh_config),
-        Some(defra_key),
-        None,
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("defra should start with identity + SourceHub ACP");
-
-    eprintln!(
-        "[smoke] DefraDB ready: HTTP={}, P2P={}",
-        defra.http_url, defra.p2p_addr
+        format!("127.0.0.1:{}", ports[0]),
     );
+    config.p2p_enabled = true;
+    config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", ports[1]));
+    config.source_hub = Some(SourceHubConfig::from(&sourcehub));
+    config.acp_document_type = Some("source-hub".to_string());
+    config.identity = Some(defra_key.clone());
+    config.keyring = KeyringBackend::File {
+        path: keyring_path,
+        secret: "e2e-test-password".to_string(),
+    };
+
+    let defra = start_node(&node, config, Duration::from_secs(30))
+        .await
+        .expect("defra should start with identity + SourceHub ACP");
+
+    eprintln!("[smoke] DefraDB ready: {}", defra.api_url);
 
     // ================================================================
     // 3. Start 3-node Orbis ring + DKG
@@ -102,7 +105,7 @@ async fn three_component_smoke() {
         .log_level("info")
         .base_dir(run_dir.path())
         .identity_keys(orbis_keys)
-        .sourcehub_urls(SourceHubUrls::from(&sourcehub))
+        .sourcehub_config(SourceHubConfig::from(&sourcehub))
         .build()
         .await
         .expect("ring should start");
@@ -183,7 +186,7 @@ async fn three_component_smoke() {
     let http = reqwest::Client::new();
 
     let schema_resp = http
-        .post(format!("{}/api/v0/schema", defra.http_url))
+        .post(format!("{}/api/v0/schema", defra.api_url))
         .header("Content-Type", "text/plain")
         .body(SIMPLE_SCHEMA)
         .send()
@@ -198,7 +201,7 @@ async fn three_component_smoke() {
 
     let create_mutation = r#"mutation { create_Note(input: {title: "Hello from smoke test", body: "All three components are running!"}) { _docID title body } }"#;
     let create_resp = http
-        .post(format!("{}/api/v0/graphql", defra.http_url))
+        .post(format!("{}/api/v0/graphql", defra.api_url))
         .json(&serde_json::json!({"query": create_mutation}))
         .send()
         .await
@@ -213,7 +216,7 @@ async fn three_component_smoke() {
 
     let query = r#"query { Note { _docID title body } }"#;
     let query_resp = http
-        .post(format!("{}/api/v0/graphql", defra.http_url))
+        .post(format!("{}/api/v0/graphql", defra.api_url))
         .json(&serde_json::json!({"query": query}))
         .send()
         .await
@@ -296,7 +299,7 @@ async fn three_component_smoke() {
     // ================================================================
     eprintln!("[smoke] === Three-component smoke test passed ===");
     eprintln!("[smoke] SourceHub: LCD={}", sourcehub.lcd_url);
-    eprintln!("[smoke] DefraDB: HTTP={}", defra.http_url);
+    eprintln!("[smoke] DefraDB: HTTP={}", defra.api_url);
     eprintln!(
         "[smoke] Orbis: {} nodes, ring_pk={}...",
         ring.node_count(),
