@@ -19,7 +19,6 @@ pub mod wasm_lens;
 pub use client::DefraClient;
 pub use cluster::{TestCluster, TestClusterBuilder};
 pub use divergences::NodeKind;
-pub use node::BinarySource;
 pub use fixtures::{
     documents_schema_with_policy, interaction_schema_with_policy, multi_resource_policy,
     peak_schema_with_policy, secret_schema_with_policy, tweet_schema_with_policy, typed_schema,
@@ -29,12 +28,13 @@ pub use fixtures::{
 pub use identity::{
     generate_ed25519_identity, generate_identity, generate_secp256r1_identity, TestIdentity,
 };
-pub use poll::poll_until;
+pub use node::BinarySource;
 pub use p2p_helpers::{
     extract_doc_id, extract_p2p_addr, extract_p2p_addr_with_identity, extract_peer_id,
     setup_three_node_chain, setup_two_node_iroh, setup_two_node_replicated, wait_for_doc_count,
     wait_for_field_values, P2P_POLL_INTERVAL, P2P_TIMEOUT,
 };
+pub use poll::poll_until;
 pub use sse::{
     open_events_sse, open_merge_events_sse, open_peer_events_sse, wait_for_merge_events,
     wait_for_peer_events,

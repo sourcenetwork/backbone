@@ -44,11 +44,7 @@ impl BinarySource {
                 Ok(RustNode::workspace_binary_path())
             }
             BinarySource::Path(p) => {
-                anyhow::ensure!(
-                    p.exists(),
-                    "binary not found at {}",
-                    p.display()
-                );
+                anyhow::ensure!(p.exists(), "binary not found at {}", p.display());
                 Ok(p.clone())
             }
             BinarySource::Release(version) => resolve_release(version, kind),
