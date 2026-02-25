@@ -7,11 +7,14 @@ pub mod fixtures;
 pub mod identity;
 pub mod node;
 pub mod observe;
+pub mod p2p_helpers;
 pub mod poll;
 pub mod ports;
 pub mod process;
 pub mod run;
 pub mod sourcehub;
+pub mod sse;
+pub mod wasm_lens;
 
 pub use client::DefraClient;
 pub use cluster::{TestCluster, TestClusterBuilder};
@@ -27,6 +30,16 @@ pub use identity::{
     generate_ed25519_identity, generate_identity, generate_secp256r1_identity, TestIdentity,
 };
 pub use poll::poll_until;
+pub use p2p_helpers::{
+    extract_doc_id, extract_p2p_addr, extract_p2p_addr_with_identity, extract_peer_id,
+    setup_three_node_chain, setup_two_node_iroh, setup_two_node_replicated, wait_for_doc_count,
+    wait_for_field_values, P2P_POLL_INTERVAL, P2P_TIMEOUT,
+};
+pub use sse::{
+    open_events_sse, open_merge_events_sse, open_peer_events_sse, wait_for_merge_events,
+    wait_for_peer_events,
+};
+pub use wasm_lens::WasmLens;
 
 /// Return the absolute path to the workspace root of the consuming crate.
 ///
