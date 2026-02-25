@@ -166,11 +166,7 @@ impl TestClusterBuilder {
 
         let binary = match self.binary {
             Some(p) => {
-                eyre::ensure!(
-                    p.exists(),
-                    "hubd binary not found at {}",
-                    p.display()
-                );
+                eyre::ensure!(p.exists(), "hubd binary not found at {}", p.display());
                 p
             }
             None => find_hub_binary()?,
