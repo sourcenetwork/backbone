@@ -24,6 +24,7 @@ pub struct TestClusterBuilder {
     preset: ConsensusPreset,
     chain_id: u64,
     jmt_seeder: Option<JmtSeeder>,
+    binary: Option<PathBuf>,
 }
 
 impl fmt::Debug for TestClusterBuilder {
@@ -35,6 +36,7 @@ impl fmt::Debug for TestClusterBuilder {
             .field("preset", &self.preset)
             .field("chain_id", &self.chain_id)
             .field("has_jmt_seeder", &self.jmt_seeder.is_some())
+            .field("binary", &self.binary)
             .finish()
     }
 }
@@ -48,6 +50,7 @@ impl Default for TestClusterBuilder {
             preset: ConsensusPreset::Fast,
             chain_id: 9001,
             jmt_seeder: None,
+            binary: None,
         }
     }
 }
@@ -86,6 +89,13 @@ impl TestClusterBuilder {
     #[must_use]
     pub fn jmt_seeder(mut self, f: impl Fn(&Path, u64) + Send + 'static) -> Self {
         self.jmt_seeder = Some(Box::new(f));
+        self
+    }
+
+    /// Set an explicit path to the hubd binary, bypassing BinaryResolver.
+    #[must_use]
+    pub fn binary(mut self, path: impl Into<PathBuf>) -> Self {
+        self.binary = Some(path.into());
         self
     }
 
@@ -154,7 +164,17 @@ impl TestClusterBuilder {
         let notarization_ms = consensus.notarization_timeout.as_millis().to_string();
         let nullify_ms = consensus.nullify_retry.as_millis().to_string();
 
-        let binary = find_hub_binary()?;
+        let binary = match self.binary {
+            Some(p) => {
+                eyre::ensure!(
+                    p.exists(),
+                    "hubd binary not found at {}",
+                    p.display()
+                );
+                p
+            }
+            None => find_hub_binary()?,
+        };
         let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
         let seed_str = keys.seed().to_string();
         let chain_id_str = chain_id.to_string();
