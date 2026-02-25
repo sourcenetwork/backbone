@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 test-infra = { path = "../test-infra" }
+sourcehub-harness = { path = "../sourcehub-harness" }
 tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -18,4 +19,3 @@ rand.workspace = true
 libc.workspace = true
 futures.workspace = true
 paste = "1.0"
-cosmrs = { version = "0.22", features = ["rpc"] }

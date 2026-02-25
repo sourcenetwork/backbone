@@ -1,13 +1,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use common::blockchain::ChainConfig;
+use eyre::{Result, WrapErr};
 
-use crate::defradb::SourceHubConfig;
-
-use super::genesis;
-use super::identity::source_hub_address;
-use super::SourceHubPorts;
+use crate::genesis;
+use crate::identity::source_hub_address;
+use crate::SourceHubPorts;
 
 const DEFAULT_CHAIN_ID: &str = "sourcehub-localnet";
 
@@ -22,6 +20,8 @@ const TEST_ACCOUNT_HEX_KEY: &str =
 pub struct SourceHubNode {
     #[allow(dead_code)]
     process: test_infra::ManagedProcess,
+    #[allow(dead_code)]
+    log_tracker: test_infra::LogTracker,
     /// Cosmos LCD/REST API URL.
     pub lcd_url: String,
     /// CometBFT RPC URL.
@@ -46,14 +46,15 @@ impl SourceHubNode {
         ports: &SourceHubPorts,
         identity_keys: &[String],
         ready_timeout: Duration,
-    ) -> eyre::Result<Self> {
-        let binary = super::resolve_binary()?;
+    ) -> Result<Self> {
+        let binary = crate::resolve_binary()?;
         let chain_id = DEFAULT_CHAIN_ID.to_string();
 
         let funded_addresses: Vec<String> = identity_keys
             .iter()
             .map(|key| source_hub_address(key))
-            .collect::<eyre::Result<_>>()?;
+            .collect::<Result<_>>()
+            .wrap_err("deriving source hub addresses from identity keys")?;
 
         let faucet_address = source_hub_address(TEST_ACCOUNT_HEX_KEY)?;
 
@@ -64,7 +65,8 @@ impl SourceHubNode {
             &funded_addresses,
             Some(&faucet_address),
             ports,
-        )?;
+        )
+        .wrap_err("provisioning source hub genesis")?;
 
         let home_str = home_dir.display().to_string();
         let comet_rpc_addr = format!("tcp://0.0.0.0:{}", ports.comet_rpc);
@@ -90,11 +92,21 @@ impl SourceHubNode {
         ];
         let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
 
-        let process =
-            test_infra::ManagedProcess::spawn("sourcehub", &binary, &args, &[], &log_dir)?;
+        let stdout_path = log_dir.join("stdout.log");
+        let log_tracker =
+            test_infra::LogTracker::start(stdout_path, "committed state", sourcehub_patterns());
+
+        let process = test_infra::ManagedProcess::spawn("sourcehub", &binary, &args, &[], &log_dir)
+            .wrap_err("failed to spawn sourcehubd")?;
+
+        let _first_block: String = log_tracker
+            .wait_for_pattern("first_block", ready_timeout)
+            .await
+            .wrap_err("sourcehubd did not produce first block")?;
 
         let lcd_url = format!("http://127.0.0.1:{}", ports.lcd);
 
+        // Health check: wait for LCD to respond
         let client = reqwest::Client::new();
         let health_url = format!("{}/cosmos/base/tendermint/v1beta1/blocks/latest", lcd_url);
         let deadline = tokio::time::Instant::now() + ready_timeout;
@@ -104,51 +116,36 @@ impl SourceHubNode {
                 _ => {}
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(eyre::eyre!(
-                    "sourcehubd LCD health check timed out at {}",
-                    health_url
-                ));
+                eyre::bail!("sourcehubd LCD health check timed out at {}", health_url);
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
+        let comet_rpc_url = format!("http://127.0.0.1:{}", ports.comet_rpc);
+        let grpc_url = format!("http://127.0.0.1:{}", ports.grpc);
+
         tracing::info!(
             lcd = %lcd_url,
-            comet_rpc = %format!("http://127.0.0.1:{}", ports.comet_rpc),
-            grpc = %format!("http://127.0.0.1:{}", ports.grpc),
+            comet_rpc = %comet_rpc_url,
+            grpc = %grpc_url,
             "SourceHub devnet ready"
         );
 
         Ok(Self {
             process,
+            log_tracker,
             lcd_url,
-            comet_rpc_url: format!("http://127.0.0.1:{}", ports.comet_rpc),
-            grpc_url: format!("http://127.0.0.1:{}", ports.grpc),
+            comet_rpc_url,
+            grpc_url,
             chain_id,
             home_dir,
         })
     }
+}
 
-    /// Build a `ChainConfig` pointing at this SourceHub instance.
-    pub fn chain_config(&self) -> ChainConfig {
-        ChainConfig {
-            chain_id: self.chain_id.clone(),
-            rpc_url: self.comet_rpc_url.clone(),
-            rest_url: self.lcd_url.clone(),
-            grpc_url: self.grpc_url.clone(),
-            account_prefix: "source".to_string(),
-            default_gas_limit: 300_000,
-            gas_price: common::blockchain::GasPrice::default(),
-            gas_multiplier: 1.2,
-        }
-    }
-
-    /// Build a `SourceHubConfig` for DefraDB's ACP integration.
-    pub fn defra_config(&self) -> SourceHubConfig {
-        SourceHubConfig {
-            lcd_url: self.lcd_url.clone(),
-            comet_rpc_url: self.comet_rpc_url.clone(),
-            chain_id: self.chain_id.clone(),
-        }
-    }
+fn sourcehub_patterns() -> Vec<test_infra::NamedPattern> {
+    vec![test_infra::NamedPattern {
+        name: "first_block",
+        regex: regex::Regex::new(r"committed state.*height=1\b").unwrap(),
+    }]
 }

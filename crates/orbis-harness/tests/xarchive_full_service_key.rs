@@ -45,8 +45,10 @@ use common::blockchain::events::BulletinEventSubscription;
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
 use orbis_harness::defradb::{self, DefraDbNode, OrbisSignerConfig};
 use orbis_harness::ring::{OrbisRing, SourceHubUrls};
-use orbis_harness::sourcehub::{self, SourceHubNode};
-use orbis_harness::{generate_identity_keys, generate_run_id};
+use orbis_harness::{
+    allocate_source_hub_ports, chain_config_from, generate_identity_keys, generate_run_id,
+    source_hub_address, SourceHubConfig, SourceHubNode,
+};
 
 // ============================================================================
 // ACP Policy YAML templates
@@ -145,7 +147,7 @@ impl ServiceIdentity {
             format!("{:0>64x}", ((h1 as u128) << 64) | (h2 as u128))
         };
 
-        let did = orbis_harness::sourcehub::source_hub_address(&private_key_hex)
+        let did = source_hub_address(&private_key_hex)
             .unwrap_or_else(|e| panic!("derive address for {}: {}", label, e));
 
         let (did_key, _pub_bytes) = did_key_from_secp256k1(&private_key_hex)
@@ -185,7 +187,7 @@ async fn xarchive_full_service_key_architecture() {
     let orbis_operator_keys = generate_identity_keys(&run_id, 3);
 
     eprintln!("[xarchive] Starting SourceHub...");
-    let sh_ports = sourcehub::allocate_source_hub_ports().expect("allocate sh ports");
+    let sh_ports = allocate_source_hub_ports().expect("allocate sh ports");
     let sh_home = run_dir.node_dir("sourcehub").expect("sh dir");
     let sh_log_dir = sh_home.join("logs");
     std::fs::create_dir_all(&sh_log_dir).expect("sh log dir");
@@ -221,7 +223,7 @@ async fn xarchive_full_service_key_architecture() {
         .await
         .expect("all nodes should be healthy");
 
-    let chain_config = sourcehub.chain_config();
+    let chain_config = chain_config_from(&sourcehub);
 
     let mut node_infos = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {
@@ -463,7 +465,11 @@ async fn xarchive_full_service_key_architecture() {
     let defra_root = defra_dir.join("data");
     std::fs::create_dir_all(&defra_root).expect("defra data dir");
 
-    let sh_config = sourcehub.defra_config();
+    let sh_config = SourceHubConfig {
+        lcd_url: sourcehub.lcd_url.clone(),
+        comet_rpc_url: sourcehub.comet_rpc_url.clone(),
+        chain_id: sourcehub.chain_id.clone(),
+    };
 
     let orbis_signer = OrbisSignerConfig {
         endpoint: ring.node(0).grpc_addr(),

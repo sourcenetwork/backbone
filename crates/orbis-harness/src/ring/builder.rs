@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use super::health::{self, HealthCheckConfig};
 use super::node::OrbisNode;
-use crate::sourcehub::SourceHubNode;
+use sourcehub_harness::SourceHubNode;
 
 /// SourceHub URLs needed by orbis-node CLI args.
 ///

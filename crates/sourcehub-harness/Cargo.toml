@@ -1,0 +1,17 @@
+[package]
+name = "sourcehub-harness"
+version = "0.1.0"
+description = "SourceHub devnet manager for integration tests"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+test-infra = { path = "../test-infra" }
+tokio.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+eyre.workspace = true
+regex.workspace = true
+tracing.workspace = true
+hex.workspace = true
+cosmrs = { version = "0.22", features = ["rpc"] }

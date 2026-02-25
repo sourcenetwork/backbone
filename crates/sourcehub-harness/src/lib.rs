@@ -1,4 +1,4 @@
-pub(crate) mod genesis;
+pub mod genesis;
 pub mod identity;
 mod node;
 

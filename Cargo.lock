@@ -2886,7 +2886,6 @@ dependencies = [
 name = "defra-harness"
 version = "0.1.0"
 dependencies = [
- "cosmrs 0.22.0",
  "eyre",
  "futures",
  "libc",
@@ -2896,6 +2895,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sourcehub-harness",
  "test-infra",
  "tokio",
  "tracing",
@@ -5487,7 +5487,6 @@ dependencies = [
  "bulletin",
  "cli-tool",
  "common",
- "cosmrs 0.19.0",
  "crypto 0.0.1",
  "eyre",
  "futures",
@@ -5499,6 +5498,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sourcehub-harness",
  "test-infra",
  "tokio",
  "tonic 0.14.5",
@@ -7571,6 +7571,21 @@ checksum = "86f4aa3ad99f2088c990dfa82d367e19cb29268ed67c574d10d0a4bfe71f07e0"
 dependencies = [
  "libc",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "sourcehub-harness"
+version = "0.1.0"
+dependencies = [
+ "cosmrs 0.22.0",
+ "eyre",
+ "hex",
+ "regex",
+ "reqwest 0.12.28",
+ "serde_json",
+ "test-infra",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

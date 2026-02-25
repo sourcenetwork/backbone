@@ -10,13 +10,13 @@
 pub mod defradb;
 pub mod fixture;
 pub mod ring;
-pub mod sourcehub;
 
 pub use defradb::identity::DefraHttpClient;
 pub use defradb::{DefraDbNode, DefraDbPorts, OrbisSignerConfig, SourceHubConfig};
-pub use fixture::DkgFixture;
+pub use fixture::{chain_config_from, DkgFixture};
 pub use ring::{OrbisNode, OrbisRing, OrbisRingBuilder, SourceHubUrls};
-pub use sourcehub::{SourceHubNode, SourceHubPorts};
+pub use sourcehub_harness::{allocate_source_hub_ports, source_hub_address};
+pub use sourcehub_harness::{SourceHubNode, SourceHubPorts};
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

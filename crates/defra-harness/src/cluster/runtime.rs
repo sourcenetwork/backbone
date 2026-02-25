@@ -9,7 +9,7 @@ use crate::divergences::NodeKind;
 use crate::node::{DefraNode, NodeConfig, RustNode};
 use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
-use crate::sourcehub::SourceHubNode;
+use sourcehub_harness::SourceHubNode;
 
 use super::health::health_check;
 

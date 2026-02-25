@@ -5,8 +5,10 @@ use std::time::Duration;
 use common::blockchain::events::BulletinEventSubscription;
 use orbis_harness::defradb::{self, DefraDbNode};
 use orbis_harness::ring::{OrbisRing, SourceHubUrls};
-use orbis_harness::sourcehub::{self, SourceHubNode};
-use orbis_harness::{generate_identity_keys, generate_run_id};
+use orbis_harness::{
+    allocate_source_hub_ports, chain_config_from, generate_identity_keys, generate_run_id,
+    SourceHubConfig, SourceHubNode,
+};
 
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
 const SIMPLE_SCHEMA: &str = "type Note { title: String  body: String }";
@@ -36,7 +38,7 @@ async fn three_component_smoke() {
     // 1. Start SourceHub
     // ================================================================
     eprintln!("[smoke] Starting SourceHub...");
-    let sh_ports = sourcehub::allocate_source_hub_ports().expect("allocate sourcehub ports");
+    let sh_ports = allocate_source_hub_ports().expect("allocate sourcehub ports");
     let sh_home = run_dir.node_dir("sourcehub").expect("create sourcehub dir");
     let sh_log_dir = sh_home.join("logs");
     std::fs::create_dir_all(&sh_log_dir).expect("create sourcehub log dir");
@@ -67,7 +69,11 @@ async fn three_component_smoke() {
     let defra_root = defra_dir.join("data");
     std::fs::create_dir_all(&defra_root).expect("create defra data dir");
 
-    let sh_config = sourcehub.defra_config();
+    let sh_config = SourceHubConfig {
+        lcd_url: sourcehub.lcd_url.clone(),
+        comet_rpc_url: sourcehub.comet_rpc_url.clone(),
+        chain_id: sourcehub.chain_id.clone(),
+    };
     let defra = DefraDbNode::start(
         defra_root,
         defra_log_dir,
@@ -107,7 +113,7 @@ async fn three_component_smoke() {
 
     eprintln!("[smoke] Orbis ring ready ({} nodes)", ring.node_count());
 
-    let chain_config = sourcehub.chain_config();
+    let chain_config = chain_config_from(&sourcehub);
 
     let mut node_infos = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {

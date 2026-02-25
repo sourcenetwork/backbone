@@ -8,11 +8,11 @@
 
 use common::blockchain::events::BulletinEventSubscription;
 use common::blockchain::ChainConfig;
+use sourcehub_harness::SourceHubNode;
 use std::time::Duration;
 
 use crate::ring::{OrbisRing, SourceHubUrls};
-use crate::sourcehub::{self, SourceHubNode};
-use crate::{generate_identity_keys, generate_run_id};
+use crate::{allocate_source_hub_ports, generate_identity_keys, generate_run_id};
 
 /// The bulletin namespace used for ring payloads (must match orbis-node constant).
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
@@ -31,7 +31,7 @@ pub struct DkgFixture {
 
 impl DkgFixture {
     pub fn chain_config(&self) -> ChainConfig {
-        self.sourcehub.chain_config()
+        chain_config_from(&self.sourcehub)
     }
 
     pub fn endpoint(&self) -> String {
@@ -53,8 +53,7 @@ pub async fn setup_dkg() -> DkgFixture {
     let identity_keys = generate_identity_keys(&run_id, 3);
 
     // Start SourceHub
-    let sh_ports =
-        sourcehub::allocate_source_hub_ports().expect("fixture: allocate sourcehub ports");
+    let sh_ports = allocate_source_hub_ports().expect("fixture: allocate sourcehub ports");
     let sh_home = run_dir
         .node_dir("sourcehub")
         .expect("fixture: create sourcehub dir");
@@ -87,7 +86,7 @@ pub async fn setup_dkg() -> DkgFixture {
         .await
         .expect("fixture: all nodes should be healthy");
 
-    let chain_config = sourcehub.chain_config();
+    let chain_config = chain_config_from(&sourcehub);
 
     // Query node info
     let mut node_infos = Vec::with_capacity(ring.node_count());
@@ -162,5 +161,22 @@ pub async fn setup_dkg() -> DkgFixture {
         ring_id,
         node_infos,
         _run_dir: run_dir,
+    }
+}
+
+/// Build a `ChainConfig` from a SourceHub node's public fields.
+///
+/// Lives here rather than on `SourceHubNode` because `ChainConfig` is an
+/// orbis-rs type and `sourcehub-harness` has no orbis-rs dependency.
+pub fn chain_config_from(sh: &SourceHubNode) -> ChainConfig {
+    ChainConfig {
+        chain_id: sh.chain_id.clone(),
+        rpc_url: sh.comet_rpc_url.clone(),
+        rest_url: sh.lcd_url.clone(),
+        grpc_url: sh.grpc_url.clone(),
+        account_prefix: "source".to_string(),
+        default_gas_limit: 300_000,
+        gas_price: common::blockchain::GasPrice::default(),
+        gas_multiplier: 1.2,
     }
 }

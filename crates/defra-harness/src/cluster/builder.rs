@@ -8,8 +8,8 @@ use crate::divergences::NodeKind;
 use crate::node::{BinarySource, DefraNode, GoNode, NodeConfig, RustNode};
 use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
-use crate::ports::{allocate_node_ports, allocate_source_hub_ports};
-use crate::sourcehub::SourceHubNode;
+use crate::ports::allocate_node_ports;
+use sourcehub_harness::{allocate_source_hub_ports, SourceHubNode};
 
 use super::health::health_check_all;
 use super::runtime::{RunningNode, TestCluster};

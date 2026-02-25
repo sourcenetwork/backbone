@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 test-infra = { path = "../test-infra" }
+sourcehub-harness = { path = "../sourcehub-harness" }
 tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -23,8 +24,6 @@ common = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/xar
 proto = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/xarchive-spec-test" }
 bulletin = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/xarchive-spec-test" }
 
-# Cosmos identity derivation (secp256k1 -> source1... address)
-cosmrs = "0.19"
 k256 = { version = "0.13", features = ["ecdsa"] }
 bs58 = "0.5"
 base64 = "0.22"

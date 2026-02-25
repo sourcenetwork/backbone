@@ -10,7 +10,6 @@ pub mod observe;
 pub mod p2p_helpers;
 pub mod poll;
 pub mod ports;
-pub mod sourcehub;
 pub mod sse;
 pub mod wasm_lens;
 
