@@ -2,13 +2,31 @@
 
 use std::time::Duration;
 
-use bulletin::r#trait::{BulletinPost, DocumentPayload};
-use crypto::helpers::{generate_keypair, generate_policy_metadata};
+use crypto::helpers::generate_keypair;
 use crypto::r#trait::{ThresholdDealer, ThresholdSigner};
 use crypto::{CryptoDeserialize, CryptoSerialize, GroupAffine, PreImpl, SignImpl};
+use orbis_harness::cli::types::{BulletinPost, DocumentPayload};
 use orbis_harness::fixture::setup_dkg;
 
 const BULLETIN_PLACEHOLDER_PROOF: &[u8] = &[0x01];
+
+const DEFAULT_ACP_POLICY_YAML: &str = r#"
+name: default-e2e-policy
+resources:
+  - name: document
+    relations:
+      - name: reader
+        types:
+          - actor
+      - name: writer
+        types:
+          - actor
+    permissions:
+      - name: read
+        expr: writer + reader
+      - name: write
+        expr: writer
+"#;
 
 #[tokio::test]
 #[ignore = "requires sourcehubd on PATH and ~2 min runtime"]
@@ -19,7 +37,8 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
         .try_init();
 
     let fixture = setup_dkg().await;
-    let chain_config = fixture.chain_config();
+    let orbis_cli = &fixture.orbis_cli;
+    let sourcehub_cli = &fixture.sourcehub_cli;
     let endpoint = fixture.endpoint();
     let ring_pk_hex = &fixture.ring_pk_hex;
     let ring_id = &fixture.ring_id;
@@ -36,28 +55,24 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     let reader_pk_hex =
         hex::encode(CryptoSerialize::to_bytes(&reader_pk).expect("serialize reader pk"));
 
-    let resource = "document".to_string();
-    let relation = "reader".to_string();
-    let permission = "read".to_string();
-    let did_pk_string = "test_did_secret".to_string();
-    let namespace = "e2e_pipeline_ns".to_string();
+    let resource = "document";
+    let relation = "reader";
+    let permission = "read";
+    let did_pk_string = "test_did_secret";
+    let namespace = "e2e_pipeline_ns";
     let full_namespace = format!("bulletin/{}", namespace);
 
-    let policy_id = cli_tool::add_policy_to_chain(chain_config.clone())
-        .await
+    let policy_id = sourcehub_cli
+        .create_policy(DEFAULT_ACP_POLICY_YAML)
         .expect("add policy");
 
-    cli_tool::register_bulletin_namespace(namespace.clone(), chain_config.clone())
-        .await
+    sourcehub_cli
+        .register_namespace(namespace)
         .expect("register user namespace");
 
-    cli_tool::add_bulletin_collaborator(
-        namespace.clone(),
-        fixture.node_infos[0].public_address.clone(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("add node as collaborator");
+    sourcehub_cli
+        .add_collaborator(namespace, &fixture.node_infos[0].public_address)
+        .expect("add node as collaborator");
 
     // ================================================================
     // Store secrets: manual + service paths
@@ -68,7 +83,7 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
 
     // Manual path: encrypt + post directly to bulletin
     let object_id_manual = {
-        let metadata = generate_policy_metadata(&policy_id, &resource, &permission);
+        let metadata = PreImpl::encode_metadata(&policy_id, resource, permission, None, None, None);
         let (_enc_cmt, encrypted_secret, enc_proof) = PreImpl::encrypt_secret(
             &ring_pk_point,
             b"Hello from manual path!",
@@ -81,80 +96,80 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
             document: serde_json::to_string(&encrypted_secret).expect("serialize"),
             proof: String::try_from(enc_proof).expect("serialize proof"),
             policy_id: policy_id.clone(),
-            resource: resource.clone(),
-            permission: permission.clone(),
+            resource: resource.to_string(),
+            permission: permission.to_string(),
+            tier: None,
+            date: None,
         };
-        let serialized: Vec<u8> = payload.try_into().expect("serialize payload");
-        cli_tool::create_bulletin_post(namespace.clone(), serialized, proof, chain_config.clone())
-            .await
+        let serialized: Vec<u8> = serde_json::to_vec(&payload).expect("serialize payload");
+        sourcehub_cli
+            .create_post(namespace, &hex::encode(&serialized), &hex::encode(&proof))
             .expect("create_bulletin_post")
     };
 
     // Service path: prepare + store
     let secret = b"Hello from StoreSecret!";
-    let prepared_secret = cli_tool::prepare_secret(
-        secret,
-        ring_pk_hex,
-        None,
-        policy_id.clone(),
-        resource.clone(),
-        permission.clone(),
-    )
-    .expect("prepare_secret");
+    let prepared_secret = orbis_cli
+        .prepare_secret(secret, ring_pk_hex, None, &policy_id, resource, permission)
+        .expect("prepare_secret");
 
-    let derivation = b"test_derivation".to_vec();
-    let prepared_secret_derived = cli_tool::prepare_secret(
-        secret,
-        ring_pk_hex,
-        Some(derivation.clone()),
-        policy_id.clone(),
-        resource.clone(),
-        permission.clone(),
-    )
-    .expect("prepare_secret derived");
+    let derivation = b"test_derivation";
+    let derivation_hex = hex::encode(derivation);
+    let prepared_secret_derived = orbis_cli
+        .prepare_secret(
+            secret,
+            ring_pk_hex,
+            Some(&derivation_hex),
+            &policy_id,
+            resource,
+            permission,
+        )
+        .expect("prepare_secret derived");
 
-    let sequence_before = cli_tool::get_account_sequence(node1_address, chain_config.clone())
-        .await
+    let sequence_before = sourcehub_cli
+        .get_account_sequence(node1_address)
         .expect("get sequence before store");
 
-    let object_response = cli_tool::store_prepared_secret(
-        endpoint.clone(),
-        &prepared_secret,
-        ring_id.clone(),
-        namespace.clone(),
-        policy_id.clone(),
-        resource.clone(),
-        permission.clone(),
-        Some(did_pk_string.clone()),
-        None,
-        true,
-    )
-    .await
-    .expect("store_prepared_secret");
+    let object_response = orbis_cli
+        .store_prepared_secret(
+            &endpoint,
+            &prepared_secret,
+            ring_id,
+            namespace,
+            &policy_id,
+            resource,
+            permission,
+            Some(did_pk_string),
+            None,
+            true,
+        )
+        .expect("store_prepared_secret");
 
     let object_id_service = object_response.object_id.clone();
     let signature_hex = object_response.signature.clone();
 
-    let object_response_derived = cli_tool::store_prepared_secret(
-        endpoint.clone(),
-        &prepared_secret_derived.clone(),
-        ring_id.clone(),
-        namespace.clone(),
-        policy_id.clone(),
-        resource.clone(),
-        permission.clone(),
-        Some(did_pk_string.clone()),
-        prepared_secret_derived.derived_pk,
-        false,
-    )
-    .await
-    .expect("store_prepared_secret_derived");
+    let derived_pk_hex = prepared_secret_derived.derived_pk.as_ref().map(hex::encode);
+
+    let object_response_derived = orbis_cli
+        .store_prepared_secret(
+            &endpoint,
+            &prepared_secret_derived,
+            ring_id,
+            namespace,
+            &policy_id,
+            resource,
+            permission,
+            Some(did_pk_string),
+            derived_pk_hex.as_deref(),
+            false,
+        )
+        .expect("store_prepared_secret_derived");
     let object_id_derived = object_response_derived.object_id.clone();
 
     // Verify tx was broadcast
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let sequence_after = cli_tool::get_account_sequence(node1_address, chain_config.clone())
-        .await
+    let sequence_after = sourcehub_cli
+        .get_account_sequence(node1_address)
         .expect("get sequence after store");
     assert!(
         sequence_after > sequence_before,
@@ -164,20 +179,12 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     // ================================================================
     // Verify bulletin posts + BLS signature
     // ================================================================
-    let manual_bytes = cli_tool::read_bulletin_post(
-        full_namespace.clone(),
-        object_id_manual.clone(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("read manual post");
-    let service_bytes = cli_tool::read_bulletin_post(
-        full_namespace.clone(),
-        object_id_service.clone(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("read service post");
+    let manual_bytes = sourcehub_cli
+        .read_post(&full_namespace, &object_id_manual)
+        .expect("read manual post");
+    let service_bytes = sourcehub_cli
+        .read_post(&full_namespace, &object_id_service)
+        .expect("read service post");
 
     let manual: DocumentPayload = serde_json::from_slice(&manual_bytes).expect("parse manual");
     let service: DocumentPayload = serde_json::from_slice(&service_bytes).expect("parse service");
@@ -187,7 +194,7 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     // Verify BLS threshold signature
     let bulletin_post = BulletinPost {
         id: object_id_service.clone(),
-        namespace: namespace.clone(),
+        namespace: namespace.to_string(),
         payload: service_bytes.clone(),
         proof: BULLETIN_PLACEHOLDER_PROOF.to_vec(),
     };
@@ -206,86 +213,74 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     // ACP: register objects + set relationships
     // ================================================================
     for obj_id in [&object_id_manual, &object_id_derived] {
-        cli_tool::register_object_to_chain(
-            policy_id.clone(),
-            obj_id.clone(),
-            resource.clone(),
-            chain_config.clone(),
-        )
-        .await
-        .expect("register_object_to_chain");
+        sourcehub_cli
+            .register_object(&policy_id, obj_id, resource)
+            .expect("register_object_to_chain");
 
-        cli_tool::set_relationship_on_chain(
-            policy_id.clone(),
-            obj_id.clone(),
-            resource.clone(),
-            relation.clone(),
-            Some(did_pk_string.clone()),
-            chain_config.clone(),
-        )
-        .await
-        .expect("set_relationship_on_chain");
+        sourcehub_cli
+            .set_relationship(&policy_id, resource, obj_id, relation, did_pk_string)
+            .expect("set_relationship_on_chain");
     }
 
     // ================================================================
     // PRE + decrypt
     // ================================================================
-    let decrypted = cli_tool::do_pre(
-        endpoint.clone(),
-        ring_pk_hex.clone(),
-        reader_pk_hex.clone(),
-        reader_sk_hex.clone(),
-        object_id_service.clone(),
-        Some(did_pk_string.clone()),
-        full_namespace.clone(),
-        None,
-    )
-    .await
-    .expect("PRE should succeed");
+    let decrypted = orbis_cli
+        .do_pre(
+            &endpoint,
+            ring_pk_hex,
+            &reader_pk_hex,
+            &reader_sk_hex,
+            &object_id_service,
+            Some(did_pk_string),
+            &full_namespace,
+            None,
+        )
+        .expect("PRE should succeed");
     assert_eq!(decrypted, secret, "Decrypted should match original");
     println!("PRE decryption verified!");
 
     // Derived-key PRE
-    let decrypted_derived = cli_tool::do_pre(
-        endpoint.clone(),
-        ring_pk_hex.clone(),
-        reader_pk_hex.clone(),
-        reader_sk_hex.clone(),
-        object_id_derived.clone(),
-        Some(did_pk_string.clone()),
-        full_namespace.clone(),
-        Some(derivation),
-    )
-    .await
-    .expect("derived PRE should succeed");
+    let decrypted_derived = orbis_cli
+        .do_pre(
+            &endpoint,
+            ring_pk_hex,
+            &reader_pk_hex,
+            &reader_sk_hex,
+            &object_id_derived,
+            Some(did_pk_string),
+            &full_namespace,
+            Some(&derivation_hex),
+        )
+        .expect("derived PRE should succeed");
     assert_eq!(decrypted_derived, secret, "Derived decrypted should match");
     println!("Derived-key PRE verified!");
 
     // ================================================================
     // Idempotent store
     // ================================================================
-    let seq_before = cli_tool::get_account_sequence(node1_address, chain_config.clone())
-        .await
+    let seq_before = sourcehub_cli
+        .get_account_sequence(node1_address)
         .expect("seq before idempotent store");
 
-    let response_2 = cli_tool::store_prepared_secret(
-        endpoint.clone(),
-        &prepared_secret,
-        ring_id.clone(),
-        namespace.clone(),
-        policy_id.clone(),
-        resource.clone(),
-        permission.clone(),
-        Some(did_pk_string.clone()),
-        None,
-        true,
-    )
-    .await
-    .expect("idempotent store");
+    let response_2 = orbis_cli
+        .store_prepared_secret(
+            &endpoint,
+            &prepared_secret,
+            ring_id,
+            namespace,
+            &policy_id,
+            resource,
+            permission,
+            Some(did_pk_string),
+            None,
+            true,
+        )
+        .expect("idempotent store");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let seq_after = cli_tool::get_account_sequence(node1_address, chain_config.clone())
-        .await
+    let seq_after = sourcehub_cli
+        .get_account_sequence(node1_address)
         .expect("seq after idempotent store");
 
     assert_eq!(object_id_service, response_2.object_id, "Same object_id");

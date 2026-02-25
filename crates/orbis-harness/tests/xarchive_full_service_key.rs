@@ -41,14 +41,15 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use common::blockchain::events::BulletinEventSubscription;
 use defra_harness::node::RustNode;
+use orbis_harness::cli::signer_did_for_pk;
+use orbis_harness::cli::types::{RingPayload, SignAcpFields};
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
 use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
-    allocate_source_hub_ports, chain_config_from, generate_identity_keys, generate_run_id,
-    source_hub_address, start_node, KeyringBackend, NodeConfig, OrbisSignerConfig, SourceHubConfig,
-    SourceHubNode,
+    allocate_source_hub_ports, generate_identity_keys, generate_run_id, source_hub_address,
+    start_node, BulletinEventSubscription, KeyringBackend, NodeConfig, OrbisCliClient,
+    OrbisSignerConfig, SourceHubCliClient, SourceHubConfig, SourceHubNode,
 };
 
 // ============================================================================
@@ -224,31 +225,26 @@ async fn xarchive_full_service_key_architecture() {
         .await
         .expect("all nodes should be healthy");
 
-    let chain_config = chain_config_from(&sourcehub);
+    let orbis_cli = OrbisCliClient::new().expect("resolve cli-tool binary");
+    let sourcehub_cli =
+        SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
 
     let mut node_infos = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {
-        let info = cli_tool::query_node_info(ring.node(i).grpc_addr())
-            .await
+        let info = orbis_cli
+            .query_node_info(&ring.node(i).grpc_addr())
             .unwrap_or_else(|e| panic!("query node{} info: {}", i, e));
         node_infos.push(info);
     }
 
-    cli_tool::register_bulletin_namespace(
-        BULLETIN_RING_NAMESPACE.to_string(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("register ring namespace");
+    sourcehub_cli
+        .register_namespace(BULLETIN_RING_NAMESPACE)
+        .expect("register ring namespace");
 
     for info in &node_infos {
-        cli_tool::add_bulletin_collaborator(
-            BULLETIN_RING_NAMESPACE.to_string(),
-            info.public_address.clone(),
-            chain_config.clone(),
-        )
-        .await
-        .expect("add collaborator");
+        sourcehub_cli
+            .add_collaborator(BULLETIN_RING_NAMESPACE, &info.public_address)
+            .expect("add collaborator");
     }
 
     let event_subscription = BulletinEventSubscription::connect(&sourcehub.comet_rpc_url)
@@ -258,8 +254,8 @@ async fn xarchive_full_service_key_architecture() {
     let peer_ids: Vec<String> = node_infos.iter().map(|n| n.p2p_address.clone()).collect();
 
     eprintln!("[xarchive] Running DKG...");
-    let dkg_result = cli_tool::do_dkg(ring.node(0).grpc_addr(), ring.threshold(), peer_ids)
-        .await
+    let dkg_result = orbis_cli
+        .do_dkg(&ring.node(0).grpc_addr(), ring.threshold(), &peer_ids)
         .expect("DKG should succeed");
 
     let post_event = event_subscription
@@ -267,15 +263,11 @@ async fn xarchive_full_service_key_architecture() {
         .await
         .expect("DKG completion event");
 
-    let post_payload = cli_tool::read_bulletin_post(
-        BULLETIN_RING_NAMESPACE.to_string(),
-        post_event.post_id.clone(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("read ring post");
+    let post_payload = sourcehub_cli
+        .read_post(BULLETIN_RING_NAMESPACE, &post_event.post_id)
+        .expect("read ring post");
 
-    let ring_payload: bulletin::r#trait::RingPayload =
+    let ring_payload: RingPayload =
         serde_json::from_slice(&post_payload).expect("parse RingPayload");
     let ring_pk_hex = ring_payload.ring_pk;
     let ring_id = post_event.post_id;
@@ -290,20 +282,14 @@ async fn xarchive_full_service_key_architecture() {
     // 2b. Ring-level ACP policy (signing authorization)
     // ================================================================
     eprintln!("[xarchive] Creating ring signing ACP policy...");
-    let ring_policy_id =
-        cli_tool::create_policy_on_chain(RING_SIGNING_POLICY_YAML, chain_config.clone())
-            .await
-            .expect("create ring signing ACP policy");
+    let ring_policy_id = sourcehub_cli
+        .create_policy(RING_SIGNING_POLICY_YAML)
+        .expect("create ring signing ACP policy");
     eprintln!("[xarchive] Ring signing policy created: {}", ring_policy_id);
 
-    cli_tool::register_object_to_chain(
-        ring_policy_id.clone(),
-        ring_id.clone(),
-        "ring".to_string(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("register ring object");
+    sourcehub_cli
+        .register_object(&ring_policy_id, &ring_id, "ring")
+        .expect("register ring object");
     eprintln!(
         "[xarchive] Ring registered as ACP object: {}",
         &ring_id[..16.min(ring_id.len())]
@@ -312,10 +298,9 @@ async fn xarchive_full_service_key_architecture() {
     // ================================================================
     // 3. Generate JACK_DID via Orbis (system identity)
     // ================================================================
-    let jack_derived =
-        cli_tool::derive_public_key(ring.node(0).grpc_addr(), ring_id.clone(), b"jack".to_vec())
-            .await
-            .expect("derive jack public key");
+    let jack_derived = orbis_cli
+        .derive_public_key(&ring.node(0).grpc_addr(), &ring_id, &hex::encode(b"jack"))
+        .expect("derive jack public key");
 
     let jack_did = format!("did:bls:{}", &jack_derived.derived_public_key[..40]);
     eprintln!("[xarchive] JACK_DID: {}", jack_did);
@@ -329,17 +314,16 @@ async fn xarchive_full_service_key_architecture() {
         jack_svc.did, jack_svc.label
     );
 
-    let jack_svc_signer_did = cli_tool::signer_did_for_pk(&jack_svc.private_key_hex);
-    cli_tool::set_relationship_direct(
-        &ring_policy_id,
-        "ring",
-        &ring_id,
-        "signer",
-        &jack_svc_signer_did,
-        chain_config.clone(),
-    )
-    .await
-    .expect("grant jack_svc signer on ring");
+    let jack_svc_signer_did = signer_did_for_pk(&jack_svc.private_key_hex);
+    sourcehub_cli
+        .set_relationship(
+            &ring_policy_id,
+            "ring",
+            &ring_id,
+            "signer",
+            &jack_svc_signer_did,
+        )
+        .expect("grant jack_svc signer on ring");
     eprintln!(
         "[xarchive] jack_svc authorized as ring signer (DID: {}...)",
         &jack_svc_signer_did[..32.min(jack_svc_signer_did.len())]
@@ -353,13 +337,13 @@ async fn xarchive_full_service_key_architecture() {
     // ================================================================
     // 6. Generate COMPARTMENT_DID via Orbis (x-archive identity)
     // ================================================================
-    let compartment_derived = cli_tool::derive_public_key(
-        ring.node(0).grpc_addr(),
-        ring_id.clone(),
-        b"x-archive".to_vec(),
-    )
-    .await
-    .expect("derive x-archive public key");
+    let compartment_derived = orbis_cli
+        .derive_public_key(
+            &ring.node(0).grpc_addr(),
+            &ring_id,
+            &hex::encode(b"x-archive"),
+        )
+        .expect("derive x-archive public key");
 
     let compartment_did = format!("did:bls:{}", &compartment_derived.derived_public_key[..40]);
     eprintln!("[xarchive] COMPARTMENT_DID: {}", compartment_did);
@@ -373,17 +357,16 @@ async fn xarchive_full_service_key_architecture() {
         defra_svc.did, defra_svc.label
     );
 
-    let defra_svc_signer_did = cli_tool::signer_did_for_pk(&defra_svc.private_key_hex);
-    cli_tool::set_relationship_direct(
-        &ring_policy_id,
-        "ring",
-        &ring_id,
-        "signer",
-        &defra_svc_signer_did,
-        chain_config.clone(),
-    )
-    .await
-    .expect("grant defra_svc signer on ring");
+    let defra_svc_signer_did = signer_did_for_pk(&defra_svc.private_key_hex);
+    sourcehub_cli
+        .set_relationship(
+            &ring_policy_id,
+            "ring",
+            &ring_id,
+            "signer",
+            &defra_svc_signer_did,
+        )
+        .expect("grant defra_svc signer on ring");
     eprintln!(
         "[xarchive] defra_svc authorized as ring signer (DID: {}...)",
         &defra_svc_signer_did[..32.min(defra_svc_signer_did.len())]
@@ -399,8 +382,8 @@ async fn xarchive_full_service_key_architecture() {
     // 8. ACP policy via test account (x-archive policy)
     // ================================================================
     eprintln!("[xarchive] Creating x-archive ACP policy...");
-    let x_policy_id = cli_tool::create_policy_on_chain(X_ARCHIVE_POLICY_YAML, chain_config.clone())
-        .await
+    let x_policy_id = sourcehub_cli
+        .create_policy(X_ARCHIVE_POLICY_YAML)
         .expect("create x-archive ACP policy");
     eprintln!("[xarchive] x-archive policy created: {}", x_policy_id);
 
@@ -410,48 +393,36 @@ async fn xarchive_full_service_key_architecture() {
     let tweet_object = "xarchive-tweets";
     let bookmark_object = "xarchive-bookmarks";
 
-    cli_tool::register_object_to_chain(
-        x_policy_id.clone(),
-        tweet_object.to_string(),
-        "tweet".to_string(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("register tweet object");
+    sourcehub_cli
+        .register_object(&x_policy_id, tweet_object, "tweet")
+        .expect("register tweet object");
 
-    cli_tool::register_object_to_chain(
-        x_policy_id.clone(),
-        bookmark_object.to_string(),
-        "bookmark".to_string(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("register bookmark object");
+    sourcehub_cli
+        .register_object(&x_policy_id, bookmark_object, "bookmark")
+        .expect("register bookmark object");
 
     for relation in &["writer", "reader"] {
-        cli_tool::set_relationship_direct(
-            &x_policy_id,
-            "tweet",
-            tweet_object,
-            relation,
-            &app_svc.did_key,
-            chain_config.clone(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("grant app_svc {} on tweet: {}", relation, e));
+        sourcehub_cli
+            .set_relationship(
+                &x_policy_id,
+                "tweet",
+                tweet_object,
+                relation,
+                &app_svc.did_key,
+            )
+            .unwrap_or_else(|e| panic!("grant app_svc {} on tweet: {}", relation, e));
     }
 
     for relation in &["writer", "reader"] {
-        cli_tool::set_relationship_direct(
-            &x_policy_id,
-            "bookmark",
-            bookmark_object,
-            relation,
-            &app_svc.did_key,
-            chain_config.clone(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("grant app_svc {} on bookmark: {}", relation, e));
+        sourcehub_cli
+            .set_relationship(
+                &x_policy_id,
+                "bookmark",
+                bookmark_object,
+                relation,
+                &app_svc.did_key,
+            )
+            .unwrap_or_else(|e| panic!("grant app_svc {} on bookmark: {}", relation, e));
     }
 
     eprintln!("[xarchive] ACP grants applied (app_svc writer+reader on tweet+bookmark)");
@@ -686,13 +657,9 @@ async fn xarchive_full_service_key_architecture() {
     // ================================================================
     // 17. Multi-compartment key derivation
     // ================================================================
-    let hiking_derived = cli_tool::derive_public_key(
-        ring.node(0).grpc_addr(),
-        ring_id.clone(),
-        b"hiking".to_vec(),
-    )
-    .await
-    .expect("derive hiking public key");
+    let hiking_derived = orbis_cli
+        .derive_public_key(&ring.node(0).grpc_addr(), &ring_id, &hex::encode(b"hiking"))
+        .expect("derive hiking public key");
 
     let hiking_did = format!("did:bls:{}", &hiking_derived.derived_public_key[..40]);
     eprintln!("[xarchive] HIKING_DID: {}", hiking_did);
@@ -714,23 +681,22 @@ async fn xarchive_full_service_key_architecture() {
     // ================================================================
     // 17b. Direct Sign-with-ACP: authorized signer succeeds
     // ================================================================
-    let sign_acp = cli_tool::SignAcpFields {
+    let sign_acp = SignAcpFields {
         policy_id: ring_policy_id.clone(),
         resource: "ring".to_string(),
         object_id: ring_id.clone(),
         permission: "signer".to_string(),
     };
 
-    let sign_message = b"test message for ACP-enforced signing".to_vec();
-    let sign_result = cli_tool::do_sign(
-        ring.node(0).grpc_addr(),
-        ring_id.clone(),
-        sign_message.clone(),
-        Some(b"x-archive".to_vec()),
-        Some(defra_svc.private_key_hex.clone()),
-        Some(sign_acp.clone()),
-    )
-    .await;
+    let sign_message = hex::encode(b"test message for ACP-enforced signing");
+    let sign_result = orbis_cli.do_sign(
+        &ring.node(0).grpc_addr(),
+        &ring_id,
+        &sign_message,
+        Some(&hex::encode(b"x-archive")),
+        Some(&defra_svc.private_key_hex),
+        Some(&sign_acp),
+    );
 
     assert!(
         sign_result.is_ok(),
@@ -750,15 +716,14 @@ async fn xarchive_full_service_key_architecture() {
     // ================================================================
     // 17c. Direct Sign-with-ACP: unauthorized signer denied
     // ================================================================
-    let unauthorized_result = cli_tool::do_sign(
-        ring.node(0).grpc_addr(),
-        ring_id.clone(),
-        sign_message.clone(),
-        Some(b"x-archive".to_vec()),
-        Some(app_svc.private_key_hex.clone()),
-        Some(sign_acp.clone()),
-    )
-    .await;
+    let unauthorized_result = orbis_cli.do_sign(
+        &ring.node(0).grpc_addr(),
+        &ring_id,
+        &sign_message,
+        Some(&hex::encode(b"x-archive")),
+        Some(&app_svc.private_key_hex),
+        Some(&sign_acp),
+    );
 
     assert!(
         unauthorized_result.is_err(),
@@ -773,15 +738,14 @@ async fn xarchive_full_service_key_architecture() {
     // ================================================================
     // 17d. Direct Sign without ACP: backward compatible
     // ================================================================
-    let no_acp_result = cli_tool::do_sign(
-        ring.node(0).grpc_addr(),
-        ring_id.clone(),
-        sign_message,
-        Some(b"x-archive".to_vec()),
-        Some(defra_svc.private_key_hex.clone()),
+    let no_acp_result = orbis_cli.do_sign(
+        &ring.node(0).grpc_addr(),
+        &ring_id,
+        &sign_message,
+        Some(&hex::encode(b"x-archive")),
+        Some(&defra_svc.private_key_hex),
         None,
-    )
-    .await;
+    );
 
     assert!(
         no_acp_result.is_ok(),
@@ -808,50 +772,41 @@ async fn xarchive_full_service_key_architecture() {
         hiking_defra_svc.did, hiking_app_svc.did, hiking_app_svc.did_key,
     );
 
-    let hiking_defra_svc_signer_did =
-        cli_tool::signer_did_for_pk(&hiking_defra_svc.private_key_hex);
-    cli_tool::set_relationship_direct(
-        &ring_policy_id,
-        "ring",
-        &ring_id,
-        "signer",
-        &hiking_defra_svc_signer_did,
-        chain_config.clone(),
-    )
-    .await
-    .expect("grant hiking_defra_svc signer on ring");
+    let hiking_defra_svc_signer_did = signer_did_for_pk(&hiking_defra_svc.private_key_hex);
+    sourcehub_cli
+        .set_relationship(
+            &ring_policy_id,
+            "ring",
+            &ring_id,
+            "signer",
+            &hiking_defra_svc_signer_did,
+        )
+        .expect("grant hiking_defra_svc signer on ring");
     eprintln!(
         "[hiking] hiking_defra_svc authorized as ring signer (DID: {}...)",
         &hiking_defra_svc_signer_did[..32.min(hiking_defra_svc_signer_did.len())]
     );
 
-    let hiking_policy_id =
-        cli_tool::create_policy_on_chain(HIKING_POLICY_YAML, chain_config.clone())
-            .await
-            .expect("create hiking ACP policy");
+    let hiking_policy_id = sourcehub_cli
+        .create_policy(HIKING_POLICY_YAML)
+        .expect("create hiking ACP policy");
     eprintln!("[hiking] Policy created: {}", hiking_policy_id);
 
     let trail_object = "hiking-trails";
-    cli_tool::register_object_to_chain(
-        hiking_policy_id.clone(),
-        trail_object.to_string(),
-        "trail".to_string(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("register trail object");
+    sourcehub_cli
+        .register_object(&hiking_policy_id, trail_object, "trail")
+        .expect("register trail object");
 
     for relation in &["writer", "reader"] {
-        cli_tool::set_relationship_direct(
-            &hiking_policy_id,
-            "trail",
-            trail_object,
-            relation,
-            &hiking_app_svc.did_key,
-            chain_config.clone(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("grant hiking_app_svc {} on trail: {}", relation, e));
+        sourcehub_cli
+            .set_relationship(
+                &hiking_policy_id,
+                "trail",
+                trail_object,
+                relation,
+                &hiking_app_svc.did_key,
+            )
+            .unwrap_or_else(|e| panic!("grant hiking_app_svc {} on trail: {}", relation, e));
     }
 
     let hiking_defra_ports = test_infra::allocate_ports(2).expect("hiking defra ports");
@@ -990,16 +945,15 @@ async fn xarchive_full_service_key_architecture() {
         agent_svc.did, agent_svc.did_key,
     );
 
-    cli_tool::set_relationship_direct(
-        &hiking_policy_id,
-        "trail",
-        trail_object,
-        "reader",
-        &agent_svc.did_key,
-        chain_config.clone(),
-    )
-    .await
-    .expect("grant agent reader on trail");
+    sourcehub_cli
+        .set_relationship(
+            &hiking_policy_id,
+            "trail",
+            trail_object,
+            "reader",
+            &agent_svc.did_key,
+        )
+        .expect("grant agent reader on trail");
     eprintln!("[agent] Granted reader on hiking/trail");
 
     let agent_trail_query = r#"query { Trail { _docID name difficulty } }"#;
@@ -1077,27 +1031,25 @@ async fn xarchive_full_service_key_architecture() {
         backup_svc.did, backup_svc.did_key,
     );
 
-    cli_tool::set_relationship_direct(
-        &x_policy_id,
-        "tweet",
-        tweet_object,
-        "reader",
-        &backup_svc.did_key,
-        chain_config.clone(),
-    )
-    .await
-    .expect("grant backup reader on tweet");
+    sourcehub_cli
+        .set_relationship(
+            &x_policy_id,
+            "tweet",
+            tweet_object,
+            "reader",
+            &backup_svc.did_key,
+        )
+        .expect("grant backup reader on tweet");
 
-    cli_tool::set_relationship_direct(
-        &hiking_policy_id,
-        "trail",
-        trail_object,
-        "reader",
-        &backup_svc.did_key,
-        chain_config.clone(),
-    )
-    .await
-    .expect("grant backup reader on trail");
+    sourcehub_cli
+        .set_relationship(
+            &hiking_policy_id,
+            "trail",
+            trail_object,
+            "reader",
+            &backup_svc.did_key,
+        )
+        .expect("grant backup reader on trail");
     eprintln!("[backup] Granted reader on x-archive/tweet + hiking/trail");
 
     let backup_tweet_body = xarchive_client
@@ -1193,16 +1145,15 @@ async fn xarchive_full_service_key_architecture() {
     // 32. Revocation
     // ================================================================
     eprintln!("[lifecycle] Testing permission revocation...");
-    cli_tool::delete_relationship_on_chain(
-        &hiking_policy_id,
-        "trail",
-        trail_object,
-        "reader",
-        &agent_svc.did_key,
-        chain_config.clone(),
-    )
-    .await
-    .expect("delete agent reader on trail");
+    sourcehub_cli
+        .delete_relationship(
+            &hiking_policy_id,
+            "trail",
+            trail_object,
+            "reader",
+            &agent_svc.did_key,
+        )
+        .expect("delete agent reader on trail");
     eprintln!("[lifecycle] Revoked agent reader on hiking/trail");
 
     let revoked_agent_query = hiking_client
@@ -1235,16 +1186,15 @@ async fn xarchive_full_service_key_architecture() {
     );
 
     for relation in &["writer", "reader"] {
-        cli_tool::set_relationship_direct(
-            &x_policy_id,
-            "tweet",
-            tweet_object,
-            relation,
-            &new_app_svc.did_key,
-            chain_config.clone(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("grant new_app_svc {} on tweet: {}", relation, e));
+        sourcehub_cli
+            .set_relationship(
+                &x_policy_id,
+                "tweet",
+                tweet_object,
+                relation,
+                &new_app_svc.did_key,
+            )
+            .unwrap_or_else(|e| panic!("grant new_app_svc {} on tweet: {}", relation, e));
     }
 
     let new_svc_write = r#"mutation {
@@ -1283,16 +1233,15 @@ async fn xarchive_full_service_key_architecture() {
     // 34. Revoke old APP_SVC -> old writes fail, new still works
     // ================================================================
     for relation in &["writer", "reader"] {
-        cli_tool::delete_relationship_on_chain(
-            &x_policy_id,
-            "tweet",
-            tweet_object,
-            relation,
-            &app_svc.did_key,
-            chain_config.clone(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("revoke old app_svc {} on tweet: {}", relation, e));
+        sourcehub_cli
+            .delete_relationship(
+                &x_policy_id,
+                "tweet",
+                tweet_object,
+                relation,
+                &app_svc.did_key,
+            )
+            .unwrap_or_else(|e| panic!("revoke old app_svc {} on tweet: {}", relation, e));
     }
     eprintln!("[lifecycle] Revoked old app_svc grants on tweet");
 

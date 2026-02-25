@@ -2,16 +2,35 @@
 
 use std::time::Duration;
 
-use common::blockchain::events::BulletinEventSubscription;
 use defra_harness::node::RustNode;
+use orbis_harness::cli::types::RingPayload;
 use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
-    allocate_source_hub_ports, chain_config_from, generate_identity_keys, generate_run_id,
-    start_node, KeyringBackend, NodeConfig, SourceHubConfig, SourceHubNode,
+    allocate_source_hub_ports, generate_identity_keys, generate_run_id, start_node,
+    BulletinEventSubscription, KeyringBackend, NodeConfig, OrbisCliClient, SourceHubCliClient,
+    SourceHubConfig, SourceHubNode,
 };
 
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
 const SIMPLE_SCHEMA: &str = "type Note { title: String  body: String }";
+
+const DEFAULT_ACP_POLICY_YAML: &str = r#"
+name: default-e2e-policy
+resources:
+  - name: document
+    relations:
+      - name: reader
+        types:
+          - actor
+      - name: writer
+        types:
+          - actor
+    permissions:
+      - name: read
+        expr: writer + reader
+      - name: write
+        expr: writer
+"#;
 
 #[tokio::test]
 #[ignore = "requires sourcehubd and defra on PATH, ~2 min runtime"]
@@ -116,31 +135,26 @@ async fn three_component_smoke() {
 
     eprintln!("[smoke] Orbis ring ready ({} nodes)", ring.node_count());
 
-    let chain_config = chain_config_from(&sourcehub);
+    let orbis_cli = OrbisCliClient::new().expect("resolve cli-tool binary");
+    let sourcehub_cli =
+        SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
 
     let mut node_infos = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {
-        let info = cli_tool::query_node_info(ring.node(i).grpc_addr())
-            .await
+        let info = orbis_cli
+            .query_node_info(&ring.node(i).grpc_addr())
             .unwrap_or_else(|e| panic!("query node{} info: {}", i, e));
         node_infos.push(info);
     }
 
-    cli_tool::register_bulletin_namespace(
-        BULLETIN_RING_NAMESPACE.to_string(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("register ring namespace");
+    sourcehub_cli
+        .register_namespace(BULLETIN_RING_NAMESPACE)
+        .expect("register ring namespace");
 
     for info in &node_infos {
-        cli_tool::add_bulletin_collaborator(
-            BULLETIN_RING_NAMESPACE.to_string(),
-            info.public_address.clone(),
-            chain_config.clone(),
-        )
-        .await
-        .expect("add collaborator");
+        sourcehub_cli
+            .add_collaborator(BULLETIN_RING_NAMESPACE, &info.public_address)
+            .expect("add collaborator");
     }
 
     let event_subscription = BulletinEventSubscription::connect(&sourcehub.comet_rpc_url)
@@ -150,8 +164,8 @@ async fn three_component_smoke() {
     let peer_ids: Vec<String> = node_infos.iter().map(|n| n.p2p_address.clone()).collect();
 
     eprintln!("[smoke] Running DKG...");
-    let dkg_result = cli_tool::do_dkg(ring.node(0).grpc_addr(), ring.threshold(), peer_ids)
-        .await
+    let dkg_result = orbis_cli
+        .do_dkg(&ring.node(0).grpc_addr(), ring.threshold(), &peer_ids)
         .expect("DKG should succeed");
 
     let session_id = dkg_result.session_id;
@@ -160,15 +174,11 @@ async fn three_component_smoke() {
         .await
         .expect("DKG completion event");
 
-    let post_payload = cli_tool::read_bulletin_post(
-        BULLETIN_RING_NAMESPACE.to_string(),
-        post_event.post_id.clone(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("read ring post");
+    let post_payload = sourcehub_cli
+        .read_post(BULLETIN_RING_NAMESPACE, &post_event.post_id)
+        .expect("read ring post");
 
-    let ring_payload: bulletin::r#trait::RingPayload =
+    let ring_payload: RingPayload =
         serde_json::from_slice(&post_payload).expect("parse RingPayload");
     let ring_pk_hex = ring_payload.ring_pk;
     let ring_id = post_event.post_id;
@@ -244,50 +254,40 @@ async fn three_component_smoke() {
     // ================================================================
     eprintln!("[smoke] Testing Orbis secret storage...");
 
-    let policy_id = cli_tool::add_policy_to_chain(chain_config.clone())
-        .await
+    let policy_id = sourcehub_cli
+        .create_policy(DEFAULT_ACP_POLICY_YAML)
         .expect("add policy");
 
-    let resource = "document".to_string();
-    let permission = "read".to_string();
-    let namespace = "smoke_test_ns".to_string();
+    let resource = "document";
+    let permission = "read";
+    let namespace = "smoke_test_ns";
 
-    cli_tool::register_bulletin_namespace(namespace.clone(), chain_config.clone())
-        .await
+    sourcehub_cli
+        .register_namespace(namespace)
         .expect("register user namespace");
-    cli_tool::add_bulletin_collaborator(
-        namespace.clone(),
-        node_infos[0].public_address.clone(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("add node as collaborator");
+    sourcehub_cli
+        .add_collaborator(namespace, &node_infos[0].public_address)
+        .expect("add node as collaborator");
 
     let secret = b"Three components working together!";
-    let prepared = cli_tool::prepare_secret(
-        secret,
-        &ring_pk_hex,
-        None,
-        policy_id.clone(),
-        resource.clone(),
-        permission.clone(),
-    )
-    .expect("prepare_secret");
+    let prepared = orbis_cli
+        .prepare_secret(secret, &ring_pk_hex, None, &policy_id, resource, permission)
+        .expect("prepare_secret");
 
-    let store_result = cli_tool::store_prepared_secret(
-        ring.node(0).grpc_addr(),
-        &prepared,
-        ring_id.clone(),
-        namespace.clone(),
-        policy_id,
-        resource,
-        permission,
-        Some("smoke_test_did".to_string()),
-        None,
-        true,
-    )
-    .await
-    .expect("store secret");
+    let store_result = orbis_cli
+        .store_prepared_secret(
+            &ring.node(0).grpc_addr(),
+            &prepared,
+            &ring_id,
+            namespace,
+            &policy_id,
+            resource,
+            permission,
+            Some("smoke_test_did"),
+            None,
+            true,
+        )
+        .expect("store secret");
 
     eprintln!(
         "[smoke] Secret stored. Object ID: {}",

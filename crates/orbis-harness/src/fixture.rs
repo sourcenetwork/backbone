@@ -6,11 +6,11 @@
 //! The returned `DkgFixture` owns the ring, SourceHub, and run directory
 //! independently. Drop order is: ring -> sourcehub -> run_dir (by field order).
 
-use common::blockchain::events::BulletinEventSubscription;
-use common::blockchain::ChainConfig;
 use sourcehub_harness::SourceHubNode;
 use std::time::Duration;
 
+use crate::cli::types::{NodeInfoResult, RingPayload};
+use crate::cli::{BulletinEventSubscription, OrbisCliClient, SourceHubCliClient};
 use crate::ring::OrbisRing;
 use crate::{allocate_source_hub_ports, generate_identity_keys, generate_run_id};
 use sourcehub_harness::SourceHubConfig;
@@ -26,15 +26,13 @@ pub struct DkgFixture {
     pub sourcehub: SourceHubNode,
     pub ring_pk_hex: String,
     pub ring_id: String,
-    pub node_infos: Vec<cli_tool::NodeInfoResult>,
+    pub node_infos: Vec<NodeInfoResult>,
+    pub orbis_cli: OrbisCliClient,
+    pub sourcehub_cli: SourceHubCliClient,
     _run_dir: test_infra::TestRunDir,
 }
 
 impl DkgFixture {
-    pub fn chain_config(&self) -> ChainConfig {
-        chain_config_from(&self.sourcehub)
-    }
-
     pub fn endpoint(&self) -> String {
         self.ring.node(0).grpc_addr()
     }
@@ -87,33 +85,28 @@ pub async fn setup_dkg() -> DkgFixture {
         .await
         .expect("fixture: all nodes should be healthy");
 
-    let chain_config = chain_config_from(&sourcehub);
+    let orbis_cli = OrbisCliClient::new().expect("fixture: resolve cli-tool binary");
+    let sourcehub_cli =
+        SourceHubCliClient::from_node(&sourcehub).expect("fixture: resolve sourcehubd binary");
 
     // Query node info
     let mut node_infos = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {
-        let info = cli_tool::query_node_info(ring.node(i).grpc_addr())
-            .await
+        let info = orbis_cli
+            .query_node_info(&ring.node(i).grpc_addr())
             .unwrap_or_else(|e| panic!("fixture: query node{} info: {}", i, e));
         node_infos.push(info);
     }
 
     // Register ring namespace + add all nodes as collaborators
-    cli_tool::register_bulletin_namespace(
-        BULLETIN_RING_NAMESPACE.to_string(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("fixture: register ring namespace");
+    sourcehub_cli
+        .register_namespace(BULLETIN_RING_NAMESPACE)
+        .expect("fixture: register ring namespace");
 
     for info in &node_infos {
-        cli_tool::add_bulletin_collaborator(
-            BULLETIN_RING_NAMESPACE.to_string(),
-            info.public_address.clone(),
-            chain_config.clone(),
-        )
-        .await
-        .expect("fixture: add collaborator");
+        sourcehub_cli
+            .add_collaborator(BULLETIN_RING_NAMESPACE, &info.public_address)
+            .expect("fixture: add collaborator");
     }
 
     // Subscribe to events BEFORE starting DKG
@@ -125,8 +118,8 @@ pub async fn setup_dkg() -> DkgFixture {
 
     // Run DKG
     eprintln!("[fixture] Running DKG...");
-    let dkg_result = cli_tool::do_dkg(ring.node(0).grpc_addr(), ring.threshold(), peer_ids)
-        .await
+    let dkg_result = orbis_cli
+        .do_dkg(&ring.node(0).grpc_addr(), ring.threshold(), &peer_ids)
         .expect("fixture: DKG should succeed");
 
     let session_id = dkg_result.session_id;
@@ -136,15 +129,11 @@ pub async fn setup_dkg() -> DkgFixture {
         .expect("fixture: DKG completion event");
 
     // Read ring payload
-    let post_payload = cli_tool::read_bulletin_post(
-        BULLETIN_RING_NAMESPACE.to_string(),
-        post_event.post_id.clone(),
-        chain_config.clone(),
-    )
-    .await
-    .expect("fixture: read ring post");
+    let post_payload = sourcehub_cli
+        .read_post(BULLETIN_RING_NAMESPACE, &post_event.post_id)
+        .expect("fixture: read ring post");
 
-    let ring_payload: bulletin::r#trait::RingPayload =
+    let ring_payload: RingPayload =
         serde_json::from_slice(&post_payload).expect("fixture: parse RingPayload");
     let ring_pk_hex = ring_payload.ring_pk;
     let ring_id = post_event.post_id;
@@ -161,23 +150,8 @@ pub async fn setup_dkg() -> DkgFixture {
         ring_pk_hex,
         ring_id,
         node_infos,
+        orbis_cli,
+        sourcehub_cli,
         _run_dir: run_dir,
-    }
-}
-
-/// Build a `ChainConfig` from a SourceHub node's public fields.
-///
-/// Lives here rather than on `SourceHubNode` because `ChainConfig` is an
-/// orbis-rs type and `sourcehub-harness` has no orbis-rs dependency.
-pub fn chain_config_from(sh: &SourceHubNode) -> ChainConfig {
-    ChainConfig {
-        chain_id: sh.chain_id.clone(),
-        rpc_url: sh.comet_rpc_url.clone(),
-        rest_url: sh.lcd_url.clone(),
-        grpc_url: sh.grpc_url.clone(),
-        account_prefix: "source".to_string(),
-        default_gas_limit: 300_000,
-        gas_price: common::blockchain::GasPrice::default(),
-        gas_multiplier: 1.2,
     }
 }

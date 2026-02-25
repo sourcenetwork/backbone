@@ -19,26 +19,13 @@ rand.workspace = true
 hex.workspace = true
 futures.workspace = true
 
-# orbis-rs crates (git deps, pinned to feature branch)
-cli-tool = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/xarchive-spec-test", default-features = false }
-common = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/xarchive-spec-test", default-features = false }
-proto = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/xarchive-spec-test" }
-bulletin = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/xarchive-spec-test" }
-
 k256 = { version = "0.13", features = ["ecdsa"] }
 bs58 = "0.5"
 base64 = "0.22"
-sha2 = "0.10"
-
-# gRPC (version must match proto crate from orbis-rs)
-tonic = "0.14.2"
+ed25519-dalek = "2"
+tokio-tungstenite = "0.26"
 
 [dev-dependencies]
-crypto = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/xarchive-spec-test", default-features = false, features = ["bls12-381"] }
+crypto = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/integration-testing", default-features = false, features = ["bls12-381"] }
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[features]
-default = ["bls12-381"]
-bls12-381 = ["cli-tool/bls12-381", "common/bls12-381"]
-decaf377 = ["cli-tool/decaf377", "common/decaf377"]

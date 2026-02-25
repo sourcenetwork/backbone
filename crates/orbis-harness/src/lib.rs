@@ -5,16 +5,18 @@
 //! - `OrbisRingBuilder` — multi-node ring setup with threshold configuration
 //! - `DkgFixture` — complete SourceHub + Orbis ring setup with DKG ceremony
 //! - Event-based synchronization — WebSocket subscriptions for DKG completion
-//! - CLI tool integration — direct Rust function calls for DKG, PRE, encryption
+//! - CLI wrappers — `OrbisCliClient` and `SourceHubCliClient` for binary-only integration
 
+pub mod cli;
 pub mod defradb;
 pub mod fixture;
 pub mod ring;
 
+pub use cli::{BulletinEventSubscription, OrbisCliClient, SourceHubCliClient};
 pub use defra_harness::node::RustNode;
 pub use defra_harness::{start_node, KeyringBackend, NodeConfig, OrbisSignerConfig, RunningNode};
 pub use defradb::identity::DefraHttpClient;
-pub use fixture::{chain_config_from, DkgFixture};
+pub use fixture::DkgFixture;
 pub use ring::{OrbisNode, OrbisRing, OrbisRingBuilder};
 pub use sourcehub_harness::{allocate_source_hub_ports, source_hub_address};
 pub use sourcehub_harness::{SourceHubConfig, SourceHubNode, SourceHubPorts};
