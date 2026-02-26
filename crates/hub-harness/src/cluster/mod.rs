@@ -13,7 +13,7 @@ pub use genesis::{
 };
 
 mod builder;
-pub use builder::TestClusterBuilder;
+pub use builder::{resolve_binary, TestClusterBuilder};
 
 pub mod runtime;
 pub use runtime::{TestCluster, TestNode};

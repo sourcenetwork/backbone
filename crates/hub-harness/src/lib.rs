@@ -13,3 +13,5 @@ pub mod cluster;
 pub mod contracts;
 pub mod fault;
 pub mod observe;
+
+pub use cluster::resolve_binary;

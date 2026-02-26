@@ -164,7 +164,7 @@ impl TestClusterBuilder {
                 eyre::ensure!(p.exists(), "hubd binary not found at {}", p.display());
                 p
             }
-            None => find_hub_binary()?,
+            None => resolve_binary()?,
         };
         let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
         let seed_str = keys.seed().to_string();
@@ -246,8 +246,12 @@ impl TestClusterBuilder {
     }
 }
 
-/// Find the hubd binary via BinaryResolver.
-fn find_hub_binary() -> eyre::Result<PathBuf> {
+/// Resolve the hubd binary.
+///
+/// Uses `BinaryResolver` with the `HUBD` prefix. Set `HUBD_BINARY` to an
+/// explicit path, `HUBD_WORKSPACE` to a hub.rs checkout, or ensure `hubd`
+/// is on PATH.
+pub fn resolve_binary() -> eyre::Result<PathBuf> {
     let resolver = BinaryResolver::new("HUBD", "hubd").cargo_package("hubd");
     let resolved = resolver.resolve()?;
     Ok(resolved.path)
