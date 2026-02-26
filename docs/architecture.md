@@ -131,15 +131,38 @@ across 30 steps in 5 phases:
 
 ## Tracking issues
 
-| Issue | What | Repo |
-|-------|------|------|
-| backbone#11 | Hub.rs ACP client for DefraDB (replace CosmosProvider) | backbone |
-| backbone#12 | Hub.rs node harness as SourceHub backend | backbone |
-| backbone#13 | Test-side policy management client for hub.rs | backbone |
-| backbone#14 | Verify relation-based ACP grant enforcement e2e | backbone |
-| backbone#15 | Orbis ring signing ACP authorization via hub.rs | backbone |
-| backbone#16 | Bulletin board on hub.rs for DKG | backbone |
-| defradb.rs#514 | Hub.rs native integration (HubRsProvider) | defradb.rs |
-| defradb.rs#530 | BLS signature verification in merge handler | defradb.rs |
-| defradb.rs#531 | YubiKey-backed keyring backend | defradb.rs |
-| orbis-rs PR #60 | Utility services + ACP enforcement on signing path | orbis-rs |
+### Backbone (coordination + test infrastructure)
+
+| Issue | What |
+|-------|------|
+| #11 | Hub.rs ACP client for DefraDB (replace CosmosProvider) |
+| #12 | Hub.rs node harness as SourceHub backend |
+| #13 | Test-side policy management client for hub.rs |
+| #14 | Verify relation-based ACP grant enforcement e2e |
+| #15 | Orbis ring signing ACP authorization via hub.rs |
+| #16 | Bulletin board on hub.rs for DKG |
+| **#18** | **ACP Light Client — shared proof-validated cache (design)** |
+
+### DefraDB.rs (query gate)
+
+| Issue | What |
+|-------|------|
+| #514 | Hub.rs native integration (HubRsProvider) |
+| #516 | SourceHub ACP Performance & Proof-Validated Caching (epic) |
+| #530 | BLS signature verification in merge handler |
+| #531 | YubiKey-backed keyring backend |
+
+### Hub.rs (consensus + ACP state authority)
+
+| Issue | What |
+|-------|------|
+| #44 | ACP event propagation via gossip + light client verification |
+| #61 | Module state proof specs (Merkle inclusion proofs) |
+| #67 | P2P interconnect between hub.rs and defra.rs |
+| #68 | Bearer token methods and query wrappers |
+
+### Orbis-rs (signing gate)
+
+| Issue | What |
+|-------|------|
+| PR #60 | Utility services + ACP enforcement on signing path |
