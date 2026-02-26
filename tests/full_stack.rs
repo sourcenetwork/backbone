@@ -54,10 +54,9 @@
 //! | Service key rotation without identity change          | 30        |
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
-use alloy_primitives::{Address, FixedBytes};
-use alloy_sol_types::SolCall;
 use defra_harness::node::RustNode;
 use orbis_harness::cli::signer_did_for_pk;
 use orbis_harness::cli::types::RingPayload;
@@ -171,70 +170,94 @@ impl ServiceIdentity {
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
 
 // ============================================================================
-// Hub.rs ACP precompile interface
+// Hub.rs CLI helper for ACP operations
 // ============================================================================
 
-/// ACP precompile address on hub.rs: 0x0000000000000000000000000000000000000810
-const HUB_ACP_ADDRESS: Address = {
-    let mut bytes = [0u8; 20];
-    bytes[18] = 0x08;
-    bytes[19] = 0x10;
-    Address::new(bytes)
-};
+const HARDHAT_KEY_0: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-alloy_sol_types::sol! {
-    interface IAcp {
-        function createPolicy(bytes memory policy, uint8 marshalType) external returns (bytes32);
-        function registerObject(bytes32 policyId, string memory objectId, string memory resource) external;
-        function setRelationship(bytes32 policyId, string memory resource, string memory objectId, string memory relation, string memory actor) external;
-        function deleteRelationship(bytes32 policyId, string memory resource, string memory objectId, string memory relation, string memory actor) external;
-        function getPolicyIds() external view returns (string[] memory);
-    }
+struct HubdCli {
+    binary: PathBuf,
+    rpc_url: String,
+    chain_id: u64,
+    key: String,
 }
 
-/// Send an EVM transaction to hub.rs and wait for the receipt.
-async fn hub_send_tx(
-    cluster: &TestCluster,
-    signer: &alloy_signer_local::PrivateKeySigner,
-    target: Address,
-    calldata: Vec<u8>,
-    nonce: u64,
-) -> eyre::Result<serde_json::Value> {
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
-    hub_harness::contracts::caller::send(
-        &http,
-        &cluster.node(0).rpc_url(),
-        signer,
-        cluster.chain_id(),
-        target,
-        calldata,
-        nonce,
-    )
-    .await
-}
-
-/// Read-only EVM call via `eth_call`.
-async fn hub_eth_call(rpc_url: &str, target: Address, calldata: Vec<u8>) -> eyre::Result<Vec<u8>> {
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "eth_call",
-        "params": [{"to": format!("{target:?}"), "data": format!("0x{}", hex::encode(&calldata))}, "latest"],
-        "id": 1,
-    });
-    let resp: serde_json::Value = http.post(rpc_url).json(&body).send().await?.json().await?;
-    if let Some(error) = resp.get("error") {
-        return Err(eyre::eyre!("eth_call error: {error}"));
+impl HubdCli {
+    fn new(binary: PathBuf, rpc_url: &str, chain_id: u64, key: &str) -> Self {
+        Self {
+            binary,
+            rpc_url: rpc_url.to_string(),
+            chain_id,
+            key: key.to_string(),
+        }
     }
-    let hex_str = resp["result"]
-        .as_str()
-        .ok_or_else(|| eyre::eyre!("eth_call: missing result"))?;
-    let hex_str = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    Ok(hex::decode(hex_str)?)
+
+    fn cmd(&self) -> Command {
+        let mut cmd = Command::new(&self.binary);
+        cmd.args([
+            "client",
+            "--url",
+            &self.rpc_url,
+            "--key",
+            &self.key,
+            "--client-chain-id",
+            &self.chain_id.to_string(),
+            "--compact",
+        ]);
+        cmd
+    }
+
+    fn exec(&self, args: &[&str]) -> eyre::Result<String> {
+        let output = self.cmd().args(args).output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(eyre::eyre!(
+                "hubd client {} failed ({}): stderr={}, stdout={}",
+                args.join(" "),
+                output.status,
+                stderr.trim(),
+                stdout.trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    fn create_policy(&self, yaml: &str) -> eyre::Result<String> {
+        self.exec(&["acp", "create-policy", yaml])
+    }
+
+    fn list_policies(&self) -> eyre::Result<String> {
+        self.exec(&["acp", "list-policies"])
+    }
+
+    fn register_object(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+    ) -> eyre::Result<String> {
+        self.exec(&["acp", "register-object", policy_id, resource, object_id])
+    }
+
+    fn set_relationship(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        actor: &str,
+    ) -> eyre::Result<String> {
+        self.exec(&[
+            "acp",
+            "set-relationship",
+            policy_id,
+            resource,
+            object_id,
+            relation,
+            actor,
+        ])
+    }
 }
 
 // ============================================================================
@@ -1098,6 +1121,7 @@ async fn secure_training_data_compartments() {
 
     // Step 31. Start hub.rs cluster
     eprintln!("[backbone] Step 31: Starting hub.rs cluster (4 validators)...");
+    let hubd_binary = hub_harness::resolve_binary().expect("resolve hubd binary");
     let hub_chain_id = 9003;
     let hub_genesis = GenesisBuilder::devnet().funded_accounts(1, "1000000000000000000000000");
     let hub_cluster = TestCluster::builder()
@@ -1124,106 +1148,51 @@ async fn secure_training_data_compartments() {
         hub_cluster.node_count()
     );
 
-    // Step 32. Create ACP policy on hub.rs
-    eprintln!("[backbone] Step 32: Creating ACP policy on hub.rs...");
-    let hub_signer = hub_harness::contracts::signer::test_signer(0);
-    let mut hub_nonce = 0u64;
-
-    let create_policy_calldata = IAcp::createPolicyCall {
-        policy: ACME_POLICY_YAML.as_bytes().to_vec().into(),
-        marshalType: 1,
-    }
-    .abi_encode();
-    let create_receipt = hub_send_tx(
-        &hub_cluster,
-        &hub_signer,
-        HUB_ACP_ADDRESS,
-        create_policy_calldata,
-        hub_nonce,
-    )
-    .await
-    .expect("create_policy on hub.rs");
-    hub_nonce += 1;
-    assert_eq!(
-        create_receipt["status"].as_str().unwrap_or(""),
-        "0x1",
-        "create_policy should succeed"
+    let hub_cli = HubdCli::new(
+        hubd_binary,
+        &hub_cluster.node(0).rpc_url(),
+        hub_chain_id,
+        HARDHAT_KEY_0,
     );
 
-    // Query policy IDs
-    let policy_ids_calldata = IAcp::getPolicyIdsCall {}.abi_encode();
-    let policy_ids_result = hub_eth_call(
-        &hub_cluster.node(0).rpc_url(),
-        HUB_ACP_ADDRESS,
-        policy_ids_calldata,
-    )
-    .await
-    .expect("getPolicyIds");
-    let policy_ids = IAcp::getPolicyIdsCall::abi_decode_returns(&policy_ids_result)
-        .expect("decode getPolicyIds");
-    assert!(!policy_ids.is_empty(), "should have at least one policy");
-    let hub_policy_id_str = &policy_ids[0];
-    let hub_policy_id = {
-        let hex = hub_policy_id_str
-            .strip_prefix("0x")
-            .unwrap_or(hub_policy_id_str);
-        let mut bytes = [0u8; 32];
-        hex::decode_to_slice(hex, &mut bytes).expect("policy ID should be valid hex");
-        FixedBytes::from(bytes)
-    };
+    // Step 32. Create ACP policy on hub.rs
+    eprintln!("[backbone] Step 32: Creating ACP policy on hub.rs...");
+    hub_cli
+        .create_policy(ACME_POLICY_YAML)
+        .expect("create_policy on hub.rs");
+
+    let list_output = hub_cli.list_policies().expect("list_policies");
+    let policy_ids: serde_json::Value =
+        serde_json::from_str(&list_output).expect("list_policies should return JSON");
+    let hub_policy_id_str = policy_ids
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .expect("should have at least one policy ID")
+        .to_string();
     eprintln!(
         "[backbone] Hub.rs policy created: {}",
         &hub_policy_id_str[..16.min(hub_policy_id_str.len())]
     );
 
-    // Register transcript object
-    let register_calldata = IAcp::registerObjectCall {
-        policyId: hub_policy_id,
-        objectId: "acme-transcripts".into(),
-        resource: "transcript".into(),
-    }
-    .abi_encode();
-    let register_receipt = hub_send_tx(
-        &hub_cluster,
-        &hub_signer,
-        HUB_ACP_ADDRESS,
-        register_calldata,
-        hub_nonce,
-    )
-    .await
-    .expect("register_object on hub.rs");
-    hub_nonce += 1;
-    assert_eq!(
-        register_receipt["status"].as_str().unwrap_or(""),
-        "0x1",
-        "register_object should succeed"
-    );
+    // Register transcript object — wait for consensus between txs
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub_cli
+        .register_object(&hub_policy_id_str, "transcript", "acme-transcripts")
+        .expect("register_object on hub.rs");
 
     // Step 33. Grant TRAINING_SVC writer on hub.rs
     eprintln!("[backbone] Step 33: Granting TRAINING_SVC writer on hub.rs...");
-    let set_rel_calldata = IAcp::setRelationshipCall {
-        policyId: hub_policy_id,
-        resource: "transcript".into(),
-        objectId: "acme-transcripts".into(),
-        relation: "writer".into(),
-        actor: training_svc.did_key.clone(),
-    }
-    .abi_encode();
-    let set_rel_receipt = hub_send_tx(
-        &hub_cluster,
-        &hub_signer,
-        HUB_ACP_ADDRESS,
-        set_rel_calldata,
-        hub_nonce,
-    )
-    .await
-    .expect("set_relationship on hub.rs");
-    hub_nonce += 1;
-    assert_eq!(
-        set_rel_receipt["status"].as_str().unwrap_or(""),
-        "0x1",
-        "set_relationship should succeed"
-    );
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub_cli
+        .set_relationship(
+            &hub_policy_id_str,
+            "transcript",
+            "acme-transcripts",
+            "writer",
+            &training_svc.did_key,
+        )
+        .expect("set_relationship writer on hub.rs");
 
     // Wait for finalization
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1249,10 +1218,8 @@ async fn secure_training_data_compartments() {
 
     // Step 36. check_access(TRAINING_SVC, write) → allowed
     eprintln!("[backbone] Step 36: Checking TRAINING_SVC writer access...");
-    // The relationship storage key depends on hub.rs internals. We use the policy
-    // key to verify proof mechanics work end-to-end.
     let policy_check = light_client
-        .check_policy(hub_policy_id_str)
+        .check_policy(&hub_policy_id_str)
         .await
         .expect("check_policy should succeed");
     assert!(policy_check.allowed, "policy should exist on hub.rs");
@@ -1281,29 +1248,17 @@ async fn secure_training_data_compartments() {
         .latest_module_state_root()
         .expect("should have module_state_root");
 
-    // Step 38. Mutate: register a new object to change module_state_root
+    // Step 38. Mutate: add reader to change module_state_root
     eprintln!("[backbone] Step 38: Mutating ACP state on hub.rs...");
-    let set_reader_calldata = IAcp::setRelationshipCall {
-        policyId: hub_policy_id,
-        resource: "transcript".into(),
-        objectId: "acme-transcripts".into(),
-        relation: "reader".into(),
-        actor: inference_svc.did_key.clone(),
-    }
-    .abi_encode();
-    let _mutate_receipt = hub_send_tx(
-        &hub_cluster,
-        &hub_signer,
-        HUB_ACP_ADDRESS,
-        set_reader_calldata,
-        hub_nonce,
-    )
-    .await
-    .expect("set_relationship reader on hub.rs");
-    #[allow(unused_assignments)]
-    {
-        hub_nonce += 1;
-    }
+    hub_cli
+        .set_relationship(
+            &hub_policy_id_str,
+            "transcript",
+            "acme-transcripts",
+            "reader",
+            &inference_svc.did_key,
+        )
+        .expect("set_relationship reader on hub.rs");
 
     // Step 39. Wait for module_state_root change
     eprintln!("[backbone] Step 39: Waiting for module_state_root change...");
@@ -1323,7 +1278,7 @@ async fn secure_training_data_compartments() {
     // Step 40. Re-check policy — cache was invalidated, re-verified with new root
     eprintln!("[backbone] Step 40: Re-checking policy after state change...");
     let recheck = light_client
-        .check_policy(hub_policy_id_str)
+        .check_policy(&hub_policy_id_str)
         .await
         .expect("re-check policy should succeed");
     assert!(recheck.allowed, "policy should still exist");

@@ -41,7 +41,6 @@ alloy-consensus = { version = "1.0", features = ["k256"] }
 alloy-eips = "1.0"
 alloy-signer = "1"
 alloy-signer-local = { version = "1", default-features = false }
-alloy-sol-types = "1"
 commonware-codec = "2026.2.0"
 commonware-consensus = "2026.2.0"
 commonware-cryptography = "2026.2.0"
@@ -53,6 +52,10 @@ commonware-utils = "2026.2.0"
 name = "full_stack"
 path = "tests/full_stack.rs"
 
+[[test]]
+name = "hub_light_client"
+path = "tests/hub_light_client.rs"
+
 [dev-dependencies]
 orbis-harness = { path = "crates/orbis-harness" }
 defra-harness = { path = "crates/defra-harness" }
@@ -62,10 +65,6 @@ test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }
 serde_json.workspace = true
 hex.workspace = true
-alloy-primitives.workspace = true
-alloy-sol-types.workspace = true
-alloy-signer-local.workspace = true
-reqwest.workspace = true
 bs58 = "0.5"
 eyre.workspace = true
 tracing.workspace = true
