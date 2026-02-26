@@ -875,6 +875,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backbone"
+version = "0.1.0"
+dependencies = [
+ "defra-harness",
+ "eyre",
+ "hex",
+ "orbis-harness",
+ "serde_json",
+ "test-infra",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

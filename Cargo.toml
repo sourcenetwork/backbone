@@ -1,3 +1,11 @@
+[package]
+name = "backbone"
+version = "0.1.0"
+description = "Full-stack integration test infrastructure for Source Network"
+edition.workspace = true
+license.workspace = true
+publish = false
+
 [workspace]
 resolver = "2"
 members = [
@@ -36,3 +44,19 @@ commonware-codec = "2026.2.0"
 commonware-consensus = "2026.2.0"
 commonware-cryptography = "2026.2.0"
 commonware-utils = "2026.2.0"
+
+# ── Full-stack integration tests ──────────────────────────────────────────────
+
+[[test]]
+name = "full_stack"
+path = "tests/full_stack.rs"
+
+[dev-dependencies]
+orbis-harness = { path = "crates/orbis-harness" }
+defra-harness = { path = "crates/defra-harness" }
+test-infra = { path = "crates/test-infra" }
+tokio = { workspace = true, features = ["full"] }
+serde_json.workspace = true
+hex.workspace = true
+eyre.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
