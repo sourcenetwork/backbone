@@ -1,0 +1,37 @@
+[package]
+name = "acp-light-client"
+version = "0.1.0"
+description = "Proof-validated ACP cache for DefraDB (query gate) and Orbis (signing gate)"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Workspace
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eyre.workspace = true
+tracing.workspace = true
+hex.workspace = true
+parking_lot.workspace = true
+futures.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }
+
+# Commonware — consensus framework types for light block verification
+commonware-codec.workspace = true
+commonware-consensus.workspace = true
+commonware-cryptography.workspace = true
+
+# Verification
+jmt = "0.11"
+borsh = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+# Transport
+tokio-tungstenite = "0.26"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+jmt = { version = "0.11", features = ["mocks"] }

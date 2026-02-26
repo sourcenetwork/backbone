@@ -14,6 +14,7 @@ members = [
     "crates/defra-harness",
     "crates/hub-harness",
     "crates/orbis-harness",
+    "crates/acp-light-client",
 ]
 
 [workspace.package]
@@ -40,6 +41,7 @@ alloy-consensus = { version = "1.0", features = ["k256"] }
 alloy-eips = "1.0"
 alloy-signer = "1"
 alloy-signer-local = { version = "1", default-features = false }
+alloy-sol-types = "1"
 commonware-codec = "2026.2.0"
 commonware-consensus = "2026.2.0"
 commonware-cryptography = "2026.2.0"
@@ -54,10 +56,17 @@ path = "tests/full_stack.rs"
 [dev-dependencies]
 orbis-harness = { path = "crates/orbis-harness" }
 defra-harness = { path = "crates/defra-harness" }
+hub-harness = { path = "crates/hub-harness" }
+acp-light-client = { path = "crates/acp-light-client" }
 test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }
 serde_json.workspace = true
 hex.workspace = true
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+alloy-signer-local.workspace = true
+reqwest.workspace = true
 bs58 = "0.5"
 eyre.workspace = true
+tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
