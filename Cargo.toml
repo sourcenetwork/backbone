@@ -58,5 +58,6 @@ test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }
 serde_json.workspace = true
 hex.workspace = true
+bs58 = "0.5"
 eyre.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

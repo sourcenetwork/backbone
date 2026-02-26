@@ -878,6 +878,7 @@ dependencies = [
 name = "backbone"
 version = "0.1.0"
 dependencies = [
+ "bs58",
  "defra-harness",
  "eyre",
  "hex",

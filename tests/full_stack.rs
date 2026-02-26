@@ -11,21 +11,34 @@
 //! an isolated compartment. Service identities (training pipeline, inference API,
 //! audit daemon) get scoped access. No customer's data leaks to another's pipeline.
 //!
+//! ## Three DID types
+//!
+//! The system uses three distinct `did:key` types, each serving a different layer:
+//!
+//! | DID Type | Multicodec | Purpose | Example |
+//! |----------|------------|---------|---------|
+//! | BLS12-381 (0xea) | `did:key:z...` | Compartment identity (ring-derived, signs blocks) | ACME_DID, GLOBEX_DID |
+//! | secp256k1 (0xe7) | `did:key:zQ3s...` | Service identity (JWT auth, ACP grants) | TRAINING_SVC, AUDIT_SVC |
+//! | Ed25519 (0xed) | `did:key:z6Mk...` | Ring signer authorization (who can request threshold sigs) | ACME_DEFRA_SVC signer DID |
+//!
+//! Hub.rs accepts all three DID types in its ACP module. BLS identities work via
+//! native BLS transactions; secp256k1 identities work via EVM transactions.
+//!
 //! ## Identity hierarchy
 //!
 //! ```text
-//! Key                On Disk?   Real Identity        What It Does
+//! Key                DID Type     On Disk?   What It Does
 //! ──────────────────────────────────────────────────────────────────────────────
-//! PLATFORM_DID       NO         Platform root        Ring-derived platform identity
-//! ACME_DID           NO         acme-corp            Owns acme compartment documents
-//! GLOBEX_DID         NO         globex-inc           Owns globex compartment documents
-//! TRAINING_SVC       YES        (disposable)         Writer on acme (ingests training data)
-//! INFERENCE_SVC      YES        (disposable)         Reader on acme (serves the adapter)
-//! AUDIT_SVC          YES        (disposable)         Reader on both compartments (compliance)
-//! GLOBEX_SVC         YES        (disposable)         Writer+reader on globex only
-//! ACME_DEFRA_SVC     YES        (disposable)         Acme DefraDB -> Orbis signing
-//! GLOBEX_DEFRA_SVC   YES        (disposable)         Globex DefraDB -> Orbis signing
-//! NEW_TRAINING_SVC   YES        (disposable)         Rotated training key (replaces TRAINING_SVC)
+//! PLATFORM_DID       BLS (0xea)   NO         Ring-derived platform root identity
+//! ACME_DID           BLS (0xea)   NO         Compartment identity for acme (signs acme blocks)
+//! GLOBEX_DID         BLS (0xea)   NO         Compartment identity for globex (signs globex blocks)
+//! TRAINING_SVC       secp256k1    YES        Writer on acme (ingests training data via JWT)
+//! INFERENCE_SVC      secp256k1    YES        Reader on acme (serves the adapter via JWT)
+//! AUDIT_SVC          secp256k1    YES        Reader on both compartments (compliance via JWT)
+//! GLOBEX_SVC         secp256k1    YES        Writer+reader on globex only (via JWT)
+//! ACME_DEFRA_SVC     Ed25519      YES        Acme DefraDB node -> authorized ring signer
+//! GLOBEX_DEFRA_SVC   Ed25519      YES        Globex DefraDB node -> authorized ring signer
+//! NEW_TRAINING_SVC   secp256k1    YES        Rotated training key (replaces TRAINING_SVC)
 //! ```
 //!
 //! ## What this test proves
@@ -33,7 +46,7 @@
 //! | Property                                              | Steps     |
 //! |-------------------------------------------------------|-----------|
 //! | Threshold key management (DKG + derived keys)         | 1-4, 8    |
-//! | Compartment identity derivation (3 unique keys)       | 5-8       |
+//! | Compartment identity derivation (3 unique BLS DIDs)   | 5-8       |
 //! | ACP-enforced authenticated reads/writes               | 11-18     |
 //! | Cross-compartment isolation (both directions)         | 23-24     |
 //! | Cross-compartment audit (reader on both)              | 25-28     |
@@ -49,9 +62,9 @@ use orbis_harness::cli::types::RingPayload;
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
 use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
-    allocate_source_hub_ports, generate_identity_keys, generate_run_id, source_hub_address,
-    start_node, BulletinEventSubscription, KeyringBackend, NodeConfig, OrbisCliClient,
-    OrbisSignerConfig, SourceHubCliClient, SourceHubConfig, SourceHubNode,
+    allocate_source_hub_ports, generate_identity_keys, generate_run_id, start_node,
+    BulletinEventSubscription, KeyringBackend, NodeConfig, OrbisCliClient, OrbisSignerConfig,
+    SourceHubCliClient, SourceHubConfig, SourceHubNode,
 };
 
 // ============================================================================
@@ -114,8 +127,7 @@ resources:
 struct ServiceIdentity {
     label: String,
     private_key_hex: String,
-    #[allow(dead_code)]
-    did: String,
+    /// secp256k1 did:key (multicodec 0xe7) — used for ACP grants and JWT auth.
     did_key: String,
     _keyring_dir: PathBuf,
 }
@@ -139,16 +151,12 @@ impl ServiceIdentity {
             format!("{:0>64x}", ((h1 as u128) << 64) | (h2 as u128))
         };
 
-        let did = source_hub_address(&private_key_hex)
-            .unwrap_or_else(|e| panic!("derive address for {}: {}", label, e));
-
         let (did_key, _pub_bytes) = did_key_from_secp256k1(&private_key_hex)
             .unwrap_or_else(|e| panic!("derive did_key for {}: {}", label, e));
 
         Self {
             label: label.to_string(),
             private_key_hex,
-            did,
             did_key,
             _keyring_dir: keyring_dir,
         }
@@ -156,6 +164,27 @@ impl ServiceIdentity {
 }
 
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
+
+// ============================================================================
+// Helper: BLS12-381 did:key from raw public key bytes
+// ============================================================================
+
+/// Create a `did:key:z...` from a BLS12-381 G1 compressed public key.
+/// Multicodec 0xea (bls12_381-g1-pub) varint-encodes to [0xea, 0x01].
+fn bls_did_key(public_key_bytes: &[u8]) -> String {
+    let mut buf = vec![0xea, 0x01]; // varint(0xea) for bls12_381-g1-pub
+    buf.extend_from_slice(public_key_bytes);
+    let encoded = bs58::encode(&buf).into_string();
+    format!("did:key:z{}", encoded)
+}
+
+/// Create a BLS did:key from a hex-encoded public key string (as returned by
+/// Orbis `DerivePublicKey`).
+fn bls_did_key_from_hex(public_key_hex: &str) -> String {
+    let bytes =
+        hex::decode(public_key_hex).unwrap_or_else(|e| panic!("invalid BLS public key hex: {}", e));
+    bls_did_key(&bytes)
+}
 
 // ============================================================================
 // Helper: check if a GraphQL response denies access
@@ -316,7 +345,7 @@ async fn secure_training_data_compartments() {
     // Phase 2: Identity setup
     // ================================================================
 
-    // Step 5. Derive PLATFORM_DID from ring
+    // Step 5. Derive PLATFORM_DID from ring (BLS did:key, multicodec 0xea)
     let platform_derived = orbis_cli
         .derive_public_key(
             &ring.node(0).grpc_addr(),
@@ -324,10 +353,10 @@ async fn secure_training_data_compartments() {
             &hex::encode(b"platform"),
         )
         .expect("derive platform public key");
-    let platform_did = format!("did:bls:{}", &platform_derived.derived_public_key[..40]);
+    let platform_did = bls_did_key_from_hex(&platform_derived.derived_public_key);
     eprintln!("[backbone] Step 5: PLATFORM_DID: {}", platform_did);
 
-    // Step 6. Derive ACME_DID from ring
+    // Step 6. Derive ACME_DID from ring (BLS did:key — compartment identity for acme blocks)
     let acme_derived = orbis_cli
         .derive_public_key(
             &ring.node(0).grpc_addr(),
@@ -335,10 +364,10 @@ async fn secure_training_data_compartments() {
             &hex::encode(b"acme-corp"),
         )
         .expect("derive acme-corp public key");
-    let acme_did = format!("did:bls:{}", &acme_derived.derived_public_key[..40]);
+    let acme_did = bls_did_key_from_hex(&acme_derived.derived_public_key);
     eprintln!("[backbone] Step 6: ACME_DID: {}", acme_did);
 
-    // Step 7. Derive GLOBEX_DID from ring
+    // Step 7. Derive GLOBEX_DID from ring (BLS did:key — compartment identity for globex blocks)
     let globex_derived = orbis_cli
         .derive_public_key(
             &ring.node(0).grpc_addr(),
@@ -346,7 +375,7 @@ async fn secure_training_data_compartments() {
             &hex::encode(b"globex-inc"),
         )
         .expect("derive globex-inc public key");
-    let globex_did = format!("did:bls:{}", &globex_derived.derived_public_key[..40]);
+    let globex_did = bls_did_key_from_hex(&globex_derived.derived_public_key);
     eprintln!("[backbone] Step 7: GLOBEX_DID: {}", globex_did);
 
     // Step 8. Verify all 3 derived keys are distinct
@@ -362,7 +391,7 @@ async fn secure_training_data_compartments() {
         platform_derived.derived_public_key, globex_derived.derived_public_key,
         "platform and globex keys must differ"
     );
-    eprintln!("[backbone] Step 8: Verified 3 unique derived keys from same ring");
+    eprintln!("[backbone] Step 8: Verified 3 unique BLS did:key identities from same ring");
 
     // Step 9. Create service identities
     let training_svc = ServiceIdentity::new_file_keyring("training-svc", run_dir.path());
@@ -381,7 +410,8 @@ async fn secure_training_data_compartments() {
         globex_defra_svc.label,
     );
 
-    // Step 10. Authorize DefraDB service accounts as ring signers
+    // Step 10. Authorize DefraDB service accounts as ring signers.
+    // signer_did_for_pk derives an Ed25519 did:key (0xed) used for Orbis ring ACP.
     let acme_defra_signer_did = signer_did_for_pk(&acme_defra_svc.private_key_hex);
     sourcehub_cli
         .set_relationship(
@@ -421,7 +451,8 @@ async fn secure_training_data_compartments() {
         .expect("register transcript object");
     eprintln!("[backbone] Acme policy: {}", acme_policy_id);
 
-    // Step 12. Grant TRAINING_SVC writer+reader on acme transcripts
+    // Step 12. Grant TRAINING_SVC writer+reader on acme transcripts.
+    // ACP grants use the secp256k1 did:key (0xe7) — the service identity.
     for relation in &["writer", "reader"] {
         sourcehub_cli
             .set_relationship(
@@ -447,7 +478,9 @@ async fn secure_training_data_compartments() {
         .expect("grant inference_svc reader on transcript");
     eprintln!("[backbone] Step 13: INFERENCE_SVC granted reader on acme transcripts");
 
-    // Step 14. Start DefraDB node with Orbis signer (derivation="acme-corp")
+    // Step 14. Start DefraDB node with Orbis signer (derivation="acme-corp").
+    // The node identity (secp256k1) authenticates to Orbis via JWT.
+    // The Orbis signer derives the BLS compartment key and signs blocks with it.
     let defra_binary = test_infra::BinaryResolver::new("DEFRA", "defra")
         .cargo_package("cli")
         .resolve()
@@ -530,7 +563,8 @@ async fn secure_training_data_compartments() {
         transcripts.len()
     );
 
-    // Step 17. INFERENCE_SVC reads back — sees transcripts (reader grant)
+    // Step 17. INFERENCE_SVC reads back — sees transcripts (reader grant).
+    // Client authenticates with secp256k1 key → JWT. ACP checks the secp256k1 did:key.
     let query = r#"query { Transcript { _docID call_id content customer } }"#;
     let query_body = acme_client
         .graphql(query, Some(&inference_svc.private_key_hex))
