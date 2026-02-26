@@ -152,6 +152,66 @@ impl AcpLightClient {
         })
     }
 
+    /// Check whether an access decision exists on hub.rs.
+    ///
+    /// Used by Orbis nodes to verify that a `checkAccess` transaction was
+    /// committed on-chain. The caller (DefraDB) pre-submits the tx and passes
+    /// the resulting `decision_id` to Orbis; each ring node then calls this
+    /// method to verify the decision via the light client's proof-verified cache.
+    pub async fn check_access_decision(&self, decision_id: &str) -> eyre::Result<AccessResult> {
+        let key_bytes = cache::keys::access_decision_key(decision_id);
+        let key_hex = cache::keys::hex_encode_key(&key_bytes);
+
+        self.invalidate_if_root_changed();
+
+        let current_height = self.header_chain.latest_height();
+        if let Some(cached) = self.cache.get(&key_hex, current_height) {
+            debug!(decision_id, cached_height = cached.verified_at_height, "access decision cache hit");
+            return Ok(cached);
+        }
+
+        let height = current_height.max(1);
+        let sync = self.header_chain.state();
+
+        let (proof, module_state_root) = if let Some(ref sync) = sync {
+            let proof = self
+                .proof_client
+                .fetch_and_verify_proof_with_root(
+                    "acp",
+                    &key_hex,
+                    sync.height,
+                    sync.module_state_root,
+                )
+                .await?;
+            (proof, sync.module_state_root)
+        } else {
+            self.proof_client
+                .fetch_and_verify_proof("acp", &key_hex, height)
+                .await?
+        };
+
+        let allowed = proof.value.is_some();
+        let verified_height = proof.height;
+
+        let value_bytes = proof.value.as_ref().map(|v| {
+            let v = v.strip_prefix("0x").unwrap_or(v);
+            hex::decode(v).unwrap_or_default()
+        });
+
+        self.cache
+            .insert(&key_hex, value_bytes, verified_height, module_state_root);
+
+        info!(
+            decision_id, allowed, verified_height, "access decision proof verified and cached"
+        );
+
+        Ok(AccessResult {
+            allowed,
+            verified_at_height: verified_height,
+            proof: Some(proof),
+        })
+    }
+
     /// Check whether a policy exists on hub.rs.
     pub async fn check_policy(&self, policy_id: &str) -> eyre::Result<AccessResult> {
         let key_bytes = cache::keys::policy_key(policy_id);
