@@ -272,8 +272,12 @@ impl HubdCli {
         self.exec(&["bulletin", "register-namespace", namespace])
     }
 
+    fn add_collaborator(&self, namespace: &str, did: &str) -> eyre::Result<String> {
+        self.exec(&["bulletin", "add-collaborator", namespace, did])
+    }
+
     fn list_posts(&self, namespace: &str) -> eyre::Result<String> {
-        self.exec(&["bulletin", "list-posts", namespace])
+        self.exec(&["bulletin", "list-posts", "--namespace", namespace])
     }
 
     fn fund_evm_address(&self, to_address: &str, value_wei: &str) -> eyre::Result<String> {
@@ -413,36 +417,57 @@ async fn wait_for_dkg_post(
     timeout: Duration,
 ) -> eyre::Result<(String, Vec<u8>)> {
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut logged_once = false;
     loop {
-        if let Ok(output) = hub_cli.list_posts(namespace) {
-            if let Ok(posts) = serde_json::from_str::<serde_json::Value>(&output) {
-                if let Some(arr) = posts.as_array() {
-                    for post in arr {
-                        let payload_str =
-                            post.get("payload").and_then(|v| v.as_str()).unwrap_or("");
-                        if !payload_str.is_empty() {
-                            let post_id = post
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
+        match hub_cli.list_posts(namespace) {
+            Ok(output) => {
+                if !logged_once {
+                    eprintln!("[backbone]   list-posts raw output: {}", &output[..200.min(output.len())]);
+                    logged_once = true;
+                }
+                if let Ok(posts) = serde_json::from_str::<serde_json::Value>(&output) {
+                    if let Some(arr) = posts.as_array() {
+                        for post in arr {
+                            let payload_str =
+                                post.get("payload").and_then(|v| v.as_str()).unwrap_or("");
+                            if !payload_str.is_empty() {
+                                let post_id = post
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
 
-                            // Payload is hex-encoded bytes from hub.rs
-                            let payload_bytes = if let Ok(bytes) = hex::decode(payload_str) {
-                                bytes
-                            } else {
-                                payload_str.as_bytes().to_vec()
-                            };
+                                // Payload is hex-encoded bytes from hub.rs
+                                let payload_bytes =
+                                    if let Ok(bytes) = hex::decode(payload_str) {
+                                        bytes
+                                    } else {
+                                        payload_str.as_bytes().to_vec()
+                                    };
 
-                            if !payload_bytes.is_empty() {
-                                return Ok((post_id, payload_bytes));
+                                if !payload_bytes.is_empty() {
+                                    return Ok((post_id, payload_bytes));
+                                }
                             }
+                        }
+                        if !arr.is_empty() && !logged_once {
+                            eprintln!("[backbone]   list-posts found {} posts but none with payload", arr.len());
                         }
                     }
                 }
             }
+            Err(e) => {
+                if !logged_once {
+                    eprintln!("[backbone]   list-posts error: {}", e);
+                    logged_once = true;
+                }
+            }
         }
         if tokio::time::Instant::now() >= deadline {
+            // One last attempt with full debug output
+            if let Ok(output) = hub_cli.list_posts(namespace) {
+                eprintln!("[backbone]   FINAL list-posts output: {}", output);
+            }
             return Err(eyre::eyre!(
                 "timeout waiting for DKG post in namespace '{}'",
                 namespace
@@ -656,49 +681,25 @@ async fn secure_training_data_compartments() {
         node_infos.push(info);
     }
 
-    // Step 3. Register bulletin namespace + authorize collaborators via ACP
-    // register_namespace creates an ACP policy internally. We then use ACP
-    // set_relationship directly (rather than add_collaborator) because
-    // add_collaborator stores a DID derived from the EVM address, while
-    // create_post checks ACP with the secp256k1 DID recovered from the
-    // transaction signature. These are different DID formats and won't match.
+    // Step 3. Register bulletin namespace + add collaborators on hub.rs
+    // hub.rs add_collaborator now accepts a DID string (not an EVM address).
+    // We pass the secp256k1 DID so it matches what create_post checks via
+    // signature recovery.
     eprintln!("[backbone] Step 3: Registering bulletin namespace on hub.rs...");
     hub_cli
         .register_namespace(BULLETIN_RING_NAMESPACE)
         .expect("register ring namespace on hub.rs");
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Get the bulletin module's ACP policy_id
-    let policies_json = hub_cli.list_policies().expect("list ACP policies on hub.rs");
-    let policies: Vec<String> = serde_json::from_str(&policies_json)
-        .unwrap_or_else(|e| panic!("parse policy list '{}': {}", policies_json, e));
-    let bulletin_policy_id = policies
-        .first()
-        .expect("bulletin module should have created an ACP policy");
-    eprintln!(
-        "[backbone]   Bulletin ACP policy_id: {}",
-        bulletin_policy_id
-    );
-
-    // Grant each orbis node's secp256k1 DID the "collaborator" relation
-    // on the bulletin namespace. The resource is "namespace" and the
-    // object_id is "bulletin/<namespace>".
-    let bulletin_object_id = format!("bulletin/{}", BULLETIN_RING_NAMESPACE);
     for (i, did) in node_signer_dids.iter().enumerate() {
         eprintln!(
-            "[backbone]   Setting ACP collaborator for node{}: {}...",
+            "[backbone]   Adding collaborator for node{}: {}...",
             i,
             &did[..40.min(did.len())]
         );
         hub_cli
-            .set_relationship(
-                bulletin_policy_id,
-                "namespace",
-                &bulletin_object_id,
-                "collaborator",
-                did,
-            )
-            .unwrap_or_else(|e| panic!("set collaborator for node{}: {}", i, e));
+            .add_collaborator(BULLETIN_RING_NAMESPACE, did)
+            .unwrap_or_else(|e| panic!("add collaborator for node{}: {}", i, e));
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
