@@ -283,7 +283,44 @@ impl HubdCli {
     fn fund_evm_address(&self, to_address: &str, value_wei: &str) -> eyre::Result<String> {
         let nonce = self.get_evm_nonce(HARDHAT_KEY_1)?;
         let raw_tx = sign_eth_transfer(HARDHAT_KEY_1, to_address, value_wei, nonce, self.chain_id);
-        self.exec(&["tx", "send-raw", &hex::encode(raw_tx)])
+        let result = self.exec(&["tx", "send-raw", &hex::encode(raw_tx)])?;
+        // send-raw returns {"tx_hash":"0x..."} but doesn't wait for receipt.
+        // Parse the tx_hash and poll for confirmation.
+        let json: serde_json::Value = serde_json::from_str(result.trim())
+            .map_err(|e| eyre::eyre!("parse send-raw response: {}", e))?;
+        let tx_hash = json
+            .get("tx_hash")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| eyre::eyre!("no tx_hash in send-raw response: {}", result))?;
+        self.wait_for_tx_receipt(tx_hash)?;
+        Ok(result)
+    }
+
+    fn wait_for_tx_receipt(&self, tx_hash: &str) -> eyre::Result<()> {
+        for attempt in 0..50 {
+            let body = format!(
+                r#"{{"jsonrpc":"2.0","method":"eth_getTransactionReceipt","params":["{}"],"id":1}}"#,
+                tx_hash
+            );
+            let output = Command::new("curl")
+                .args([
+                    "-s", "-X", "POST",
+                    "-H", "Content-Type: application/json",
+                    "-d", &body,
+                    &self.rpc_url,
+                ])
+                .output()
+                .map_err(|e| eyre::eyre!("curl eth_getTransactionReceipt: {}", e))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+                if json.get("result").map_or(false, |v| !v.is_null()) {
+                    return Ok(());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eyre::bail!("receipt not available after 50 attempts for {}", tx_hash)
     }
 
     fn get_evm_nonce(&self, key_hex: &str) -> eyre::Result<u64> {
@@ -291,7 +328,10 @@ impl HubdCli {
         let signer = PrivateKeySigner::from_slice(&key_bytes)
             .map_err(|e| eyre::eyre!("invalid signing key: {}", e))?;
         let address = format!("{:?}", signer.address());
+        self.get_evm_nonce_for_address(&address)
+    }
 
+    fn get_evm_nonce_for_address(&self, address: &str) -> eyre::Result<u64> {
         let body = format!(
             r#"{{"jsonrpc":"2.0","method":"eth_getTransactionCount","params":["{}","latest"],"id":1}}"#,
             address
