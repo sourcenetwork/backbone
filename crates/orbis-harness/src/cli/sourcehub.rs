@@ -159,18 +159,18 @@ impl SourceHubCliClient {
     }
 
     fn list_policy_ids(&self) -> Result<Vec<String>> {
-        let result = self.exec_query(&["query", "acp", "policies"])?;
-        // Extract policy IDs from response
-        let policies = result
-            .pointer("/policies")
-            .or_else(|| result.pointer("/policy"))
+        let result = self.exec_query(&["query", "acp", "policy-ids"])?;
+        // Response has {"ids": ["abc...", "def..."]} or {"policy_ids": [...]}
+        let ids = result
+            .pointer("/ids")
+            .or_else(|| result.pointer("/policy_ids"))
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
 
-        Ok(policies
+        Ok(ids
             .iter()
-            .filter_map(|p| p.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect())
     }
 
