@@ -548,6 +548,7 @@ async fn secure_training_data_compartments() {
     // and send ETH from the funded Hardhat key.
     let sourcehub_cli =
         SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
+    let mut evm_addresses = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {
         let pk_path = ring.node(i).data_dir().join("data/public_key.txt");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -573,6 +574,7 @@ async fn secure_training_data_compartments() {
         hub_cli
             .fund_evm_address(&address, "1000000000000000000")
             .unwrap_or_else(|e| panic!("fund node{} on hub.rs: {}", i, e));
+        evm_addresses.push(address);
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
@@ -598,9 +600,9 @@ async fn secure_training_data_compartments() {
         .expect("register ring namespace on hub.rs");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    for info in &node_infos {
+    for addr in &evm_addresses {
         hub_cli
-            .add_collaborator(BULLETIN_RING_NAMESPACE, &info.public_address)
+            .add_collaborator(BULLETIN_RING_NAMESPACE, addr)
             .expect("add collaborator on hub.rs");
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
