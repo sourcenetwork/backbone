@@ -417,51 +417,41 @@ async fn wait_for_dkg_post(
     timeout: Duration,
 ) -> eyre::Result<(String, Vec<u8>)> {
     let deadline = tokio::time::Instant::now() + timeout;
-    let mut logged_once = false;
     loop {
         match hub_cli.list_posts(namespace) {
             Ok(output) => {
-                if !logged_once {
-                    eprintln!("[backbone]   list-posts raw output: {}", &output[..200.min(output.len())]);
-                    logged_once = true;
-                }
                 if let Ok(posts) = serde_json::from_str::<serde_json::Value>(&output) {
                     if let Some(arr) = posts.as_array() {
                         for post in arr {
-                            let payload_str =
-                                post.get("payload").and_then(|v| v.as_str()).unwrap_or("");
-                            if !payload_str.is_empty() {
-                                let post_id = post
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-
-                                // Payload is hex-encoded bytes from hub.rs
-                                let payload_bytes =
-                                    if let Ok(bytes) = hex::decode(payload_str) {
-                                        bytes
-                                    } else {
-                                        payload_str.as_bytes().to_vec()
-                                    };
-
-                                if !payload_bytes.is_empty() {
-                                    return Ok((post_id, payload_bytes));
+                            let payload_bytes = match post.get("payload") {
+                                // Byte array: [123, 34, ...]
+                                Some(serde_json::Value::Array(byte_arr)) => {
+                                    let bytes: Vec<u8> = byte_arr
+                                        .iter()
+                                        .filter_map(|v| v.as_u64().map(|n| n as u8))
+                                        .collect();
+                                    if bytes.is_empty() { continue; }
+                                    bytes
                                 }
-                            }
-                        }
-                        if !arr.is_empty() && !logged_once {
-                            eprintln!("[backbone]   list-posts found {} posts but none with payload", arr.len());
+                                // Hex string
+                                Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                                    hex::decode(s).unwrap_or_else(|_| s.as_bytes().to_vec())
+                                }
+                                _ => continue,
+                            };
+
+                            let post_id = post
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+
+                            return Ok((post_id, payload_bytes));
                         }
                     }
                 }
             }
-            Err(e) => {
-                if !logged_once {
-                    eprintln!("[backbone]   list-posts error: {}", e);
-                    logged_once = true;
-                }
-            }
+            Err(_) => {}
         }
         if tokio::time::Instant::now() >= deadline {
             // One last attempt with full debug output
