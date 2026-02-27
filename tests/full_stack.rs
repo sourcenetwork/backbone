@@ -278,21 +278,45 @@ impl HubdCli {
     }
 
     fn fund_evm_address(&self, to_address: &str, value_wei: &str) -> eyre::Result<String> {
-        let nonce = self.get_nonce(HARDHAT_KEY_0)?;
+        let nonce = self.get_evm_nonce(HARDHAT_KEY_0)?;
         let raw_tx = sign_eth_transfer(HARDHAT_KEY_0, to_address, value_wei, nonce, self.chain_id);
         self.exec(&["tx", "send-raw", &hex::encode(raw_tx)])
     }
 
-    fn get_nonce(&self, key_hex: &str) -> eyre::Result<u64> {
+    fn get_evm_nonce(&self, key_hex: &str) -> eyre::Result<u64> {
         let key_bytes = hex::decode(key_hex).map_err(|e| eyre::eyre!("invalid key hex: {}", e))?;
         let signer = PrivateKeySigner::from_slice(&key_bytes)
             .map_err(|e| eyre::eyre!("invalid signing key: {}", e))?;
         let address = format!("{:?}", signer.address());
-        let output = self.exec(&["tx", "nonce", &address])?;
-        output
-            .trim()
-            .parse::<u64>()
-            .map_err(|e| eyre::eyre!("parse nonce '{}': {}", output.trim(), e))
+
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","method":"eth_getTransactionCount","params":["{}","latest"],"id":1}}"#,
+            address
+        );
+        let output = Command::new("curl")
+            .args([
+                "-s",
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &body,
+                &self.rpc_url,
+            ])
+            .output()
+            .map_err(|e| eyre::eyre!("curl eth_getTransactionCount: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(stdout.trim())
+            .map_err(|e| eyre::eyre!("parse nonce response '{}': {}", stdout.trim(), e))?;
+        let hex_nonce = json
+            .get("result")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| eyre::eyre!("no result in nonce response: {}", stdout.trim()))?;
+        let nonce = u64::from_str_radix(hex_nonce.trim_start_matches("0x"), 16)
+            .map_err(|e| eyre::eyre!("parse hex nonce '{}': {}", hex_nonce, e))?;
+        Ok(nonce)
     }
 }
 

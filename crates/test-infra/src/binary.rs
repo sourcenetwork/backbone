@@ -141,9 +141,13 @@ impl BinaryResolver {
             return self.build_from_workspace(&workspace, &pkg);
         }
 
-        // 3. PATH lookup with optional version check
-        if let Ok(resolved) = self.resolve_from_path() {
-            return Ok(resolved);
+        // 3. PATH lookup with optional version check.
+        //    Skip PATH when cargo_features is set — a binary on PATH may have
+        //    been built with different features and lack required CLI flags.
+        if self.cargo_features.is_none() {
+            if let Ok(resolved) = self.resolve_from_path() {
+                return Ok(resolved);
+            }
         }
 
         // 4. Manifest lookup (backbone.toml)
