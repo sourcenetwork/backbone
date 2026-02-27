@@ -272,10 +272,6 @@ impl HubdCli {
         self.exec(&["bulletin", "register-namespace", namespace])
     }
 
-    fn add_collaborator(&self, namespace: &str, address: &str) -> eyre::Result<String> {
-        self.exec(&["bulletin", "add-collaborator", namespace, address])
-    }
-
     fn list_posts(&self, namespace: &str) -> eyre::Result<String> {
         self.exec(&["bulletin", "list-posts", namespace])
     }
@@ -297,7 +293,7 @@ impl HubdCli {
     }
 
     fn wait_for_tx_receipt(&self, tx_hash: &str) -> eyre::Result<()> {
-        for attempt in 0..50 {
+        for _attempt in 0..50 {
             let body = format!(
                 r#"{{"jsonrpc":"2.0","method":"eth_getTransactionReceipt","params":["{}"],"id":1}}"#,
                 tx_hash
@@ -390,6 +386,21 @@ fn sign_eth_transfer(
     let sig = signer.sign_hash_sync(&sig_hash).expect("sign transfer");
     let signed = tx.into_signed(sig);
     signed.encoded_2718()
+}
+
+// ============================================================================
+// Helper: Compute secp256k1 did:key from compressed public key hex
+// ============================================================================
+
+fn secp256k1_did_from_compressed_pubkey_hex(pubkey_hex: &str) -> String {
+    let pubkey_bytes = hex::decode(pubkey_hex).expect("decode pubkey hex");
+    assert_eq!(pubkey_bytes.len(), 33, "expected 33-byte compressed secp256k1 pubkey");
+    // varint(0xe7) = [0xe7, 0x01] for secp256k1-pub multicodec
+    let mut codec_bytes = Vec::with_capacity(2 + 33);
+    codec_bytes.extend_from_slice(&[0xe7, 0x01]);
+    codec_bytes.extend_from_slice(&pubkey_bytes);
+    let encoded = bs58::encode(&codec_bytes).into_string();
+    format!("did:key:z{}", encoded)
 }
 
 // ============================================================================
@@ -587,37 +598,46 @@ async fn secure_training_data_compartments() {
 
     // Step 2a. Fund orbis nodes on hub.rs
     // Orbis nodes generate their own secp256k1 signing key on first boot
-    // and write the EVM address to public_key.txt. We read the 0x address
-    // and send ETH from the funded Hardhat key.
+    // and write the EVM address to public_key.txt and compressed secp256k1
+    // public key to signer_pubkey.txt. We read both, fund the EVM address,
+    // and compute the secp256k1 DID for ACP authorization.
     let sourcehub_cli =
         SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
     let mut evm_addresses = Vec::with_capacity(ring.node_count());
+    let mut node_signer_dids = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {
-        let pk_path = ring.node(i).data_dir().join("data/public_key.txt");
+        let data_dir = ring.node(i).data_dir().join("data");
+        let pk_path = data_dir.join("public_key.txt");
+        let signer_pk_path = data_dir.join("signer_pubkey.txt");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        let address = loop {
-            if let Ok(addr) = std::fs::read_to_string(&pk_path) {
-                let addr = addr.trim().to_string();
-                if !addr.is_empty() && addr.starts_with("0x") {
-                    break addr;
-                }
+        let (address, signer_did) = loop {
+            let addr_ok = std::fs::read_to_string(&pk_path)
+                .ok()
+                .filter(|s| !s.trim().is_empty() && s.trim().starts_with("0x"));
+            let pubkey_ok = std::fs::read_to_string(&signer_pk_path)
+                .ok()
+                .filter(|s| !s.trim().is_empty());
+            if let (Some(addr), Some(pubkey_hex)) = (addr_ok, pubkey_ok) {
+                let did = secp256k1_did_from_compressed_pubkey_hex(pubkey_hex.trim());
+                break (addr.trim().to_string(), did);
             }
             if tokio::time::Instant::now() >= deadline {
                 panic!(
-                    "node{} did not write EVM address to public_key.txt within 15s",
+                    "node{} did not write public_key.txt + signer_pubkey.txt within 15s",
                     i
                 );
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
         eprintln!(
-            "[backbone]   Funding orbis node{} on hub.rs: {}",
-            i, address
+            "[backbone]   Funding orbis node{} on hub.rs: {} (DID: {}...)",
+            i, address, &signer_did[..40.min(signer_did.len())]
         );
         hub_cli
             .fund_evm_address(&address, "1000000000000000000")
             .unwrap_or_else(|e| panic!("fund node{} on hub.rs: {}", i, e));
         evm_addresses.push(address);
+        node_signer_dids.push(signer_did);
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
@@ -636,17 +656,49 @@ async fn secure_training_data_compartments() {
         node_infos.push(info);
     }
 
-    // Step 3. Register bulletin namespace + add collaborators on hub.rs
+    // Step 3. Register bulletin namespace + authorize collaborators via ACP
+    // register_namespace creates an ACP policy internally. We then use ACP
+    // set_relationship directly (rather than add_collaborator) because
+    // add_collaborator stores a DID derived from the EVM address, while
+    // create_post checks ACP with the secp256k1 DID recovered from the
+    // transaction signature. These are different DID formats and won't match.
     eprintln!("[backbone] Step 3: Registering bulletin namespace on hub.rs...");
     hub_cli
         .register_namespace(BULLETIN_RING_NAMESPACE)
         .expect("register ring namespace on hub.rs");
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    for addr in &evm_addresses {
+    // Get the bulletin module's ACP policy_id
+    let policies_json = hub_cli.list_policies().expect("list ACP policies on hub.rs");
+    let policies: Vec<String> = serde_json::from_str(&policies_json)
+        .unwrap_or_else(|e| panic!("parse policy list '{}': {}", policies_json, e));
+    let bulletin_policy_id = policies
+        .first()
+        .expect("bulletin module should have created an ACP policy");
+    eprintln!(
+        "[backbone]   Bulletin ACP policy_id: {}",
+        bulletin_policy_id
+    );
+
+    // Grant each orbis node's secp256k1 DID the "collaborator" relation
+    // on the bulletin namespace. The resource is "namespace" and the
+    // object_id is "bulletin/<namespace>".
+    let bulletin_object_id = format!("bulletin/{}", BULLETIN_RING_NAMESPACE);
+    for (i, did) in node_signer_dids.iter().enumerate() {
+        eprintln!(
+            "[backbone]   Setting ACP collaborator for node{}: {}...",
+            i,
+            &did[..40.min(did.len())]
+        );
         hub_cli
-            .add_collaborator(BULLETIN_RING_NAMESPACE, addr)
-            .expect("add collaborator on hub.rs");
+            .set_relationship(
+                bulletin_policy_id,
+                "namespace",
+                &bulletin_object_id,
+                "collaborator",
+                did,
+            )
+            .unwrap_or_else(|e| panic!("set collaborator for node{}: {}", i, e));
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
