@@ -180,6 +180,9 @@ const BULLETIN_RING_NAMESPACE: &str = "orbis";
 // ============================================================================
 
 const HARDHAT_KEY_0: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+/// Hardhat key 1 — used exclusively for funding orbis nodes (raw EVM transfers)
+/// to avoid nonce conflicts with HARDHAT_KEY_0 used by the hubd CLI.
+const HARDHAT_KEY_1: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
 struct HubdCli {
     binary: PathBuf,
@@ -278,8 +281,8 @@ impl HubdCli {
     }
 
     fn fund_evm_address(&self, to_address: &str, value_wei: &str) -> eyre::Result<String> {
-        let nonce = self.get_evm_nonce(HARDHAT_KEY_0)?;
-        let raw_tx = sign_eth_transfer(HARDHAT_KEY_0, to_address, value_wei, nonce, self.chain_id);
+        let nonce = self.get_evm_nonce(HARDHAT_KEY_1)?;
+        let raw_tx = sign_eth_transfer(HARDHAT_KEY_1, to_address, value_wei, nonce, self.chain_id);
         self.exec(&["tx", "send-raw", &hex::encode(raw_tx)])
     }
 
@@ -473,7 +476,7 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Step 1a: Starting hub.rs cluster (4 validators)...");
     let hubd_binary = hub_harness::resolve_binary().expect("resolve hubd binary");
     let hub_chain_id: u64 = 9003;
-    let hub_genesis = GenesisBuilder::devnet().funded_accounts(1, "1000000000000000000000000");
+    let hub_genesis = GenesisBuilder::devnet().funded_accounts(2, "1000000000000000000000000");
     let hub_cluster = TestCluster::builder()
         .nodes(4)
         .chain_id(hub_chain_id)
