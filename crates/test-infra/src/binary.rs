@@ -65,6 +65,8 @@ pub struct BinaryResolver {
     version_args: Vec<String>,
     /// Function to extract a version string from command output.
     version_extractor: fn(&str) -> Option<String>,
+    /// Cargo features to enable (with `--no-default-features --features <list>`).
+    cargo_features: Option<Vec<String>>,
 }
 
 impl BinaryResolver {
@@ -75,6 +77,7 @@ impl BinaryResolver {
             default_cargo_package: None,
             version_args: vec!["version".to_string()],
             version_extractor: |output| Some(output.trim().to_string()),
+            cargo_features: None,
         }
     }
 
@@ -93,6 +96,12 @@ impl BinaryResolver {
     /// Set the function that extracts a version string from command output.
     pub fn version_extractor(mut self, f: fn(&str) -> Option<String>) -> Self {
         self.version_extractor = f;
+        self
+    }
+
+    /// Set cargo features to enable (uses `--no-default-features --features <list>`).
+    pub fn cargo_features(mut self, features: &[&str]) -> Self {
+        self.cargo_features = Some(features.iter().map(|s| s.to_string()).collect());
         self
     }
 
@@ -164,14 +173,15 @@ impl BinaryResolver {
             self.binary_name
         );
 
-        let status = Command::new("cargo")
-            .args(["build", "-p", package])
-            .current_dir(workspace)
-            .status()
-            .wrap_err(format!(
-                "failed to run cargo build in {}",
-                workspace.display()
-            ))?;
+        let mut cmd = Command::new("cargo");
+        cmd.args(["build", "-p", package]);
+        if let Some(ref features) = self.cargo_features {
+            cmd.args(["--no-default-features", "--features", &features.join(",")]);
+        }
+        let status = cmd.current_dir(workspace).status().wrap_err(format!(
+            "failed to run cargo build in {}",
+            workspace.display()
+        ))?;
 
         eyre::ensure!(status.success(), "cargo build -p {} failed", package);
 
@@ -314,8 +324,12 @@ impl BinaryResolver {
                 self.prefix
             ))?;
 
-        let status = Command::new("cargo")
-            .args(["build", "-p", &pkg])
+        let mut cmd = Command::new("cargo");
+        cmd.args(["build", "-p", &pkg]);
+        if let Some(ref features) = self.cargo_features {
+            cmd.args(["--no-default-features", "--features", &features.join(",")]);
+        }
+        let status = cmd
             .current_dir(&build_dir)
             .status()
             .wrap_err("cargo build from source failed")?;

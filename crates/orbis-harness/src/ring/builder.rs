@@ -6,6 +6,13 @@ use super::health::{self, HealthCheckConfig};
 use super::node::OrbisNode;
 use sourcehub_harness::SourceHubConfig;
 
+/// Configuration for connecting orbis nodes to a hub.rs cluster.
+pub struct HubRsNodeConfig {
+    pub rpc_url: String,
+    pub ws_url: String,
+    pub chain_id: u64,
+}
+
 /// A running Orbis ring with managed node processes.
 ///
 /// Does not own infrastructure (SourceHub, DefraDB, TestRunDir).
@@ -70,6 +77,7 @@ pub struct OrbisRingBuilder {
     base_dir: Option<PathBuf>,
     identity_keys: Option<Vec<String>>,
     sourcehub_config: Option<SourceHubConfig>,
+    hub_rs_config: Option<HubRsNodeConfig>,
 }
 
 impl fmt::Debug for OrbisRingBuilder {
@@ -81,6 +89,7 @@ impl fmt::Debug for OrbisRingBuilder {
             .field("has_base_dir", &self.base_dir.is_some())
             .field("has_identity_keys", &self.identity_keys.is_some())
             .field("has_sourcehub_config", &self.sourcehub_config.is_some())
+            .field("has_hub_rs_config", &self.hub_rs_config.is_some())
             .finish()
     }
 }
@@ -94,6 +103,7 @@ impl Default for OrbisRingBuilder {
             base_dir: None,
             identity_keys: None,
             sourcehub_config: None,
+            hub_rs_config: None,
         }
     }
 }
@@ -135,6 +145,12 @@ impl OrbisRingBuilder {
         self
     }
 
+    #[must_use]
+    pub fn hub_rs_config(mut self, config: HubRsNodeConfig) -> Self {
+        self.hub_rs_config = Some(config);
+        self
+    }
+
     /// Build and start the ring.
     ///
     /// Resolves the orbis-node binary via `BinaryResolver` (set `ORBIS_BINARY`
@@ -142,9 +158,20 @@ impl OrbisRingBuilder {
     pub async fn build(self) -> eyre::Result<OrbisRing> {
         let n = self.node_count;
 
-        let binary = test_infra::BinaryResolver::new("ORBIS", "orbis-node")
-            .cargo_package("orbis-node")
-            .resolve()?;
+        let resolver = if self.hub_rs_config.is_some() {
+            test_infra::BinaryResolver::new("ORBIS", "orbis-node")
+                .cargo_package("orbis-node")
+                .cargo_features(&[
+                    "bls12-381",
+                    "redb",
+                    "bulletin-hubrs",
+                    "iroh",
+                    "authz-sourcehub",
+                ])
+        } else {
+            test_infra::BinaryResolver::new("ORBIS", "orbis-node").cargo_package("orbis-node")
+        };
+        let binary = resolver.resolve()?;
 
         let base_dir = self
             .base_dir
@@ -184,7 +211,22 @@ impl OrbisRingBuilder {
                 data_dir.to_str().unwrap_or("data").to_string(),
             ];
 
-            if let Some(ref sh) = self.sourcehub_config {
+            if let Some(ref hub) = self.hub_rs_config {
+                // Hub.rs mode: bulletin via EVM precompiles, ACP via light client
+                args_owned.extend([
+                    "--hub-rpc".to_string(),
+                    hub.rpc_url.clone(),
+                    "--hub-ws".to_string(),
+                    hub.ws_url.clone(),
+                    "--hub-chain-id".to_string(),
+                    hub.chain_id.to_string(),
+                ]);
+                // Only pass authz-grpc from SourceHub (read-only queries)
+                if let Some(ref sh) = self.sourcehub_config {
+                    args_owned.extend(["--authz-grpc".to_string(), sh.grpc_url.clone()]);
+                }
+            } else if let Some(ref sh) = self.sourcehub_config {
+                // Legacy SourceHub mode: all services via SourceHub
                 args_owned.extend([
                     "--authz-grpc".to_string(),
                     sh.grpc_url.clone(),

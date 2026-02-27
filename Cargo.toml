@@ -69,3 +69,8 @@ bs58 = "0.5"
 eyre.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-signer.workspace = true
+alloy-signer-local.workspace = true

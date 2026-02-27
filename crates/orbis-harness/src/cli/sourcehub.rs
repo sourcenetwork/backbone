@@ -330,10 +330,8 @@ impl SourceHubCliClient {
                                 if code == 0 {
                                     return Ok(());
                                 }
-                                let raw_log = v
-                                    .get("raw_log")
-                                    .and_then(|rl| rl.as_str())
-                                    .unwrap_or("");
+                                let raw_log =
+                                    v.get("raw_log").and_then(|rl| rl.as_str()).unwrap_or("");
                                 if raw_log.contains("account sequence mismatch") && attempt < 4 {
                                     tracing::warn!(attempt, "fund: sequence mismatch, retrying");
                                     std::thread::sleep(std::time::Duration::from_secs(2));

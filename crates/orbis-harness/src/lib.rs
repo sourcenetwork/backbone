@@ -17,7 +17,7 @@ pub use defra_harness::node::RustNode;
 pub use defra_harness::{start_node, KeyringBackend, NodeConfig, OrbisSignerConfig, RunningNode};
 pub use defradb::identity::DefraHttpClient;
 pub use fixture::DkgFixture;
-pub use ring::{OrbisNode, OrbisRing, OrbisRingBuilder};
+pub use ring::{HubRsNodeConfig, OrbisNode, OrbisRing, OrbisRingBuilder};
 pub use sourcehub_harness::{allocate_source_hub_ports, source_hub_address};
 pub use sourcehub_harness::{SourceHubConfig, SourceHubNode, SourceHubPorts};
 

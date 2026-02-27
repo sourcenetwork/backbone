@@ -57,6 +57,12 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+use alloy_consensus::{SignableTransaction, TxLegacy};
+use alloy_eips::eip2718::Encodable2718;
+use alloy_primitives::{TxKind, U256};
+use alloy_signer::SignerSync;
+use alloy_signer_local::PrivateKeySigner;
+
 use defra_harness::node::RustNode;
 use orbis_harness::cli::signer_did_for_pk;
 use orbis_harness::cli::types::RingPayload;
@@ -64,7 +70,7 @@ use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
 use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
     allocate_source_hub_ports, generate_identity_keys, generate_run_id, start_node,
-    BulletinEventSubscription, KeyringBackend, NodeConfig, OrbisCliClient, OrbisSignerConfig,
+    HubRsNodeConfig, KeyringBackend, NodeConfig, OrbisCliClient, OrbisSignerConfig,
     SourceHubCliClient, SourceHubConfig, SourceHubNode,
 };
 
@@ -258,6 +264,114 @@ impl HubdCli {
             actor,
         ])
     }
+
+    fn register_namespace(&self, namespace: &str) -> eyre::Result<String> {
+        self.exec(&["bulletin", "register-namespace", namespace])
+    }
+
+    fn add_collaborator(&self, namespace: &str, address: &str) -> eyre::Result<String> {
+        self.exec(&["bulletin", "add-collaborator", namespace, address])
+    }
+
+    fn list_posts(&self, namespace: &str) -> eyre::Result<String> {
+        self.exec(&["bulletin", "list-posts", namespace])
+    }
+
+    fn fund_evm_address(&self, to_address: &str, value_wei: &str) -> eyre::Result<String> {
+        let nonce = self.get_nonce(HARDHAT_KEY_0)?;
+        let raw_tx = sign_eth_transfer(HARDHAT_KEY_0, to_address, value_wei, nonce, self.chain_id);
+        self.exec(&["tx", "send-raw", &hex::encode(raw_tx)])
+    }
+
+    fn get_nonce(&self, key_hex: &str) -> eyre::Result<u64> {
+        let key_bytes = hex::decode(key_hex).map_err(|e| eyre::eyre!("invalid key hex: {}", e))?;
+        let signer = PrivateKeySigner::from_slice(&key_bytes)
+            .map_err(|e| eyre::eyre!("invalid signing key: {}", e))?;
+        let address = format!("{:?}", signer.address());
+        let output = self.exec(&["tx", "nonce", &address])?;
+        output
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| eyre::eyre!("parse nonce '{}': {}", output.trim(), e))
+    }
+}
+
+fn sign_eth_transfer(
+    from_key_hex: &str,
+    to: &str,
+    value_wei: &str,
+    nonce: u64,
+    chain_id: u64,
+) -> Vec<u8> {
+    let key_bytes = hex::decode(from_key_hex).expect("valid hex key");
+    let signer = PrivateKeySigner::from_slice(&key_bytes).expect("valid signing key");
+
+    let to_addr: alloy_primitives::Address = to.parse().expect("valid to address");
+    let value = value_wei.parse::<U256>().expect("valid wei value");
+
+    let tx = TxLegacy {
+        chain_id: Some(chain_id),
+        nonce,
+        gas_price: 0,
+        gas_limit: 21_000,
+        to: TxKind::Call(to_addr),
+        value,
+        input: Default::default(),
+    };
+
+    let sig_hash = tx.signature_hash();
+    let sig = signer.sign_hash_sync(&sig_hash).expect("sign transfer");
+    let signed = tx.into_signed(sig);
+    signed.encoded_2718()
+}
+
+// ============================================================================
+// Helper: Poll hub.rs bulletin for DKG completion post
+// ============================================================================
+
+async fn wait_for_dkg_post(
+    hub_cli: &HubdCli,
+    namespace: &str,
+    timeout: Duration,
+) -> eyre::Result<(String, Vec<u8>)> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Ok(output) = hub_cli.list_posts(namespace) {
+            if let Ok(posts) = serde_json::from_str::<serde_json::Value>(&output) {
+                if let Some(arr) = posts.as_array() {
+                    for post in arr {
+                        let payload_str =
+                            post.get("payload").and_then(|v| v.as_str()).unwrap_or("");
+                        if !payload_str.is_empty() {
+                            let post_id = post
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+
+                            // Payload is hex-encoded bytes from hub.rs
+                            let payload_bytes = if let Ok(bytes) = hex::decode(payload_str) {
+                                bytes
+                            } else {
+                                payload_str.as_bytes().to_vec()
+                            };
+
+                            if !payload_bytes.is_empty() {
+                                return Ok((post_id, payload_bytes));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(eyre::eyre!(
+                "timeout waiting for DKG post in namespace '{}'",
+                namespace
+            ));
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 // ============================================================================
@@ -321,7 +435,6 @@ async fn secure_training_data_compartments() {
     // Phase 1: Infrastructure
     // ================================================================
 
-    // Step 1. Start SourceHub devnet
     let run_id = generate_run_id();
     let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
@@ -332,7 +445,44 @@ async fn secure_training_data_compartments() {
 
     let orbis_operator_keys = generate_identity_keys(&run_id, 3);
 
-    eprintln!("[backbone] Step 1: Starting SourceHub...");
+    // Step 1a. Start hub.rs cluster (bulletin + ACP)
+    eprintln!("[backbone] Step 1a: Starting hub.rs cluster (4 validators)...");
+    let hubd_binary = hub_harness::resolve_binary().expect("resolve hubd binary");
+    let hub_chain_id: u64 = 9003;
+    let hub_genesis = GenesisBuilder::devnet().funded_accounts(1, "1000000000000000000000000");
+    let hub_cluster = TestCluster::builder()
+        .nodes(4)
+        .chain_id(hub_chain_id)
+        .genesis(hub_genesis)
+        .preset(ConsensusPreset::Fast)
+        .build()
+        .await
+        .expect("hub.rs cluster should start");
+
+    hub_cluster
+        .wait_ready(Duration::from_secs(30))
+        .await
+        .expect("hub.rs cluster should become healthy");
+
+    let hub_state = hub_cluster.observe(Duration::from_millis(200));
+    hub_state
+        .wait_for_height(3, Duration::from_secs(30))
+        .await
+        .expect("hub.rs should reach height 3");
+    eprintln!(
+        "[backbone] Hub.rs cluster ready: {} nodes",
+        hub_cluster.node_count()
+    );
+
+    let hub_cli = HubdCli::new(
+        hubd_binary,
+        &hub_cluster.node(0).rpc_url(),
+        hub_chain_id,
+        HARDHAT_KEY_0,
+    );
+
+    // Step 1b. Start SourceHub (for authz queries + DefraDB ACP — no orbis funding)
+    eprintln!("[backbone] Step 1b: Starting SourceHub...");
     let sh_ports = allocate_source_hub_ports().expect("allocate sh ports");
     let sh_home = run_dir.node_dir("sourcehub").expect("sh dir");
     let sh_log_dir = sh_home.join("logs");
@@ -350,7 +500,7 @@ async fn secure_training_data_compartments() {
 
     eprintln!("[backbone] SourceHub ready: {}", sourcehub.lcd_url);
 
-    // Step 2. Start Orbis ring (T=2, N=3)
+    // Step 2. Start Orbis ring (T=2, N=3) with hub.rs for bulletin + ACP
     eprintln!("[backbone] Step 2: Starting Orbis ring (3 nodes, threshold 2)...");
     let ring = OrbisRing::builder()
         .nodes(3)
@@ -359,14 +509,19 @@ async fn secure_training_data_compartments() {
         .base_dir(run_dir.path())
         .identity_keys(orbis_operator_keys.clone())
         .sourcehub_config(SourceHubConfig::from(&sourcehub))
+        .hub_rs_config(HubRsNodeConfig {
+            rpc_url: hub_cluster.node(0).rpc_url(),
+            ws_url: hub_cluster.node(0).ws_url(),
+            chain_id: hub_chain_id,
+        })
         .build()
         .await
         .expect("ring should start");
 
-    // Fund orbis nodes' generated signing keys via the SourceHub faucet.
-    // Orbis nodes generate their own secp256k1 chain-signing key on first boot
-    // (separate from the Ed25519 identity key). We need to wait for each node
-    // to write its public_key.txt, read the address, and send funds.
+    // Step 2a. Fund orbis nodes on hub.rs
+    // Orbis nodes generate their own secp256k1 signing key on first boot
+    // and write the EVM address to public_key.txt. We read the 0x address
+    // and send ETH from the funded Hardhat key.
     let sourcehub_cli =
         SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
     for i in 0..ring.node_count() {
@@ -375,23 +530,29 @@ async fn secure_training_data_compartments() {
         let address = loop {
             if let Ok(addr) = std::fs::read_to_string(&pk_path) {
                 let addr = addr.trim().to_string();
-                if !addr.is_empty() {
+                if !addr.is_empty() && addr.starts_with("0x") {
                     break addr;
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                panic!("node{} did not write public_key.txt within 15s", i);
+                panic!(
+                    "node{} did not write EVM address to public_key.txt within 15s",
+                    i
+                );
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
-        eprintln!("[backbone]   Funding orbis node{}: {}", i, address);
-        sourcehub_cli
-            .fund(&address)
-            .unwrap_or_else(|e| panic!("fund node{}: {}", i, e));
-        // Wait for the tx to commit so the account sequence updates
+        eprintln!(
+            "[backbone]   Funding orbis node{} on hub.rs: {}",
+            i, address
+        );
+        hub_cli
+            .fund_evm_address(&address, "1000000000000000000")
+            .unwrap_or_else(|e| panic!("fund node{} on hub.rs: {}", i, e));
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
+    // Step 2b. Wait for ring to be ready
     ring.wait_ready(Duration::from_secs(60))
         .await
         .expect("all nodes should be healthy");
@@ -406,41 +567,39 @@ async fn secure_training_data_compartments() {
         node_infos.push(info);
     }
 
-    sourcehub_cli
+    // Step 3. Register bulletin namespace + add collaborators on hub.rs
+    eprintln!("[backbone] Step 3: Registering bulletin namespace on hub.rs...");
+    hub_cli
         .register_namespace(BULLETIN_RING_NAMESPACE)
-        .expect("register ring namespace");
+        .expect("register ring namespace on hub.rs");
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     for info in &node_infos {
-        sourcehub_cli
+        hub_cli
             .add_collaborator(BULLETIN_RING_NAMESPACE, &info.public_address)
-            .expect("add collaborator");
+            .expect("add collaborator on hub.rs");
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    // Step 3. Run DKG ceremony
-    let event_subscription = BulletinEventSubscription::connect(&sourcehub.comet_rpc_url)
-        .await
-        .expect("event subscription");
-
+    // Step 3a. Run DKG ceremony
     let peer_ids: Vec<String> = node_infos.iter().map(|n| n.p2p_address.clone()).collect();
 
-    eprintln!("[backbone] Step 3: Running DKG...");
-    let dkg_result = orbis_cli
+    eprintln!("[backbone] Step 3a: Running DKG...");
+    let _dkg_result = orbis_cli
         .do_dkg(&ring.node(0).grpc_addr(), ring.threshold(), &peer_ids)
         .expect("DKG should succeed");
 
-    let post_event = event_subscription
-        .wait_for_artifact(&dkg_result.session_id, Duration::from_secs(120))
-        .await
-        .expect("DKG completion event");
+    // Step 3b. Poll for DKG post on hub.rs (replaces CometBFT subscription)
+    eprintln!("[backbone] Step 3b: Polling for DKG post on hub.rs...");
+    let (ring_id, post_payload) =
+        wait_for_dkg_post(&hub_cli, BULLETIN_RING_NAMESPACE, Duration::from_secs(120))
+            .await
+            .expect("DKG post on hub.rs");
 
-    let post_payload = sourcehub_cli
-        .read_post(BULLETIN_RING_NAMESPACE, &post_event.post_id)
-        .expect("read ring post");
-
+    // Step 3c. Read RingPayload from hub.rs bulletin
     let ring_payload: RingPayload =
         serde_json::from_slice(&post_payload).expect("parse RingPayload");
     let ring_pk_hex = ring_payload.ring_pk;
-    let ring_id = post_event.post_id;
 
     eprintln!(
         "[backbone] Ring ready. PK: {}..., ID: {}...",
@@ -1146,41 +1305,7 @@ async fn secure_training_data_compartments() {
 
     eprintln!("[backbone] === Phase 6: ACP Light Client verification ===");
 
-    // Step 31. Start hub.rs cluster
-    eprintln!("[backbone] Step 31: Starting hub.rs cluster (4 validators)...");
-    let hubd_binary = hub_harness::resolve_binary().expect("resolve hubd binary");
-    let hub_chain_id = 9003;
-    let hub_genesis = GenesisBuilder::devnet().funded_accounts(1, "1000000000000000000000000");
-    let hub_cluster = TestCluster::builder()
-        .nodes(4)
-        .chain_id(hub_chain_id)
-        .genesis(hub_genesis)
-        .preset(ConsensusPreset::Fast)
-        .build()
-        .await
-        .expect("hub.rs cluster should start");
-
-    hub_cluster
-        .wait_ready(Duration::from_secs(30))
-        .await
-        .expect("hub.rs cluster should become healthy");
-
-    let hub_state = hub_cluster.observe(Duration::from_millis(200));
-    hub_state
-        .wait_for_height(3, Duration::from_secs(30))
-        .await
-        .expect("hub.rs should reach height 3");
-    eprintln!(
-        "[backbone] Hub.rs cluster ready: {} nodes",
-        hub_cluster.node_count()
-    );
-
-    let hub_cli = HubdCli::new(
-        hubd_binary,
-        &hub_cluster.node(0).rpc_url(),
-        hub_chain_id,
-        HARDHAT_KEY_0,
-    );
+    // Hub.rs cluster is already running from Phase 1 — reuse it.
 
     // Step 32. Create ACP policy on hub.rs
     eprintln!("[backbone] Step 32: Creating ACP policy on hub.rs...");

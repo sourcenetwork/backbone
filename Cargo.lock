@@ -903,6 +903,11 @@ name = "backbone"
 version = "0.1.0"
 dependencies = [
  "acp-light-client",
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-signer",
+ "alloy-signer-local",
  "bs58",
  "defra-harness",
  "eyre",

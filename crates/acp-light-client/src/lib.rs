@@ -166,7 +166,11 @@ impl AcpLightClient {
 
         let current_height = self.header_chain.latest_height();
         if let Some(cached) = self.cache.get(&key_hex, current_height) {
-            debug!(decision_id, cached_height = cached.verified_at_height, "access decision cache hit");
+            debug!(
+                decision_id,
+                cached_height = cached.verified_at_height,
+                "access decision cache hit"
+            );
             return Ok(cached);
         }
 
@@ -202,7 +206,8 @@ impl AcpLightClient {
             .insert(&key_hex, value_bytes, verified_height, module_state_root);
 
         info!(
-            decision_id, allowed, verified_height, "access decision proof verified and cached"
+            decision_id,
+            allowed, verified_height, "access decision proof verified and cached"
         );
 
         Ok(AccessResult {
