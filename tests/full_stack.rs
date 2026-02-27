@@ -363,13 +363,40 @@ async fn secure_training_data_compartments() {
         .await
         .expect("ring should start");
 
+    // Fund orbis nodes' generated signing keys via the SourceHub faucet.
+    // Orbis nodes generate their own secp256k1 chain-signing key on first boot
+    // (separate from the Ed25519 identity key). We need to wait for each node
+    // to write its public_key.txt, read the address, and send funds.
+    let sourcehub_cli =
+        SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
+    for i in 0..ring.node_count() {
+        let pk_path = ring.node(i).data_dir().join("data/public_key.txt");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let address = loop {
+            if let Ok(addr) = std::fs::read_to_string(&pk_path) {
+                let addr = addr.trim().to_string();
+                if !addr.is_empty() {
+                    break addr;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("node{} did not write public_key.txt within 15s", i);
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        eprintln!("[backbone]   Funding orbis node{}: {}", i, address);
+        sourcehub_cli
+            .fund(&address)
+            .unwrap_or_else(|e| panic!("fund node{}: {}", i, e));
+        // Wait for the tx to commit so the account sequence updates
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
     ring.wait_ready(Duration::from_secs(60))
         .await
         .expect("all nodes should be healthy");
 
     let orbis_cli = OrbisCliClient::new().expect("resolve cli-tool binary");
-    let sourcehub_cli =
-        SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
 
     let mut node_infos = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {

@@ -129,6 +129,31 @@ async fn three_component_smoke() {
         .await
         .expect("ring should start");
 
+    // Fund orbis nodes' generated signing keys via the SourceHub faucet.
+    let sourcehub_cli =
+        SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
+    for i in 0..ring.node_count() {
+        let pk_path = ring.node(i).data_dir().join("data/public_key.txt");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let address = loop {
+            if let Ok(addr) = std::fs::read_to_string(&pk_path) {
+                let addr = addr.trim().to_string();
+                if !addr.is_empty() {
+                    break addr;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("node{} did not write public_key.txt within 15s", i);
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        eprintln!("[smoke]   Funding orbis node{}: {}", i, address);
+        sourcehub_cli
+            .fund(&address)
+            .unwrap_or_else(|e| panic!("fund node{}: {}", i, e));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
     ring.wait_ready(Duration::from_secs(60))
         .await
         .expect("all orbis nodes should be healthy");
@@ -136,8 +161,6 @@ async fn three_component_smoke() {
     eprintln!("[smoke] Orbis ring ready ({} nodes)", ring.node_count());
 
     let orbis_cli = OrbisCliClient::new().expect("resolve cli-tool binary");
-    let sourcehub_cli =
-        SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
 
     let mut node_infos = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {

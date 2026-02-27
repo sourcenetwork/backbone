@@ -291,8 +291,72 @@ impl SourceHubCliClient {
 
     pub fn fund(&self, address: &str) -> Result<()> {
         let amount = "1000000uopen";
-        self.exec_tx(&["tx", "bank", "send", "validator", address, amount])?;
-        Ok(())
+        // Retry on sequence mismatch — the CLI caches the sequence and rapid
+        // sequential txs can race with pending block commits.
+        for attempt in 0..5 {
+            let args_owned = vec![
+                "tx".to_string(),
+                "bank".to_string(),
+                "send".to_string(),
+                "validator".to_string(),
+                address.to_string(),
+                amount.to_string(),
+                "--home".to_string(),
+                self.home_dir.display().to_string(),
+                "--node".to_string(),
+                self.node_url.clone(),
+                "--chain-id".to_string(),
+                self.chain_id.clone(),
+                "--from".to_string(),
+                "validator".to_string(),
+                "--keyring-backend".to_string(),
+                "test".to_string(),
+                "-y".to_string(),
+                "-o".to_string(),
+                "json".to_string(),
+                "--gas".to_string(),
+                "200000".to_string(),
+                "--fees".to_string(),
+                "10000uopen".to_string(),
+            ];
+            let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+            match self.exec(&args) {
+                Ok(stdout) => {
+                    for line in stdout.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with('{') {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                                let code = v.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+                                if code == 0 {
+                                    return Ok(());
+                                }
+                                let raw_log = v
+                                    .get("raw_log")
+                                    .and_then(|rl| rl.as_str())
+                                    .unwrap_or("");
+                                if raw_log.contains("account sequence mismatch") && attempt < 4 {
+                                    tracing::warn!(attempt, "fund: sequence mismatch, retrying");
+                                    std::thread::sleep(std::time::Duration::from_secs(2));
+                                    break;
+                                }
+                                return Err(eyre!("fund tx failed (code {}): {}", code, raw_log));
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if msg.contains("account sequence mismatch") && attempt < 4 {
+                        tracing::warn!(attempt, "fund: sequence mismatch (stderr), retrying");
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(eyre!("fund: exhausted retries for {}", address))
     }
 
     pub fn home_dir(&self) -> &Path {
