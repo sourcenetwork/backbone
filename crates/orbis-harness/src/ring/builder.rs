@@ -158,7 +158,7 @@ impl OrbisRingBuilder {
     pub async fn build(self) -> eyre::Result<OrbisRing> {
         let n = self.node_count;
 
-        let resolver = if self.hub_rs_config.is_some() {
+        let mut resolver = if self.hub_rs_config.is_some() {
             test_infra::BinaryResolver::new("ORBIS", "orbis-node")
                 .cargo_package("orbis-node")
                 .cargo_features(&[
@@ -171,6 +171,11 @@ impl OrbisRingBuilder {
         } else {
             test_infra::BinaryResolver::new("ORBIS", "orbis-node").cargo_package("orbis-node")
         };
+        // orbis-rs has `path = "../backbone/..."` deps — symlink backbone
+        // into the temp build dir so cargo can resolve them.
+        if let Some(root) = test_infra::find_project_root() {
+            resolver = resolver.sibling_symlink("backbone", root);
+        }
         let binary = resolver.resolve()?;
 
         let base_dir = self

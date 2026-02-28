@@ -538,34 +538,31 @@ async fn secure_training_data_compartments() {
 
     let orbis_operator_keys = generate_identity_keys(&run_id, 3);
 
-    // Step 1a. Start hub.rs cluster (bulletin + ACP)
-    eprintln!("[backbone] Step 1a: Starting hub.rs cluster (4 validators)...");
+    // Step 1a. Start hub.rs single node (bulletin + ACP)
+    eprintln!("[backbone] Step 1a: Starting hub.rs node...");
     let hubd_binary = hub_harness::resolve_binary().expect("resolve hubd binary");
     let hub_chain_id: u64 = 9003;
     let hub_genesis = GenesisBuilder::devnet().funded_accounts(2, "1000000000000000000000000");
     let hub_cluster = TestCluster::builder()
-        .nodes(4)
+        .nodes(1)
         .chain_id(hub_chain_id)
         .genesis(hub_genesis)
         .preset(ConsensusPreset::Fast)
         .build()
         .await
-        .expect("hub.rs cluster should start");
+        .expect("hub.rs node should start");
 
     hub_cluster
         .wait_ready(Duration::from_secs(30))
         .await
-        .expect("hub.rs cluster should become healthy");
+        .expect("hub.rs node should become healthy");
 
     let hub_state = hub_cluster.observe(Duration::from_millis(200));
     hub_state
         .wait_for_height(3, Duration::from_secs(30))
         .await
         .expect("hub.rs should reach height 3");
-    eprintln!(
-        "[backbone] Hub.rs cluster ready: {} nodes",
-        hub_cluster.node_count()
-    );
+    eprintln!("[backbone] Hub.rs node ready");
 
     let hub_cli = HubdCli::new(
         hubd_binary,

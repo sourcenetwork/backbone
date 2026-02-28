@@ -11,9 +11,12 @@ pub struct OrbisCliClient {
 
 impl OrbisCliClient {
     pub fn new() -> Result<Self> {
-        let resolved = test_infra::BinaryResolver::new("ORBIS_CLI", "cli-tool")
-            .cargo_package("cli-tool")
-            .resolve()?;
+        let mut resolver = test_infra::BinaryResolver::new("ORBIS_CLI", "cli-tool")
+            .cargo_package("cli-tool");
+        if let Some(root) = test_infra::find_project_root() {
+            resolver = resolver.sibling_symlink("backbone", root);
+        }
+        let resolved = resolver.resolve()?;
         Ok(Self {
             binary_path: resolved.path,
         })

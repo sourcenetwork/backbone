@@ -67,6 +67,10 @@ pub struct BinaryResolver {
     version_extractor: fn(&str) -> Option<String>,
     /// Cargo features to enable (with `--no-default-features --features <list>`).
     cargo_features: Option<Vec<String>>,
+    /// Sibling directories to symlink into the build dir's parent.
+    /// Maps name → absolute path, e.g. ("backbone", "/path/to/backbone").
+    /// Useful when the cloned repo has `path = "../backbone/..."` deps.
+    sibling_symlinks: Vec<(String, PathBuf)>,
 }
 
 impl BinaryResolver {
@@ -78,6 +82,7 @@ impl BinaryResolver {
             version_args: vec!["version".to_string()],
             version_extractor: |output| Some(output.trim().to_string()),
             cargo_features: None,
+            sibling_symlinks: Vec::new(),
         }
     }
 
@@ -102,6 +107,13 @@ impl BinaryResolver {
     /// Set cargo features to enable (uses `--no-default-features --features <list>`).
     pub fn cargo_features(mut self, features: &[&str]) -> Self {
         self.cargo_features = Some(features.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
+    /// Add a sibling symlink to create in the build dir's parent.
+    /// Used when the cloned repo has path deps like `path = "../backbone/..."`.
+    pub fn sibling_symlink(mut self, name: &str, target: impl Into<PathBuf>) -> Self {
+        self.sibling_symlinks.push((name.to_string(), target.into()));
         self
     }
 
@@ -317,6 +329,36 @@ impl BinaryResolver {
                 repo,
                 git_ref
             );
+        } else {
+            // Pull latest changes for the branch
+            let _ = Command::new("git")
+                .args(["fetch", "--depth", "1", "origin", git_ref])
+                .current_dir(&build_dir)
+                .status();
+            let _ = Command::new("git")
+                .args(["reset", "--hard", "FETCH_HEAD"])
+                .current_dir(&build_dir)
+                .status();
+        }
+
+        // Create sibling symlinks (e.g. ../backbone → /path/to/backbone)
+        if let Some(parent) = build_dir.parent() {
+            for (name, target) in &self.sibling_symlinks {
+                let link_path = parent.join(name);
+                if !link_path.exists() {
+                    tracing::info!(
+                        link = %link_path.display(),
+                        target = %target.display(),
+                        "Creating sibling symlink for path dependency"
+                    );
+                    std::os::unix::fs::symlink(target, &link_path)
+                        .wrap_err_with(|| format!(
+                            "failed to symlink {} -> {}",
+                            link_path.display(),
+                            target.display()
+                        ))?;
+                }
+            }
         }
 
         let pkg = cargo_package

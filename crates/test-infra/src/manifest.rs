@@ -55,6 +55,12 @@ impl Manifest {
     }
 }
 
+/// Find the backbone project root (directory containing `backbone.toml`).
+pub fn find_project_root() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    find_manifest(&cwd).map(|p| p.parent().unwrap().to_path_buf())
+}
+
 /// Walk up from `start` looking for `backbone.toml`.
 fn find_manifest(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();

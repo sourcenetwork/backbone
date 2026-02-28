@@ -52,9 +52,9 @@ impl SourceHubCliClient {
             "-o".to_string(),
             "json".to_string(),
             "--gas".to_string(),
-            "auto".to_string(),
-            "--gas-adjustment".to_string(),
-            "1.3".to_string(),
+            "200000".to_string(),
+            "--fees".to_string(),
+            "10000uopen".to_string(),
         ]
     }
 
@@ -97,24 +97,53 @@ impl SourceHubCliClient {
     }
 
     fn exec_tx(&self, subcommand_args: &[&str]) -> Result<serde_json::Value> {
-        let tx_args = self.tx_args();
-        let mut args: Vec<&str> = subcommand_args.to_vec();
-        for a in &tx_args {
-            args.push(a);
-        }
-        let stdout = self.exec(&args)?;
-        // tx output may include non-JSON lines; find the JSON object
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('{') {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    return Ok(v);
+        for attempt in 0..5 {
+            let tx_args = self.tx_args();
+            let mut args: Vec<&str> = subcommand_args.to_vec();
+            for a in &tx_args {
+                args.push(a);
+            }
+
+            let stdout = match self.exec(&args) {
+                Ok(s) => s,
+                Err(e) => {
+                    let msg = format!("{}", e);
+                    if msg.contains("account sequence mismatch") && attempt < 4 {
+                        tracing::warn!(attempt, "exec_tx: sequence mismatch (stderr), retrying");
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
+
+            // tx output may include non-JSON lines; find the JSON object
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('{') {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        let raw_log = v.get("raw_log").and_then(|rl| rl.as_str()).unwrap_or("");
+                        if raw_log.contains("account sequence mismatch") && attempt < 4 {
+                            tracing::warn!(attempt, "exec_tx: sequence mismatch, retrying");
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            break;
+                        }
+                        return Ok(v);
+                    }
                 }
             }
+
+            // If we didn't return or break-to-retry above, try parsing whole output
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
+                return Ok(v);
+            }
+
+            // If nothing parsed, return an error on last attempt
+            if attempt == 4 {
+                return Err(eyre!("failed to parse tx JSON: stdout={}", stdout));
+            }
         }
-        // Try parsing the whole output
-        serde_json::from_str(&stdout)
-            .map_err(|e| eyre!("failed to parse tx JSON: {}: stdout={}", e, stdout))
+        Err(eyre!("exec_tx: exhausted retries"))
     }
 
     fn exec_query(&self, subcommand_args: &[&str]) -> Result<serde_json::Value> {
@@ -136,23 +165,34 @@ impl SourceHubCliClient {
         // Snapshot policy IDs before
         let before = self.list_policy_ids()?;
 
-        self.exec_tx(&[
+        let tx_result = self.exec_tx(&[
             "tx",
             "acp",
             "create-policy",
-            "SHORT_YAML",
             tmp.to_str().ok_or_else(|| eyre!("invalid path"))?,
         ])?;
+        // Check tx code — non-zero means the tx failed on-chain
+        let code = tx_result.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+        if code != 0 {
+            let raw_log = tx_result
+                .get("raw_log")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no raw_log)");
+            return Err(eyre!("create-policy tx failed (code {}): {}", code, raw_log));
+        }
 
-        // Wait for tx to be included
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        // Find new policy ID
-        let after = self.list_policy_ids()?;
-        let new_id = after
-            .into_iter()
-            .find(|id| !before.contains(id))
-            .ok_or_else(|| eyre!("policy creation succeeded but no new policy ID found"))?;
+        // Poll for the new policy ID to appear (tx needs a block to commit)
+        let mut new_id = None;
+        for _attempt in 0..15 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let after = self.list_policy_ids()?;
+            if let Some(id) = after.into_iter().find(|id| !before.contains(id)) {
+                new_id = Some(id);
+                break;
+            }
+        }
+        let new_id =
+            new_id.ok_or_else(|| eyre!("policy creation succeeded but no new policy ID found"))?;
 
         let _ = std::fs::remove_file(&tmp);
         Ok(new_id)
