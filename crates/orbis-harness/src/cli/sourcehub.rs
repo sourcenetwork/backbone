@@ -178,7 +178,11 @@ impl SourceHubCliClient {
                 .get("raw_log")
                 .and_then(|v| v.as_str())
                 .unwrap_or("(no raw_log)");
-            return Err(eyre!("create-policy tx failed (code {}): {}", code, raw_log));
+            return Err(eyre!(
+                "create-policy tx failed (code {}): {}",
+                code,
+                raw_log
+            ));
         }
 
         // Poll for the new policy ID to appear (tx needs a block to commit)

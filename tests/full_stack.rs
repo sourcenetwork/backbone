@@ -1,9 +1,9 @@
 //! Integration Test: Secure Training Data Compartments
 //!
-//! 30-step living specification. Two compartments (acme-corp, globex-inc). One
+//! 41-step living specification. Two compartments (acme-corp, globex-inc). One
 //! Orbis ring (T=2, N=3). Multiple service identities with scoped permissions.
-//! Tests the full stack from threshold key management through cross-compartment
-//! ACP isolation.
+//! Tests the full Rust stack (hub.rs + Orbis + DefraDB) from threshold key
+//! management through cross-compartment ACP isolation.
 //!
 //! ## Use case
 //!
@@ -75,6 +75,7 @@ use orbis_harness::{
 
 use acp_light_client::AcpLightClient;
 use hub_harness::cluster::{ConsensusPreset, GenesisBuilder, TestCluster};
+use hub_harness::observe::ClusterAssertions;
 
 // ============================================================================
 // ACP Policy YAML templates
@@ -147,18 +148,14 @@ impl ServiceIdentity {
         std::fs::create_dir_all(&keyring_dir)
             .unwrap_or_else(|e| panic!("create keyring dir for {}: {}", label, e));
 
-        let private_key_hex = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut h = DefaultHasher::new();
-            label.hash(&mut h);
-            "service".hash(&mut h);
-            let h1 = h.finish();
-            let mut h2 = DefaultHasher::new();
-            h1.hash(&mut h2);
-            let h2 = h2.finish();
-            format!("{:0>64x}", ((h1 as u128) << 64) | (h2 as u128))
-        };
+        // Deterministic key derivation: SHA-256(fixed_seed || label).
+        // Same label always produces the same private key across runs.
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"backbone-e2e-test-seed-v1:");
+        hasher.update(label.as_bytes());
+        let result = hasher.finalize();
+        let private_key_hex = hex::encode(result);
 
         let (did_key, _pub_bytes) = did_key_from_secp256k1(&private_key_hex)
             .unwrap_or_else(|e| panic!("derive did_key for {}: {}", label, e));
@@ -232,25 +229,33 @@ impl HubdCli {
     }
 
     fn create_policy(&self, yaml: &str) -> eyre::Result<String> {
-        // Snapshot existing policy IDs before creating the new one.
-        let before_output = self.exec(&["acp", "list-policies"])?;
-        let before: Vec<String> = serde_json::from_str(&before_output)
-            .unwrap_or_default();
+        let before: Vec<String> =
+            serde_json::from_str(&self.exec(&["acp", "list-policies"])?).unwrap_or_default();
 
         self.exec(&["acp", "create-policy", yaml])?;
-        // create-policy returns a tx receipt, not the policy ID.
-        // Wait for the tx to be included, then diff the policy list.
-        // With Normal consensus preset (~2s blocks) we need a longer wait.
-        std::thread::sleep(Duration::from_secs(4));
-        let after_output = self.exec(&["acp", "list-policies"])?;
-        let after: Vec<String> = serde_json::from_str(&after_output)
-            .map_err(|e| eyre::eyre!("parse list-policies '{}': {}", after_output, e))?;
 
-        let new_ids: Vec<&String> = after.iter().filter(|id| !before.contains(id)).collect();
-        match new_ids.len() {
-            1 => Ok(new_ids[0].clone()),
-            0 => Err(eyre::eyre!("no new policy ID found after create-policy")),
-            n => Err(eyre::eyre!("expected 1 new policy ID, got {}: {:?}", n, new_ids)),
+        // Poll for the new policy to appear (tx already submitted, waiting for block finalization)
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let after_output = self.exec(&["acp", "list-policies"])?;
+            let after: Vec<String> = serde_json::from_str(&after_output)
+                .map_err(|e| eyre::eyre!("parse list-policies '{}': {}", after_output, e))?;
+            let new_ids: Vec<&String> = after.iter().filter(|id| !before.contains(id)).collect();
+            match new_ids.len() {
+                1 => return Ok(new_ids[0].clone()),
+                n if n > 1 => {
+                    return Err(eyre::eyre!(
+                        "expected 1 new policy ID, got {}: {:?}",
+                        n,
+                        new_ids
+                    ))
+                }
+                _ => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(eyre::eyre!("no new policy ID found after 30s polling"));
+            }
+            std::thread::sleep(Duration::from_millis(500));
         }
     }
 
@@ -337,9 +342,13 @@ impl HubdCli {
             );
             let output = Command::new("curl")
                 .args([
-                    "-s", "-X", "POST",
-                    "-H", "Content-Type: application/json",
-                    "-d", &body,
+                    "-s",
+                    "-X",
+                    "POST",
+                    "-H",
+                    "Content-Type: application/json",
+                    "-d",
+                    &body,
                     &self.rpc_url,
                 ])
                 .output()
@@ -347,7 +356,7 @@ impl HubdCli {
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-                if json.get("result").map_or(false, |v| !v.is_null()) {
+                if json.get("result").is_some_and(|v| !v.is_null()) {
                     return Ok(());
                 }
             }
@@ -438,7 +447,11 @@ fn evm_address_from_private_key(key_hex: &str) -> String {
 
 fn secp256k1_did_from_compressed_pubkey_hex(pubkey_hex: &str) -> String {
     let pubkey_bytes = hex::decode(pubkey_hex).expect("decode pubkey hex");
-    assert_eq!(pubkey_bytes.len(), 33, "expected 33-byte compressed secp256k1 pubkey");
+    assert_eq!(
+        pubkey_bytes.len(),
+        33,
+        "expected 33-byte compressed secp256k1 pubkey"
+    );
     // varint(0xe7) = [0xe7, 0x01] for secp256k1-pub multicodec
     let mut codec_bytes = Vec::with_capacity(2 + 33);
     codec_bytes.extend_from_slice(&[0xe7, 0x01]);
@@ -458,40 +471,39 @@ async fn wait_for_dkg_post(
 ) -> eyre::Result<(String, Vec<u8>)> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        match hub_cli.list_posts(namespace) {
-            Ok(output) => {
-                if let Ok(posts) = serde_json::from_str::<serde_json::Value>(&output) {
-                    if let Some(arr) = posts.as_array() {
-                        for post in arr {
-                            let payload_bytes = match post.get("payload") {
-                                // Byte array: [123, 34, ...]
-                                Some(serde_json::Value::Array(byte_arr)) => {
-                                    let bytes: Vec<u8> = byte_arr
-                                        .iter()
-                                        .filter_map(|v| v.as_u64().map(|n| n as u8))
-                                        .collect();
-                                    if bytes.is_empty() { continue; }
-                                    bytes
+        if let Ok(output) = hub_cli.list_posts(namespace) {
+            if let Ok(posts) = serde_json::from_str::<serde_json::Value>(&output) {
+                if let Some(arr) = posts.as_array() {
+                    for post in arr {
+                        let payload_bytes = match post.get("payload") {
+                            // Byte array: [123, 34, ...]
+                            Some(serde_json::Value::Array(byte_arr)) => {
+                                let bytes: Vec<u8> = byte_arr
+                                    .iter()
+                                    .filter_map(|v| v.as_u64().map(|n| n as u8))
+                                    .collect();
+                                if bytes.is_empty() {
+                                    continue;
                                 }
-                                // Hex string
-                                Some(serde_json::Value::String(s)) if !s.is_empty() => {
-                                    hex::decode(s).unwrap_or_else(|_| s.as_bytes().to_vec())
-                                }
-                                _ => continue,
-                            };
+                                bytes
+                            }
+                            // Hex string
+                            Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                                hex::decode(s).unwrap_or_else(|_| s.as_bytes().to_vec())
+                            }
+                            _ => continue,
+                        };
 
-                            let post_id = post
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
+                        let post_id = post
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
 
-                            return Ok((post_id, payload_bytes));
-                        }
+                        return Ok((post_id, payload_bytes));
                     }
                 }
             }
-            Err(_) => {}
         }
         if tokio::time::Instant::now() >= deadline {
             // One last attempt with full debug output
@@ -532,24 +544,27 @@ fn bls_did_key_from_hex(public_key_hex: &str) -> String {
 // Helper: check if a GraphQL response denies access
 // ============================================================================
 
-fn is_denied(result: &Result<serde_json::Value, eyre::Report>, data_path: &str) -> bool {
-    match result {
-        Err(_) => true,
-        Ok(body) => {
-            body.get("errors").is_some()
-                || body
-                    .pointer(data_path)
-                    .and_then(|v| v.as_array())
-                    .is_none_or(|a| a.is_empty())
-        }
-    }
+/// Returns `true` only if the response indicates ACP denial (GraphQL errors or empty data).
+/// Panics on network/transport errors — those are not "denied", they're test failures.
+fn is_acp_denied(result: &Result<serde_json::Value, eyre::Report>, data_path: &str) -> bool {
+    let body = result
+        .as_ref()
+        .expect("GraphQL request failed (network error, not ACP denial)");
+    body.get("errors").is_some()
+        || body
+            .pointer(data_path)
+            .and_then(|v| v.as_array())
+            .is_none_or(|a| a.is_empty())
 }
 
-fn is_write_denied(result: &Result<serde_json::Value, eyre::Report>, create_path: &str) -> bool {
-    match result {
-        Err(_) => true,
-        Ok(body) => body.get("errors").is_some() || body.pointer(create_path).is_none(),
-    }
+fn is_write_acp_denied(
+    result: &Result<serde_json::Value, eyre::Report>,
+    create_path: &str,
+) -> bool {
+    let body = result
+        .as_ref()
+        .expect("GraphQL request failed (network error, not ACP denial)");
+    body.get("errors").is_some() || body.pointer(create_path).is_none()
 }
 
 // ============================================================================
@@ -661,7 +676,9 @@ async fn secure_training_data_compartments() {
         };
         eprintln!(
             "[backbone]   Funding orbis node{} on hub.rs: {} (DID: {}...)",
-            i, address, &signer_did[..40.min(signer_did.len())]
+            i,
+            address,
+            &signer_did[..40.min(signer_did.len())]
         );
         hub_cli
             .fund_evm_address(&address, "1000000000000000000")
@@ -969,7 +986,8 @@ async fn secure_training_data_compartments() {
             r#"mutation {{ create_Transcript(input: {{ call_id: "{}", content: "{}", customer: "{}" }}) {{ _docID }} }}"#,
             call_id, content, customer
         );
-        xarchive_client_graphql(&acme_client, &mutation, &training_svc.private_key_hex)
+        acme_client
+            .graphql(&mutation, Some(&training_svc.private_key_hex))
             .await
             .unwrap_or_else(|e| panic!("write transcript {}: {}", call_id, e));
     }
@@ -989,9 +1007,10 @@ async fn secure_training_data_compartments() {
         .pointer("/data/Transcript")
         .and_then(|v| v.as_array())
         .expect("Transcript array");
-    assert!(
-        !docs.is_empty(),
-        "inference_svc should see transcripts (has reader grant)"
+    assert_eq!(
+        docs.len(),
+        3,
+        "inference_svc should see exactly 3 transcripts (has reader grant)"
     );
     eprintln!(
         "[backbone] Step 17: INFERENCE_SVC reads {} transcripts",
@@ -1012,13 +1031,11 @@ async fn secure_training_data_compartments() {
         .graphql(inference_write, Some(&inference_svc.private_key_hex))
         .await;
 
-    if is_write_denied(&inference_write_result, "/data/create_Transcript/_docID") {
-        eprintln!("[backbone] Step 18: INFERENCE_SVC write denied (reader only)");
-    } else {
-        eprintln!(
-            "[backbone] Step 18: WARN: INFERENCE_SVC write not denied (ACP enforcement pending)"
-        );
-    }
+    assert!(
+        is_write_acp_denied(&inference_write_result, "/data/create_Transcript/_docID"),
+        "INFERENCE_SVC write should be denied (reader only)"
+    );
+    eprintln!("[backbone] Step 18: INFERENCE_SVC write denied (reader only)");
 
     // ================================================================
     // Phase 4: Globex compartment + isolation
@@ -1126,7 +1143,8 @@ async fn secure_training_data_compartments() {
             r#"mutation {{ create_SupportTicket(input: {{ ticket_id: "{}", subject: "{}", body: "{}", priority: "{}" }}) {{ _docID }} }}"#,
             tid, subject, body, priority
         );
-        xarchive_client_graphql(&globex_client, &mutation, &globex_svc.private_key_hex)
+        globex_client
+            .graphql(&mutation, Some(&globex_svc.private_key_hex))
             .await
             .unwrap_or_else(|e| panic!("write ticket {}: {}", tid, e));
     }
@@ -1140,9 +1158,10 @@ async fn secure_training_data_compartments() {
         .pointer("/data/SupportTicket")
         .and_then(|v| v.as_array())
         .expect("SupportTicket array");
-    assert!(
-        !ticket_docs.is_empty(),
-        "globex_svc should see tickets (has writer+reader grant)"
+    assert_eq!(
+        ticket_docs.len(),
+        2,
+        "globex_svc should see exactly 2 tickets (has writer+reader grant)"
     );
     eprintln!(
         "[backbone] Step 22: GLOBEX_SVC wrote {} tickets, reads back {}",
@@ -1159,13 +1178,11 @@ async fn secure_training_data_compartments() {
         )
         .await;
 
-    if is_denied(&cross_acme, "/data/Transcript") {
-        eprintln!("[backbone] PASSED: GLOBEX_SVC denied on acme transcripts");
-    } else {
-        eprintln!(
-            "[backbone] WARN: GLOBEX_SVC can read acme transcripts (ACP enforcement pending)"
-        );
-    }
+    assert!(
+        is_acp_denied(&cross_acme, "/data/Transcript"),
+        "GLOBEX_SVC should be denied on acme transcripts (cross-compartment)"
+    );
+    eprintln!("[backbone] PASSED: GLOBEX_SVC denied on acme transcripts");
 
     // Step 24. TRAINING_SVC queries globex's DefraDB — denied (reverse isolation)
     eprintln!("[backbone] Step 24: Testing cross-compartment isolation: acme -> globex...");
@@ -1176,13 +1193,11 @@ async fn secure_training_data_compartments() {
         )
         .await;
 
-    if is_denied(&cross_globex, "/data/SupportTicket") {
-        eprintln!("[backbone] PASSED: TRAINING_SVC denied on globex tickets");
-    } else {
-        eprintln!(
-            "[backbone] WARN: TRAINING_SVC can read globex tickets (ACP enforcement pending)"
-        );
-    }
+    assert!(
+        is_acp_denied(&cross_globex, "/data/SupportTicket"),
+        "TRAINING_SVC should be denied on globex tickets (cross-compartment)"
+    );
+    eprintln!("[backbone] PASSED: TRAINING_SVC denied on globex tickets");
 
     // ================================================================
     // Phase 5: Cross-compartment audit + lifecycle
@@ -1222,9 +1237,10 @@ async fn secure_training_data_compartments() {
         .pointer("/data/Transcript")
         .and_then(|v| v.as_array())
         .expect("Transcript array for audit");
-    assert!(
-        !audit_acme_docs.is_empty(),
-        "audit_svc should see acme transcripts"
+    assert_eq!(
+        audit_acme_docs.len(),
+        3,
+        "audit_svc should see exactly 3 acme transcripts"
     );
     eprintln!(
         "[backbone] Step 26: AUDIT_SVC reads {} acme transcripts",
@@ -1243,9 +1259,10 @@ async fn secure_training_data_compartments() {
         .pointer("/data/SupportTicket")
         .and_then(|v| v.as_array())
         .expect("SupportTicket array for audit");
-    assert!(
-        !audit_globex_docs.is_empty(),
-        "audit_svc should see globex tickets"
+    assert_eq!(
+        audit_globex_docs.len(),
+        2,
+        "audit_svc should see exactly 2 globex tickets"
     );
     eprintln!(
         "[backbone] Step 27: AUDIT_SVC reads {} globex tickets",
@@ -1260,11 +1277,11 @@ async fn secure_training_data_compartments() {
         )
         .await;
 
-    if is_write_denied(&audit_write_acme, "/data/create_Transcript/_docID") {
-        eprintln!("[backbone] Step 28a: AUDIT_SVC write denied on acme");
-    } else {
-        eprintln!("[backbone] Step 28a: WARN: AUDIT_SVC write not denied on acme");
-    }
+    assert!(
+        is_write_acp_denied(&audit_write_acme, "/data/create_Transcript/_docID"),
+        "AUDIT_SVC write should be denied on acme (reader only)"
+    );
+    eprintln!("[backbone] Step 28a: AUDIT_SVC write denied on acme");
 
     let audit_write_globex = globex_client
         .graphql(
@@ -1273,11 +1290,11 @@ async fn secure_training_data_compartments() {
         )
         .await;
 
-    if is_write_denied(&audit_write_globex, "/data/create_SupportTicket/_docID") {
-        eprintln!("[backbone] Step 28b: AUDIT_SVC write denied on globex");
-    } else {
-        eprintln!("[backbone] Step 28b: WARN: AUDIT_SVC write not denied on globex");
-    }
+    assert!(
+        is_write_acp_denied(&audit_write_globex, "/data/create_SupportTicket/_docID"),
+        "AUDIT_SVC write should be denied on globex (reader only)"
+    );
+    eprintln!("[backbone] Step 28b: AUDIT_SVC write denied on globex");
 
     // Step 29. Revoke AUDIT_SVC from acme — can no longer read acme, still reads globex
     eprintln!("[backbone] Step 29: Revoking AUDIT_SVC from acme...");
@@ -1298,11 +1315,11 @@ async fn secure_training_data_compartments() {
         )
         .await;
 
-    if is_denied(&revoked_acme, "/data/Transcript") {
-        eprintln!("[backbone] PASSED: Revoked AUDIT_SVC can no longer read acme transcripts");
-    } else {
-        eprintln!("[backbone] WARN: Revoked AUDIT_SVC still reads acme (ACP enforcement pending)");
-    }
+    assert!(
+        is_acp_denied(&revoked_acme, "/data/Transcript"),
+        "Revoked AUDIT_SVC should not read acme transcripts"
+    );
+    eprintln!("[backbone] PASSED: Revoked AUDIT_SVC can no longer read acme transcripts");
 
     let still_globex = globex_client
         .graphql(
@@ -1315,9 +1332,10 @@ async fn secure_training_data_compartments() {
         .pointer("/data/SupportTicket")
         .and_then(|v| v.as_array())
         .expect("SupportTicket array post-revocation");
-    assert!(
-        !still_globex_docs.is_empty(),
-        "audit_svc should still see globex tickets after acme revocation"
+    assert_eq!(
+        still_globex_docs.len(),
+        2,
+        "audit_svc should still see exactly 2 globex tickets after acme revocation"
     );
     eprintln!(
         "[backbone] PASSED: AUDIT_SVC still reads {} globex tickets after acme revocation",
@@ -1400,11 +1418,11 @@ async fn secure_training_data_compartments() {
         .graphql(old_key_write, Some(&training_svc.private_key_hex))
         .await;
 
-    if is_write_denied(&old_key_result, "/data/create_Transcript/_docID") {
-        eprintln!("[backbone] PASSED: Old TRAINING_SVC denied after revocation");
-    } else {
-        eprintln!("[backbone] WARN: Old TRAINING_SVC not denied (ACP enforcement pending)");
-    }
+    assert!(
+        is_write_acp_denied(&old_key_result, "/data/create_Transcript/_docID"),
+        "Old TRAINING_SVC should be denied after revocation"
+    );
+    eprintln!("[backbone] PASSED: Old TRAINING_SVC denied after revocation");
 
     let rotated_verify = acme_client
         .graphql(
@@ -1537,12 +1555,23 @@ async fn secure_training_data_compartments() {
         recheck.verified_at_height
     );
 
-    // Step 41. Measure revocation SLA
+    // Step 41. Measure and assert revocation SLA
     let revocation_blocks = new_sync.height.saturating_sub(sync.height);
     eprintln!(
         "[backbone] Step 41: Revocation SLA: {} blocks from tx to cache invalidation",
         revocation_blocks
     );
+    assert!(
+        revocation_blocks <= 5,
+        "revocation SLA violated: {} blocks (max 5)",
+        revocation_blocks
+    );
+
+    // Final health check: assert hub.rs had no unexpected errors during the entire test
+    hub_state
+        .assert_no_errors()
+        .expect("hub.rs cluster should have no unexpected errors");
+    eprintln!("[backbone] Hub.rs cluster health: no unexpected errors");
 
     drop(hub_cluster);
     eprintln!("[backbone] === Phase 6 complete: ACP Light Client verified ===");
@@ -1575,12 +1604,4 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone]   Permission revocation: 2 tests");
     eprintln!("[backbone]   Key rotation: 3 tests");
     eprintln!("[backbone]   ACP light client: 6 tests (hub.rs proofs + cache invalidation)");
-}
-
-async fn xarchive_client_graphql(
-    client: &DefraHttpClient,
-    mutation: &str,
-    identity_hex: &str,
-) -> eyre::Result<serde_json::Value> {
-    client.graphql(mutation, Some(identity_hex)).await
 }

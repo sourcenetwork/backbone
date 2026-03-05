@@ -113,7 +113,8 @@ impl BinaryResolver {
     /// Add a sibling symlink to create in the build dir's parent.
     /// Used when the cloned repo has path deps like `path = "../backbone/..."`.
     pub fn sibling_symlink(mut self, name: &str, target: impl Into<PathBuf>) -> Self {
-        self.sibling_symlinks.push((name.to_string(), target.into()));
+        self.sibling_symlinks
+            .push((name.to_string(), target.into()));
         self
     }
 
@@ -351,12 +352,13 @@ impl BinaryResolver {
                         target = %target.display(),
                         "Creating sibling symlink for path dependency"
                     );
-                    std::os::unix::fs::symlink(target, &link_path)
-                        .wrap_err_with(|| format!(
+                    std::os::unix::fs::symlink(target, &link_path).wrap_err_with(|| {
+                        format!(
                             "failed to symlink {} -> {}",
                             link_path.display(),
                             target.display()
-                        ))?;
+                        )
+                    })?;
                 }
             }
         }
