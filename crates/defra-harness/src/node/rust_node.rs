@@ -180,6 +180,13 @@ impl DefraNode for RustNode {
             }
         }
 
+        if let Some(ref hub_rs) = config.hub_rs_address {
+            args.extend([
+                "--hub-rs-address".into(),
+                hub_rs.clone(),
+            ]);
+        }
+
         if let Some(ref transport) = config.p2p_transport {
             args.push("--p2p-transport".to_string());
             args.push(transport.clone());

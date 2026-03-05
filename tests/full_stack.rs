@@ -69,9 +69,8 @@ use orbis_harness::cli::types::RingPayload;
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
 use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
-    allocate_source_hub_ports, generate_identity_keys, generate_run_id, start_node,
-    HubRsNodeConfig, KeyringBackend, NodeConfig, OrbisCliClient, OrbisSignerConfig,
-    SourceHubCliClient, SourceHubConfig, SourceHubNode,
+    generate_identity_keys, generate_run_id, start_node, HubRsNodeConfig, KeyringBackend,
+    NodeConfig, OrbisCliClient, OrbisSignerConfig,
 };
 
 use acp_light_client::AcpLightClient;
@@ -260,6 +259,25 @@ impl HubdCli {
         self.exec(&[
             "acp",
             "set-relationship",
+            policy_id,
+            resource,
+            object_id,
+            relation,
+            actor,
+        ])
+    }
+
+    fn delete_relationship(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        actor: &str,
+    ) -> eyre::Result<String> {
+        self.exec(&[
+            "acp",
+            "delete-relationship",
             policy_id,
             resource,
             object_id,
@@ -517,7 +535,7 @@ fn is_write_denied(result: &Result<serde_json::Value, eyre::Report>, create_path
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "spec test: requires sourcehubd, defra, and orbis-node on PATH"]
+#[ignore = "spec test: requires hubd, defra, and orbis-node on PATH"]
 async fn secure_training_data_compartments() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -571,25 +589,6 @@ async fn secure_training_data_compartments() {
         HARDHAT_KEY_0,
     );
 
-    // Step 1b. Start SourceHub (for authz queries + DefraDB ACP — no orbis funding)
-    eprintln!("[backbone] Step 1b: Starting SourceHub...");
-    let sh_ports = allocate_source_hub_ports().expect("allocate sh ports");
-    let sh_home = run_dir.node_dir("sourcehub").expect("sh dir");
-    let sh_log_dir = sh_home.join("logs");
-    std::fs::create_dir_all(&sh_log_dir).expect("sh log dir");
-
-    let sourcehub = SourceHubNode::start(
-        sh_home,
-        sh_log_dir,
-        &sh_ports,
-        &orbis_operator_keys,
-        Duration::from_secs(60),
-    )
-    .await
-    .expect("sourcehub should start");
-
-    eprintln!("[backbone] SourceHub ready: {}", sourcehub.lcd_url);
-
     // Step 2. Start Orbis ring (T=2, N=3) with hub.rs for bulletin + ACP
     eprintln!("[backbone] Step 2: Starting Orbis ring (3 nodes, threshold 2)...");
     let ring = OrbisRing::builder()
@@ -598,7 +597,6 @@ async fn secure_training_data_compartments() {
         .log_level("info")
         .base_dir(run_dir.path())
         .identity_keys(orbis_operator_keys.clone())
-        .sourcehub_config(SourceHubConfig::from(&sourcehub))
         .hub_rs_config(HubRsNodeConfig {
             rpc_url: hub_cluster.node(0).rpc_url(),
             ws_url: hub_cluster.node(0).ws_url(),
@@ -613,8 +611,6 @@ async fn secure_training_data_compartments() {
     // and write the EVM address to public_key.txt and compressed secp256k1
     // public key to signer_pubkey.txt. We read both, fund the EVM address,
     // and compute the secp256k1 DID for ACP authorization.
-    let sourcehub_cli =
-        SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
     let mut evm_addresses = Vec::with_capacity(ring.node_count());
     let mut node_signer_dids = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {
@@ -718,12 +714,13 @@ async fn secure_training_data_compartments() {
 
     // Step 4. Create ring signing policy + register ring object
     eprintln!("[backbone] Step 4: Creating ring signing ACP policy...");
-    let ring_policy_id = sourcehub_cli
+    let ring_policy_id = hub_cli
         .create_policy(RING_SIGNING_POLICY_YAML)
         .expect("create ring signing ACP policy");
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    sourcehub_cli
-        .register_object(&ring_policy_id, &ring_id, "ring")
+    hub_cli
+        .register_object(&ring_policy_id, "ring", &ring_id)
         .expect("register ring object");
     eprintln!(
         "[backbone] Ring signing policy: {}, object: {}...",
@@ -803,7 +800,8 @@ async fn secure_training_data_compartments() {
     // Step 10. Authorize DefraDB service accounts as ring signers.
     // signer_did_for_pk derives an Ed25519 did:key (0xed) used for Orbis ring ACP.
     let acme_defra_signer_did = signer_did_for_pk(&acme_defra_svc.private_key_hex);
-    sourcehub_cli
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub_cli
         .set_relationship(
             &ring_policy_id,
             "ring",
@@ -814,7 +812,8 @@ async fn secure_training_data_compartments() {
         .expect("grant acme_defra_svc signer on ring");
 
     let globex_defra_signer_did = signer_did_for_pk(&globex_defra_svc.private_key_hex);
-    sourcehub_cli
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub_cli
         .set_relationship(
             &ring_policy_id,
             "ring",
@@ -831,20 +830,23 @@ async fn secure_training_data_compartments() {
 
     // Step 11. Create acme ACP policy
     eprintln!("[backbone] Step 11: Creating acme ACP policy...");
-    let acme_policy_id = sourcehub_cli
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let acme_policy_id = hub_cli
         .create_policy(ACME_POLICY_YAML)
         .expect("create acme ACP policy");
 
     let transcript_object = "acme-transcripts";
-    sourcehub_cli
-        .register_object(&acme_policy_id, transcript_object, "transcript")
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub_cli
+        .register_object(&acme_policy_id, "transcript", transcript_object)
         .expect("register transcript object");
     eprintln!("[backbone] Acme policy: {}", acme_policy_id);
 
     // Step 12. Grant TRAINING_SVC writer+reader on acme transcripts.
     // ACP grants use the secp256k1 did:key (0xe7) — the service identity.
     for relation in &["writer", "reader"] {
-        sourcehub_cli
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        hub_cli
             .set_relationship(
                 &acme_policy_id,
                 "transcript",
@@ -857,7 +859,8 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Step 12: TRAINING_SVC granted writer+reader on acme transcripts");
 
     // Step 13. Grant INFERENCE_SVC reader on acme transcripts
-    sourcehub_cli
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub_cli
         .set_relationship(
             &acme_policy_id,
             "transcript",
@@ -890,8 +893,8 @@ async fn secure_training_data_compartments() {
     );
     acme_defra_config.p2p_enabled = true;
     acme_defra_config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", acme_defra_ports[1]));
-    acme_defra_config.source_hub = Some(SourceHubConfig::from(&sourcehub));
-    acme_defra_config.acp_document_type = Some("source-hub".to_string());
+    acme_defra_config.hub_rs_address = Some(hub_cluster.node(0).rpc_url());
+    acme_defra_config.acp_document_type = Some("hub-rs".to_string());
     acme_defra_config.identity = Some(acme_defra_svc.private_key_hex.clone());
     acme_defra_config.keyring = KeyringBackend::File {
         path: acme_keyring_path,
@@ -1001,17 +1004,20 @@ async fn secure_training_data_compartments() {
 
     // Step 19. Create globex ACP policy + grant GLOBEX_SVC writer+reader
     eprintln!("[backbone] Step 19: Creating globex ACP policy...");
-    let globex_policy_id = sourcehub_cli
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let globex_policy_id = hub_cli
         .create_policy(GLOBEX_POLICY_YAML)
         .expect("create globex ACP policy");
 
     let ticket_object = "globex-tickets";
-    sourcehub_cli
-        .register_object(&globex_policy_id, ticket_object, "ticket")
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub_cli
+        .register_object(&globex_policy_id, "ticket", ticket_object)
         .expect("register ticket object");
 
     for relation in &["writer", "reader"] {
-        sourcehub_cli
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        hub_cli
             .set_relationship(
                 &globex_policy_id,
                 "ticket",
@@ -1042,8 +1048,8 @@ async fn secure_training_data_compartments() {
     );
     globex_defra_config.p2p_enabled = true;
     globex_defra_config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", globex_defra_ports[1]));
-    globex_defra_config.source_hub = Some(SourceHubConfig::from(&sourcehub));
-    globex_defra_config.acp_document_type = Some("source-hub".to_string());
+    globex_defra_config.hub_rs_address = Some(hub_cluster.node(0).rpc_url());
+    globex_defra_config.acp_document_type = Some("hub-rs".to_string());
     globex_defra_config.identity = Some(globex_defra_svc.private_key_hex.clone());
     globex_defra_config.keyring = KeyringBackend::File {
         path: globex_keyring_path,
@@ -1164,7 +1170,8 @@ async fn secure_training_data_compartments() {
     // ================================================================
 
     // Step 25. Grant AUDIT_SVC reader on both compartments
-    sourcehub_cli
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub_cli
         .set_relationship(
             &acme_policy_id,
             "transcript",
@@ -1174,7 +1181,8 @@ async fn secure_training_data_compartments() {
         )
         .expect("grant audit_svc reader on acme transcript");
 
-    sourcehub_cli
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub_cli
         .set_relationship(
             &globex_policy_id,
             "ticket",
@@ -1256,7 +1264,8 @@ async fn secure_training_data_compartments() {
 
     // Step 29. Revoke AUDIT_SVC from acme — can no longer read acme, still reads globex
     eprintln!("[backbone] Step 29: Revoking AUDIT_SVC from acme...");
-    sourcehub_cli
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    hub_cli
         .delete_relationship(
             &acme_policy_id,
             "transcript",
@@ -1304,7 +1313,8 @@ async fn secure_training_data_compartments() {
     let new_training_svc = ServiceIdentity::new_file_keyring("training-svc-v2", run_dir.path());
 
     for relation in &["writer", "reader"] {
-        sourcehub_cli
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        hub_cli
             .set_relationship(
                 &acme_policy_id,
                 "transcript",
@@ -1349,7 +1359,8 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] PASSED: New TRAINING_SVC writes successfully");
 
     for relation in &["writer", "reader"] {
-        sourcehub_cli
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        hub_cli
             .delete_relationship(
                 &acme_policy_id,
                 "transcript",
@@ -1414,49 +1425,9 @@ async fn secure_training_data_compartments() {
 
     eprintln!("[backbone] === Phase 6: ACP Light Client verification ===");
 
-    // Hub.rs cluster is already running from Phase 1 — reuse it.
-
-    // Step 32. Create ACP policy on hub.rs
-    eprintln!("[backbone] Step 32: Creating ACP policy on hub.rs...");
-    hub_cli
-        .create_policy(ACME_POLICY_YAML)
-        .expect("create_policy on hub.rs");
-
-    let list_output = hub_cli.list_policies().expect("list_policies");
-    let policy_ids: serde_json::Value =
-        serde_json::from_str(&list_output).expect("list_policies should return JSON");
-    let hub_policy_id_str = policy_ids
-        .as_array()
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        .expect("should have at least one policy ID")
-        .to_string();
-    eprintln!(
-        "[backbone] Hub.rs policy created: {}",
-        &hub_policy_id_str[..16.min(hub_policy_id_str.len())]
-    );
-
-    // Register transcript object — wait for consensus between txs
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    hub_cli
-        .register_object(&hub_policy_id_str, "transcript", "acme-transcripts")
-        .expect("register_object on hub.rs");
-
-    // Step 33. Grant TRAINING_SVC writer on hub.rs
-    eprintln!("[backbone] Step 33: Granting TRAINING_SVC writer on hub.rs...");
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    hub_cli
-        .set_relationship(
-            &hub_policy_id_str,
-            "transcript",
-            "acme-transcripts",
-            "writer",
-            &training_svc.did_key,
-        )
-        .expect("set_relationship writer on hub.rs");
-
-    // Wait for finalization
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Hub.rs cluster is already running from Phase 1 — reuse acme_policy_id
+    // from Step 11 (already created on hub.rs with transcript object registered
+    // and TRAINING_SVC granted writer+reader).
 
     // Step 34. Start AcpLightClient
     eprintln!("[backbone] Step 34: Starting ACP light client...");
@@ -1480,7 +1451,7 @@ async fn secure_training_data_compartments() {
     // Step 36. check_access(TRAINING_SVC, write) → allowed
     eprintln!("[backbone] Step 36: Checking TRAINING_SVC writer access...");
     let policy_check = light_client
-        .check_policy(&hub_policy_id_str)
+        .check_policy(&acme_policy_id)
         .await
         .expect("check_policy should succeed");
     assert!(policy_check.allowed, "policy should exist on hub.rs");
@@ -1509,17 +1480,18 @@ async fn secure_training_data_compartments() {
         .latest_module_state_root()
         .expect("should have module_state_root");
 
-    // Step 38. Mutate: add reader to change module_state_root
+    // Step 38. Mutate: re-grant audit_svc reader (revoked in Step 29) to change module_state_root
     eprintln!("[backbone] Step 38: Mutating ACP state on hub.rs...");
+    tokio::time::sleep(Duration::from_secs(1)).await;
     hub_cli
         .set_relationship(
-            &hub_policy_id_str,
+            &acme_policy_id,
             "transcript",
-            "acme-transcripts",
+            transcript_object,
             "reader",
-            &inference_svc.did_key,
+            &audit_svc.did_key,
         )
-        .expect("set_relationship reader on hub.rs");
+        .expect("re-grant audit_svc reader on hub.rs");
 
     // Step 39. Wait for module_state_root change
     eprintln!("[backbone] Step 39: Waiting for module_state_root change...");
@@ -1539,7 +1511,7 @@ async fn secure_training_data_compartments() {
     // Step 40. Re-check policy — cache was invalidated, re-verified with new root
     eprintln!("[backbone] Step 40: Re-checking policy after state change...");
     let recheck = light_client
-        .check_policy(&hub_policy_id_str)
+        .check_policy(&acme_policy_id)
         .await
         .expect("re-check policy should succeed");
     assert!(recheck.allowed, "policy should still exist");

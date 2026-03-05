@@ -217,7 +217,9 @@ impl OrbisRingBuilder {
             ];
 
             if let Some(ref hub) = self.hub_rs_config {
-                // Hub.rs mode: bulletin via EVM precompiles, ACP via light client
+                // Hub.rs mode: bulletin via EVM precompiles, ACP via light client.
+                // No --authz-grpc: DefraDB's SignRequest proto has no ACP fields,
+                // so orbis skips authz (logs warning, signs anyway).
                 args_owned.extend([
                     "--hub-rpc".to_string(),
                     hub.rpc_url.clone(),
@@ -226,10 +228,6 @@ impl OrbisRingBuilder {
                     "--hub-chain-id".to_string(),
                     hub.chain_id.to_string(),
                 ]);
-                // Only pass authz-grpc from SourceHub (read-only queries)
-                if let Some(ref sh) = self.sourcehub_config {
-                    args_owned.extend(["--authz-grpc".to_string(), sh.grpc_url.clone()]);
-                }
             } else if let Some(ref sh) = self.sourcehub_config {
                 // Legacy SourceHub mode: all services via SourceHub
                 args_owned.extend([
