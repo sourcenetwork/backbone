@@ -232,11 +232,26 @@ impl HubdCli {
     }
 
     fn create_policy(&self, yaml: &str) -> eyre::Result<String> {
-        self.exec(&["acp", "create-policy", yaml])
-    }
+        // Snapshot existing policy IDs before creating the new one.
+        let before_output = self.exec(&["acp", "list-policies"])?;
+        let before: Vec<String> = serde_json::from_str(&before_output)
+            .unwrap_or_default();
 
-    fn list_policies(&self) -> eyre::Result<String> {
-        self.exec(&["acp", "list-policies"])
+        self.exec(&["acp", "create-policy", yaml])?;
+        // create-policy returns a tx receipt, not the policy ID.
+        // Wait for the tx to be included, then diff the policy list.
+        // With Normal consensus preset (~2s blocks) we need a longer wait.
+        std::thread::sleep(Duration::from_secs(4));
+        let after_output = self.exec(&["acp", "list-policies"])?;
+        let after: Vec<String> = serde_json::from_str(&after_output)
+            .map_err(|e| eyre::eyre!("parse list-policies '{}': {}", after_output, e))?;
+
+        let new_ids: Vec<&String> = after.iter().filter(|id| !before.contains(id)).collect();
+        match new_ids.len() {
+            1 => Ok(new_ids[0].clone()),
+            0 => Err(eyre::eyre!("no new policy ID found after create-policy")),
+            n => Err(eyre::eyre!("expected 1 new policy ID, got {}: {:?}", n, new_ids)),
+        }
     }
 
     fn register_object(
@@ -410,6 +425,13 @@ fn sign_eth_transfer(
     signed.encoded_2718()
 }
 
+/// Derive an EVM address (0x-prefixed hex) from a secp256k1 private key hex.
+fn evm_address_from_private_key(key_hex: &str) -> String {
+    let key_bytes = hex::decode(key_hex).expect("valid hex key");
+    let signer = PrivateKeySigner::from_slice(&key_bytes).expect("valid signing key");
+    format!("{:#x}", signer.address())
+}
+
 // ============================================================================
 // Helper: Compute secp256k1 did:key from compressed public key hex
 // ============================================================================
@@ -565,7 +587,7 @@ async fn secure_training_data_compartments() {
         .nodes(1)
         .chain_id(hub_chain_id)
         .genesis(hub_genesis)
-        .preset(ConsensusPreset::Fast)
+        .preset(ConsensusPreset::Normal)
         .build()
         .await
         .expect("hub.rs node should start");
@@ -646,7 +668,6 @@ async fn secure_training_data_compartments() {
             .unwrap_or_else(|e| panic!("fund node{} on hub.rs: {}", i, e));
         evm_addresses.push(address);
         node_signer_dids.push(signer_did);
-        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
     // Step 2b. Wait for ring to be ready
@@ -672,7 +693,6 @@ async fn secure_training_data_compartments() {
     hub_cli
         .register_namespace(BULLETIN_RING_NAMESPACE)
         .expect("register ring namespace on hub.rs");
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     for (i, did) in node_signer_dids.iter().enumerate() {
         eprintln!(
@@ -683,7 +703,6 @@ async fn secure_training_data_compartments() {
         hub_cli
             .add_collaborator(BULLETIN_RING_NAMESPACE, did)
             .unwrap_or_else(|e| panic!("add collaborator for node{}: {}", i, e));
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
     // Step 3a. Run DKG ceremony
@@ -717,16 +736,11 @@ async fn secure_training_data_compartments() {
     let ring_policy_id = hub_cli
         .create_policy(RING_SIGNING_POLICY_YAML)
         .expect("create ring signing ACP policy");
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    eprintln!("[backbone]   ring_policy_id = {}", ring_policy_id);
 
     hub_cli
         .register_object(&ring_policy_id, "ring", &ring_id)
         .expect("register ring object");
-    eprintln!(
-        "[backbone] Ring signing policy: {}, object: {}...",
-        ring_policy_id,
-        &ring_id[..16.min(ring_id.len())]
-    );
 
     // ================================================================
     // Phase 2: Identity setup
@@ -800,7 +814,6 @@ async fn secure_training_data_compartments() {
     // Step 10. Authorize DefraDB service accounts as ring signers.
     // signer_did_for_pk derives an Ed25519 did:key (0xed) used for Orbis ring ACP.
     let acme_defra_signer_did = signer_did_for_pk(&acme_defra_svc.private_key_hex);
-    tokio::time::sleep(Duration::from_secs(1)).await;
     hub_cli
         .set_relationship(
             &ring_policy_id,
@@ -812,7 +825,6 @@ async fn secure_training_data_compartments() {
         .expect("grant acme_defra_svc signer on ring");
 
     let globex_defra_signer_did = signer_did_for_pk(&globex_defra_svc.private_key_hex);
-    tokio::time::sleep(Duration::from_secs(1)).await;
     hub_cli
         .set_relationship(
             &ring_policy_id,
@@ -830,13 +842,11 @@ async fn secure_training_data_compartments() {
 
     // Step 11. Create acme ACP policy
     eprintln!("[backbone] Step 11: Creating acme ACP policy...");
-    tokio::time::sleep(Duration::from_secs(1)).await;
     let acme_policy_id = hub_cli
         .create_policy(ACME_POLICY_YAML)
         .expect("create acme ACP policy");
 
     let transcript_object = "acme-transcripts";
-    tokio::time::sleep(Duration::from_secs(1)).await;
     hub_cli
         .register_object(&acme_policy_id, "transcript", transcript_object)
         .expect("register transcript object");
@@ -845,7 +855,6 @@ async fn secure_training_data_compartments() {
     // Step 12. Grant TRAINING_SVC writer+reader on acme transcripts.
     // ACP grants use the secp256k1 did:key (0xe7) — the service identity.
     for relation in &["writer", "reader"] {
-        tokio::time::sleep(Duration::from_secs(1)).await;
         hub_cli
             .set_relationship(
                 &acme_policy_id,
@@ -859,7 +868,6 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Step 12: TRAINING_SVC granted writer+reader on acme transcripts");
 
     // Step 13. Grant INFERENCE_SVC reader on acme transcripts
-    tokio::time::sleep(Duration::from_secs(1)).await;
     hub_cli
         .set_relationship(
             &acme_policy_id,
@@ -870,6 +878,20 @@ async fn secure_training_data_compartments() {
         )
         .expect("grant inference_svc reader on transcript");
     eprintln!("[backbone] Step 13: INFERENCE_SVC granted reader on acme transcripts");
+
+    // Step 13b. Fund DefraDB service accounts on hub.rs.
+    // DefraDB's HubRsProvider submits EVM transactions for ACP operations.
+    let acme_defra_evm_addr = evm_address_from_private_key(&acme_defra_svc.private_key_hex);
+    let globex_defra_evm_addr = evm_address_from_private_key(&globex_defra_svc.private_key_hex);
+    for (label, addr) in &[
+        ("acme-defra", &acme_defra_evm_addr),
+        ("globex-defra", &globex_defra_evm_addr),
+    ] {
+        hub_cli
+            .fund_evm_address(addr, "1000000000000000000")
+            .unwrap_or_else(|e| panic!("fund {} on hub.rs: {}", label, e));
+        eprintln!("[backbone] Step 13b: Funded {} on hub.rs: {}", label, addr);
+    }
 
     // Step 14. Start DefraDB node with Orbis signer (derivation="acme-corp").
     // The node identity (secp256k1) authenticates to Orbis via JWT.
@@ -1004,19 +1026,16 @@ async fn secure_training_data_compartments() {
 
     // Step 19. Create globex ACP policy + grant GLOBEX_SVC writer+reader
     eprintln!("[backbone] Step 19: Creating globex ACP policy...");
-    tokio::time::sleep(Duration::from_secs(1)).await;
     let globex_policy_id = hub_cli
         .create_policy(GLOBEX_POLICY_YAML)
         .expect("create globex ACP policy");
 
     let ticket_object = "globex-tickets";
-    tokio::time::sleep(Duration::from_secs(1)).await;
     hub_cli
         .register_object(&globex_policy_id, "ticket", ticket_object)
         .expect("register ticket object");
 
     for relation in &["writer", "reader"] {
-        tokio::time::sleep(Duration::from_secs(1)).await;
         hub_cli
             .set_relationship(
                 &globex_policy_id,
@@ -1170,7 +1189,6 @@ async fn secure_training_data_compartments() {
     // ================================================================
 
     // Step 25. Grant AUDIT_SVC reader on both compartments
-    tokio::time::sleep(Duration::from_secs(1)).await;
     hub_cli
         .set_relationship(
             &acme_policy_id,
@@ -1181,7 +1199,6 @@ async fn secure_training_data_compartments() {
         )
         .expect("grant audit_svc reader on acme transcript");
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
     hub_cli
         .set_relationship(
             &globex_policy_id,
@@ -1264,7 +1281,6 @@ async fn secure_training_data_compartments() {
 
     // Step 29. Revoke AUDIT_SVC from acme — can no longer read acme, still reads globex
     eprintln!("[backbone] Step 29: Revoking AUDIT_SVC from acme...");
-    tokio::time::sleep(Duration::from_secs(1)).await;
     hub_cli
         .delete_relationship(
             &acme_policy_id,
@@ -1313,7 +1329,6 @@ async fn secure_training_data_compartments() {
     let new_training_svc = ServiceIdentity::new_file_keyring("training-svc-v2", run_dir.path());
 
     for relation in &["writer", "reader"] {
-        tokio::time::sleep(Duration::from_secs(1)).await;
         hub_cli
             .set_relationship(
                 &acme_policy_id,
@@ -1359,7 +1374,6 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] PASSED: New TRAINING_SVC writes successfully");
 
     for relation in &["writer", "reader"] {
-        tokio::time::sleep(Duration::from_secs(1)).await;
         hub_cli
             .delete_relationship(
                 &acme_policy_id,
@@ -1482,7 +1496,6 @@ async fn secure_training_data_compartments() {
 
     // Step 38. Mutate: re-grant audit_svc reader (revoked in Step 29) to change module_state_root
     eprintln!("[backbone] Step 38: Mutating ACP state on hub.rs...");
-    tokio::time::sleep(Duration::from_secs(1)).await;
     hub_cli
         .set_relationship(
             &acme_policy_id,
