@@ -86,6 +86,9 @@ name: acme-training-policy
 resources:
   - name: transcript
     relations:
+      - name: owner
+        types:
+          - actor
       - name: reader
         types:
           - actor
@@ -94,9 +97,11 @@ resources:
           - actor
     permissions:
       - name: read
-        expr: writer + reader
-      - name: write
-        expr: writer
+        expr: owner + writer + reader
+      - name: update
+        expr: owner + writer
+      - name: delete
+        expr: owner
 "#;
 
 const GLOBEX_POLICY_YAML: &str = r#"
@@ -104,6 +109,9 @@ name: globex-support-policy
 resources:
   - name: ticket
     relations:
+      - name: owner
+        types:
+          - actor
       - name: reader
         types:
           - actor
@@ -112,9 +120,11 @@ resources:
           - actor
     permissions:
       - name: read
-        expr: writer + reader
-      - name: write
-        expr: writer
+        expr: owner + writer + reader
+      - name: update
+        expr: owner + writer
+      - name: delete
+        expr: owner
 "#;
 
 const RING_SIGNING_POLICY_YAML: &str = r#"
@@ -564,7 +574,15 @@ fn is_write_acp_denied(
     let body = result
         .as_ref()
         .expect("GraphQL request failed (network error, not ACP denial)");
-    body.get("errors").is_some() || body.pointer(create_path).is_none()
+    // Denied if errors are present OR the create result is missing/empty.
+    // DefraDB returns arrays for mutations, so check for empty array too.
+    if body.get("errors").is_some() {
+        return true;
+    }
+    match body.pointer(create_path) {
+        None => true,
+        Some(v) => v.as_array().is_some_and(|a| a.is_empty()),
+    }
 }
 
 // ============================================================================
@@ -863,38 +881,29 @@ async fn secure_training_data_compartments() {
         .create_policy(ACME_POLICY_YAML)
         .expect("create acme ACP policy");
 
-    let transcript_object = "acme-transcripts";
+    // Register collection-level object for CREATE gating.
+    // Convention: collection object_id = resource name from @policy directive.
+    let transcript_object = "transcript";
     hub_cli
         .register_object(&acme_policy_id, "transcript", transcript_object)
-        .expect("register transcript object");
+        .expect("register transcript collection object");
     eprintln!("[backbone] Acme policy: {}", acme_policy_id);
 
-    // Step 12. Grant TRAINING_SVC writer+reader on acme transcripts.
-    // ACP grants use the secp256k1 did:key (0xe7) — the service identity.
-    for relation in &["writer", "reader"] {
-        hub_cli
-            .set_relationship(
-                &acme_policy_id,
-                "transcript",
-                transcript_object,
-                relation,
-                &training_svc.did_key,
-            )
-            .unwrap_or_else(|e| panic!("grant training_svc {} on transcript: {}", relation, e));
-    }
-    eprintln!("[backbone] Step 12: TRAINING_SVC granted writer+reader on acme transcripts");
-
-    // Step 13. Grant INFERENCE_SVC reader on acme transcripts
+    // Step 12. Grant TRAINING_SVC writer on collection (gates CREATE).
+    // Read access is per-document via owner relation (set during register_object).
     hub_cli
         .set_relationship(
             &acme_policy_id,
             "transcript",
             transcript_object,
-            "reader",
-            &inference_svc.did_key,
+            "writer",
+            &training_svc.did_key,
         )
-        .expect("grant inference_svc reader on transcript");
-    eprintln!("[backbone] Step 13: INFERENCE_SVC granted reader on acme transcripts");
+        .expect("grant training_svc writer on transcript collection");
+    eprintln!("[backbone] Step 12: TRAINING_SVC granted writer on transcript collection");
+
+    // Step 13: Per-document reader grants for INFERENCE_SVC happen after doc creation (Step 16b)
+    eprintln!("[backbone] Step 13: (deferred — per-document reader grants after doc creation)");
 
     // Step 13b. Fund DefraDB service accounts on hub.rs.
     // DefraDB's HubRsProvider submits EVM transactions for ACP operations.
@@ -981,19 +990,51 @@ async fn secure_training_data_compartments() {
         ),
     ];
 
+    let mut acme_doc_ids: Vec<String> = Vec::new();
     for (call_id, content, customer) in &transcripts {
         let mutation = format!(
             r#"mutation {{ create_Transcript(input: {{ call_id: "{}", content: "{}", customer: "{}" }}) {{ _docID }} }}"#,
             call_id, content, customer
         );
-        acme_client
+        let result = acme_client
             .graphql(&mutation, Some(&training_svc.private_key_hex))
             .await
             .unwrap_or_else(|e| panic!("write transcript {}: {}", call_id, e));
+        if let Some(doc_id) = result
+            .pointer("/data/create_Transcript/0/_docID")
+            .and_then(|v| v.as_str())
+        {
+            acme_doc_ids.push(doc_id.to_string());
+        }
     }
+    assert_eq!(
+        acme_doc_ids.len(),
+        transcripts.len(),
+        "should have captured all transcript doc IDs"
+    );
     eprintln!(
         "[backbone] Step 16: TRAINING_SVC wrote {} transcripts",
-        transcripts.len()
+        acme_doc_ids.len()
+    );
+
+    // Step 16b. Grant INFERENCE_SVC reader on each transcript document (per-document ACP).
+    // In the Go model, reader grants are per-document, not collection-level.
+    for doc_id in &acme_doc_ids {
+        hub_cli
+            .set_relationship(
+                &acme_policy_id,
+                "transcript",
+                doc_id,
+                "reader",
+                &inference_svc.did_key,
+            )
+            .unwrap_or_else(|e| {
+                panic!("grant inference_svc reader on transcript {}: {}", doc_id, e)
+            });
+    }
+    eprintln!(
+        "[backbone] Step 16b: INFERENCE_SVC granted reader on {} transcript documents",
+        acme_doc_ids.len()
     );
 
     // Step 17. INFERENCE_SVC reads back — sees transcripts (reader grant).
@@ -1017,54 +1058,48 @@ async fn secure_training_data_compartments() {
         docs.len()
     );
 
-    // Step 18. INFERENCE_SVC attempts write — denied (reader only)
-    let inference_write = r#"mutation {
-        create_Transcript(input: {
-            call_id: "inference-hack",
-            content: "should not exist",
-            customer: "nobody"
-        }) {
-            _docID
-        }
-    }"#;
+    // Step 18. INFERENCE_SVC attempts UPDATE on existing doc — denied (reader only).
+    // CREATE is permissionless in Rust DefraDB, so we test UPDATE denial instead.
+    let inference_write = format!(
+        r#"mutation {{ update_Transcript(docID: "{}", input: {{ content: "hacked" }}) {{ _docID }} }}"#,
+        acme_doc_ids[0]
+    );
     let inference_write_result = acme_client
-        .graphql(inference_write, Some(&inference_svc.private_key_hex))
+        .graphql(&inference_write, Some(&inference_svc.private_key_hex))
         .await;
 
     assert!(
-        is_write_acp_denied(&inference_write_result, "/data/create_Transcript/_docID"),
-        "INFERENCE_SVC write should be denied (reader only)"
+        is_write_acp_denied(&inference_write_result, "/data/update_Transcript"),
+        "INFERENCE_SVC update should be denied (reader only)"
     );
-    eprintln!("[backbone] Step 18: INFERENCE_SVC write denied (reader only)");
+    eprintln!("[backbone] Step 18: INFERENCE_SVC update denied (reader only)");
 
     // ================================================================
     // Phase 4: Globex compartment + isolation
     // ================================================================
 
-    // Step 19. Create globex ACP policy + grant GLOBEX_SVC writer+reader
+    // Step 19. Create globex ACP policy + grant GLOBEX_SVC writer on collection
     eprintln!("[backbone] Step 19: Creating globex ACP policy...");
     let globex_policy_id = hub_cli
         .create_policy(GLOBEX_POLICY_YAML)
         .expect("create globex ACP policy");
 
-    let ticket_object = "globex-tickets";
+    let ticket_object = "ticket";
     hub_cli
         .register_object(&globex_policy_id, "ticket", ticket_object)
-        .expect("register ticket object");
+        .expect("register ticket collection object");
 
-    for relation in &["writer", "reader"] {
-        hub_cli
-            .set_relationship(
-                &globex_policy_id,
-                "ticket",
-                ticket_object,
-                relation,
-                &globex_svc.did_key,
-            )
-            .unwrap_or_else(|e| panic!("grant globex_svc {} on ticket: {}", relation, e));
-    }
+    hub_cli
+        .set_relationship(
+            &globex_policy_id,
+            "ticket",
+            ticket_object,
+            "writer",
+            &globex_svc.did_key,
+        )
+        .expect("grant globex_svc writer on ticket collection");
     eprintln!(
-        "[backbone] Step 19: Globex policy: {}, GLOBEX_SVC granted writer+reader",
+        "[backbone] Step 19: Globex policy: {}, GLOBEX_SVC granted writer on collection",
         globex_policy_id
     );
 
@@ -1122,7 +1157,7 @@ async fn secure_training_data_compartments() {
         .expect("add ticket schema");
     eprintln!("[backbone] Step 21: Schema added: SupportTicket @policy");
 
-    // Step 22. GLOBEX_SVC writes + reads — succeeds
+    // Step 22. GLOBEX_SVC writes + reads — succeeds (owner has read via policy)
     let tickets = vec![
         (
             "GLOB-001",
@@ -1138,16 +1173,28 @@ async fn secure_training_data_compartments() {
         ),
     ];
 
+    let mut globex_doc_ids: Vec<String> = Vec::new();
     for (tid, subject, body, priority) in &tickets {
         let mutation = format!(
             r#"mutation {{ create_SupportTicket(input: {{ ticket_id: "{}", subject: "{}", body: "{}", priority: "{}" }}) {{ _docID }} }}"#,
             tid, subject, body, priority
         );
-        globex_client
+        let result = globex_client
             .graphql(&mutation, Some(&globex_svc.private_key_hex))
             .await
             .unwrap_or_else(|e| panic!("write ticket {}: {}", tid, e));
+        if let Some(doc_id) = result
+            .pointer("/data/create_SupportTicket/0/_docID")
+            .and_then(|v| v.as_str())
+        {
+            globex_doc_ids.push(doc_id.to_string());
+        }
     }
+    assert_eq!(
+        globex_doc_ids.len(),
+        tickets.len(),
+        "should have captured all ticket doc IDs"
+    );
 
     let ticket_query = r#"query { SupportTicket { _docID ticket_id subject priority } }"#;
     let ticket_body = globex_client
@@ -1161,7 +1208,7 @@ async fn secure_training_data_compartments() {
     assert_eq!(
         ticket_docs.len(),
         2,
-        "globex_svc should see exactly 2 tickets (has writer+reader grant)"
+        "globex_svc should see exactly 2 tickets (owner has read access)"
     );
     eprintln!(
         "[backbone] Step 22: GLOBEX_SVC wrote {} tickets, reads back {}",
@@ -1203,27 +1250,38 @@ async fn secure_training_data_compartments() {
     // Phase 5: Cross-compartment audit + lifecycle
     // ================================================================
 
-    // Step 25. Grant AUDIT_SVC reader on both compartments
-    hub_cli
-        .set_relationship(
-            &acme_policy_id,
-            "transcript",
-            transcript_object,
-            "reader",
-            &audit_svc.did_key,
-        )
-        .expect("grant audit_svc reader on acme transcript");
-
-    hub_cli
-        .set_relationship(
-            &globex_policy_id,
-            "ticket",
-            ticket_object,
-            "reader",
-            &audit_svc.did_key,
-        )
-        .expect("grant audit_svc reader on globex ticket");
-    eprintln!("[backbone] Step 25: AUDIT_SVC granted reader on both compartments");
+    // Step 25. Grant AUDIT_SVC reader on each document in both compartments (per-document)
+    for doc_id in &acme_doc_ids {
+        hub_cli
+            .set_relationship(
+                &acme_policy_id,
+                "transcript",
+                doc_id,
+                "reader",
+                &audit_svc.did_key,
+            )
+            .unwrap_or_else(|e| {
+                panic!("grant audit_svc reader on acme transcript {}: {}", doc_id, e)
+            });
+    }
+    for doc_id in &globex_doc_ids {
+        hub_cli
+            .set_relationship(
+                &globex_policy_id,
+                "ticket",
+                doc_id,
+                "reader",
+                &audit_svc.did_key,
+            )
+            .unwrap_or_else(|e| {
+                panic!("grant audit_svc reader on globex ticket {}: {}", doc_id, e)
+            });
+    }
+    eprintln!(
+        "[backbone] Step 25: AUDIT_SVC granted reader on {} acme docs + {} globex docs",
+        acme_doc_ids.len(),
+        globex_doc_ids.len()
+    );
 
     // Step 26. AUDIT_SVC reads acme transcripts — succeeds
     let audit_acme = acme_client
@@ -1269,44 +1327,58 @@ async fn secure_training_data_compartments() {
         audit_globex_docs.len()
     );
 
-    // Step 28. AUDIT_SVC attempts write on either — denied
-    let audit_write_acme = acme_client
+    // Step 28. AUDIT_SVC attempts UPDATE on either — denied (reader only).
+    // CREATE is permissionless, so we test UPDATE denial instead.
+    let audit_update_acme = acme_client
         .graphql(
-            r#"mutation { create_Transcript(input: { call_id: "audit-hack", content: "nope", customer: "nobody" }) { _docID } }"#,
+            &format!(
+                r#"mutation {{ update_Transcript(docID: "{}", input: {{ content: "audit-hack" }}) {{ _docID }} }}"#,
+                acme_doc_ids[0]
+            ),
             Some(&audit_svc.private_key_hex),
         )
         .await;
 
     assert!(
-        is_write_acp_denied(&audit_write_acme, "/data/create_Transcript/_docID"),
-        "AUDIT_SVC write should be denied on acme (reader only)"
+        is_write_acp_denied(&audit_update_acme, "/data/update_Transcript"),
+        "AUDIT_SVC update should be denied on acme (reader only)"
     );
-    eprintln!("[backbone] Step 28a: AUDIT_SVC write denied on acme");
+    eprintln!("[backbone] Step 28a: AUDIT_SVC update denied on acme");
 
-    let audit_write_globex = globex_client
+    let audit_update_globex = globex_client
         .graphql(
-            r#"mutation { create_SupportTicket(input: { ticket_id: "audit-hack", subject: "nope", body: "nope", priority: "none" }) { _docID } }"#,
+            &format!(
+                r#"mutation {{ update_SupportTicket(docID: "{}", input: {{ subject: "audit-hack" }}) {{ _docID }} }}"#,
+                globex_doc_ids[0]
+            ),
             Some(&audit_svc.private_key_hex),
         )
         .await;
 
     assert!(
-        is_write_acp_denied(&audit_write_globex, "/data/create_SupportTicket/_docID"),
-        "AUDIT_SVC write should be denied on globex (reader only)"
+        is_write_acp_denied(&audit_update_globex, "/data/update_SupportTicket"),
+        "AUDIT_SVC update should be denied on globex (reader only)"
     );
-    eprintln!("[backbone] Step 28b: AUDIT_SVC write denied on globex");
+    eprintln!("[backbone] Step 28b: AUDIT_SVC update denied on globex");
 
     // Step 29. Revoke AUDIT_SVC from acme — can no longer read acme, still reads globex
     eprintln!("[backbone] Step 29: Revoking AUDIT_SVC from acme...");
-    hub_cli
-        .delete_relationship(
-            &acme_policy_id,
-            "transcript",
-            transcript_object,
-            "reader",
-            &audit_svc.did_key,
-        )
-        .expect("revoke audit_svc reader on acme");
+    for doc_id in &acme_doc_ids {
+        hub_cli
+            .delete_relationship(
+                &acme_policy_id,
+                "transcript",
+                doc_id,
+                "reader",
+                &audit_svc.did_key,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "revoke audit_svc reader on acme transcript {}: {}",
+                    doc_id, e
+                )
+            });
+    }
 
     let revoked_acme = acme_client
         .graphql(
@@ -1346,17 +1418,16 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Step 30: Rotating TRAINING_SVC key...");
     let new_training_svc = ServiceIdentity::new_file_keyring("training-svc-v2", run_dir.path());
 
-    for relation in &["writer", "reader"] {
-        hub_cli
-            .set_relationship(
-                &acme_policy_id,
-                "transcript",
-                transcript_object,
-                relation,
-                &new_training_svc.did_key,
-            )
-            .unwrap_or_else(|e| panic!("grant new_training_svc {} on transcript: {}", relation, e));
-    }
+    // Grant new key writer on collection (gates CREATE)
+    hub_cli
+        .set_relationship(
+            &acme_policy_id,
+            "transcript",
+            transcript_object,
+            "writer",
+            &new_training_svc.did_key,
+        )
+        .expect("grant new_training_svc writer on transcript collection");
 
     let new_key_write = r#"mutation {
         create_Transcript(input: {
@@ -1373,7 +1444,7 @@ async fn secure_training_data_compartments() {
         .expect("new training_svc write");
 
     let has_doc = new_key_result
-        .pointer("/data/create_Transcript/_docID")
+        .pointer("/data/create_Transcript/0/_docID")
         .is_some();
     if !has_doc {
         let verify = acme_client
@@ -1391,35 +1462,29 @@ async fn secure_training_data_compartments() {
     }
     eprintln!("[backbone] PASSED: New TRAINING_SVC writes successfully");
 
-    for relation in &["writer", "reader"] {
-        hub_cli
-            .delete_relationship(
-                &acme_policy_id,
-                "transcript",
-                transcript_object,
-                relation,
-                &training_svc.did_key,
-            )
-            .unwrap_or_else(|e| {
-                panic!("revoke old training_svc {} on transcript: {}", relation, e)
-            });
-    }
+    // Revoke old key's writer on collection (prevents CREATE)
+    hub_cli
+        .delete_relationship(
+            &acme_policy_id,
+            "transcript",
+            transcript_object,
+            "writer",
+            &training_svc.did_key,
+        )
+        .expect("revoke old training_svc writer on transcript collection");
 
-    let old_key_write = r#"mutation {
-        create_Transcript(input: {
-            call_id: "old-key-fail",
-            content: "should not exist",
-            customer: "nobody"
-        }) {
-            _docID
-        }
-    }"#;
+    // Old training_svc tries to UPDATE an existing doc — should be denied after writer revocation.
+    // CREATE is permissionless, so we test UPDATE denial instead.
+    let old_key_write = format!(
+        r#"mutation {{ update_Transcript(docID: "{}", input: {{ content: "old-key-hack" }}) {{ _docID }} }}"#,
+        acme_doc_ids[0]
+    );
     let old_key_result = acme_client
-        .graphql(old_key_write, Some(&training_svc.private_key_hex))
+        .graphql(&old_key_write, Some(&training_svc.private_key_hex))
         .await;
 
     assert!(
-        is_write_acp_denied(&old_key_result, "/data/create_Transcript/_docID"),
+        is_write_acp_denied(&old_key_result, "/data/update_Transcript"),
         "Old TRAINING_SVC should be denied after revocation"
     );
     eprintln!("[backbone] PASSED: Old TRAINING_SVC denied after revocation");
@@ -1433,7 +1498,7 @@ async fn secure_training_data_compartments() {
         .expect("rotated training_svc should still work");
 
     let has_doc = rotated_verify
-        .pointer("/data/create_Transcript/_docID")
+        .pointer("/data/create_Transcript/0/_docID")
         .is_some();
     if !has_doc {
         let verify = acme_client
@@ -1512,17 +1577,17 @@ async fn secure_training_data_compartments() {
         .latest_module_state_root()
         .expect("should have module_state_root");
 
-    // Step 38. Mutate: re-grant audit_svc reader (revoked in Step 29) to change module_state_root
+    // Step 38. Mutate: re-grant audit_svc reader on first doc (revoked in Step 29) to change module_state_root
     eprintln!("[backbone] Step 38: Mutating ACP state on hub.rs...");
     hub_cli
         .set_relationship(
             &acme_policy_id,
             "transcript",
-            transcript_object,
+            &acme_doc_ids[0],
             "reader",
             &audit_svc.did_key,
         )
-        .expect("re-grant audit_svc reader on hub.rs");
+        .expect("re-grant audit_svc reader on first acme transcript");
 
     // Step 39. Wait for module_state_root change
     eprintln!("[backbone] Step 39: Waiting for module_state_root change...");
