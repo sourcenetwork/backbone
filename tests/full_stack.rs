@@ -1318,23 +1318,29 @@ async fn secure_training_data_compartments() {
         .await
         .expect("new training_svc write");
 
-    let has_doc = new_key_result
+    // Extract the new document's ID so we can test old-key denial against it.
+    // The old key doesn't own this document, so after writer revocation it has no access.
+    let new_doc_id = new_key_result
         .pointer("/data/create_Transcript/0/_docID")
-        .is_some();
-    if !has_doc {
-        let verify = acme_client
-            .graphql(
-                r#"query { Transcript(filter: {call_id: {_eq: "call-004"}}) { _docID } }"#,
-                Some(&new_training_svc.private_key_hex),
-            )
-            .await
-            .expect("verify rotated key write");
-        let found = verify
-            .pointer("/data/Transcript")
-            .and_then(|v| v.as_array())
-            .is_some_and(|a| !a.is_empty());
-        assert!(found, "rotated training_svc transcript should exist");
-    }
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let new_doc_id = match new_doc_id {
+        Some(id) => id,
+        None => {
+            let verify = acme_client
+                .graphql(
+                    r#"query { Transcript(filter: {call_id: {_eq: "call-004"}}) { _docID } }"#,
+                    Some(&new_training_svc.private_key_hex),
+                )
+                .await
+                .expect("verify rotated key write");
+            verify
+                .pointer("/data/Transcript/0/_docID")
+                .and_then(|v| v.as_str())
+                .expect("rotated training_svc transcript should exist")
+                .to_string()
+        }
+    };
     eprintln!("[backbone] PASSED: New TRAINING_SVC writes successfully");
 
     hub_cli
@@ -1347,9 +1353,16 @@ async fn secure_training_data_compartments() {
         )
         .expect("revoke old training_svc writer on transcript collection");
 
+    // Wait for the light client to sync the new state root after deletion.
+    // The websocket header subscription needs time to deliver the new block.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Old training_svc tries to UPDATE the new document — should be denied.
+    // The old key doesn't own this doc (new_training_svc does) and its writer
+    // relationship was revoked, so no relation grants update access.
     let old_key_write = format!(
         r#"mutation {{ update_Transcript(docID: "{}", input: {{ content: "old-key-hack" }}) {{ _docID }} }}"#,
-        acme_doc_ids[0]
+        new_doc_id
     );
     let old_key_result = acme_client
         .graphql(&old_key_write, Some(&training_svc.private_key_hex))
