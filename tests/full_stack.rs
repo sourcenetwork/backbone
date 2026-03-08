@@ -1,57 +1,9 @@
-//! Integration Test: Secure Training Data Compartments
+//! Secure Training Data Compartments — 41-step e2e test.
 //!
-//! 41-step living specification. Two compartments (acme-corp, globex-inc). One
-//! Orbis ring (T=2, N=3). Multiple service identities with scoped permissions.
-//! Tests the full Rust stack (hub.rs + Orbis + DefraDB) from threshold key
-//! management through cross-compartment ACP isolation.
+//! Two compartments (acme, globex), one Orbis ring (T=2, N=3), multiple service
+//! identities with scoped permissions. Full Rust stack: hub.rs + Orbis + DefraDB.
 //!
-//! ## Use case
-//!
-//! A company uses backbone to segment customer training data. Each customer gets
-//! an isolated compartment. Service identities (training pipeline, inference API,
-//! audit daemon) get scoped access. No customer's data leaks to another's pipeline.
-//!
-//! ## Three DID types
-//!
-//! The system uses three distinct `did:key` types, each serving a different layer:
-//!
-//! | DID Type | Multicodec | Purpose | Example |
-//! |----------|------------|---------|---------|
-//! | BLS12-381 (0xea) | `did:key:z...` | Compartment identity (ring-derived, signs blocks) | ACME_DID, GLOBEX_DID |
-//! | secp256k1 (0xe7) | `did:key:zQ3s...` | Service identity (JWT auth, ACP grants) | TRAINING_SVC, AUDIT_SVC |
-//! | Ed25519 (0xed) | `did:key:z6Mk...` | Ring signer authorization (who can request threshold sigs) | ACME_DEFRA_SVC signer DID |
-//!
-//! Hub.rs accepts all three DID types in its ACP module. BLS identities work via
-//! native BLS transactions; secp256k1 identities work via EVM transactions.
-//!
-//! ## Identity hierarchy
-//!
-//! ```text
-//! Key                DID Type     On Disk?   What It Does
-//! ──────────────────────────────────────────────────────────────────────────────
-//! PLATFORM_DID       BLS (0xea)   NO         Ring-derived platform root identity
-//! ACME_DID           BLS (0xea)   NO         Compartment identity for acme (signs acme blocks)
-//! GLOBEX_DID         BLS (0xea)   NO         Compartment identity for globex (signs globex blocks)
-//! TRAINING_SVC       secp256k1    YES        Writer on acme (ingests training data via JWT)
-//! INFERENCE_SVC      secp256k1    YES        Reader on acme (serves the adapter via JWT)
-//! AUDIT_SVC          secp256k1    YES        Reader on both compartments (compliance via JWT)
-//! GLOBEX_SVC         secp256k1    YES        Writer+reader on globex only (via JWT)
-//! ACME_DEFRA_SVC     Ed25519      YES        Acme DefraDB node -> authorized ring signer
-//! GLOBEX_DEFRA_SVC   Ed25519      YES        Globex DefraDB node -> authorized ring signer
-//! NEW_TRAINING_SVC   secp256k1    YES        Rotated training key (replaces TRAINING_SVC)
-//! ```
-//!
-//! ## What this test proves
-//!
-//! | Property                                              | Steps     |
-//! |-------------------------------------------------------|-----------|
-//! | Threshold key management (DKG + derived keys)         | 1-4, 8    |
-//! | Compartment identity derivation (3 unique BLS DIDs)   | 5-8       |
-//! | ACP-enforced authenticated reads/writes               | 11-18     |
-//! | Cross-compartment isolation (both directions)         | 23-24     |
-//! | Cross-compartment audit (reader on both)              | 25-28     |
-//! | Permission revocation takes effect immediately        | 29        |
-//! | Service key rotation without identity change          | 30        |
+//! See `memory/full_stack_test.md` for the step-by-step breakdown.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -76,10 +28,6 @@ use orbis_harness::{
 use acp_light_client::AcpLightClient;
 use hub_harness::cluster::{ConsensusPreset, GenesisBuilder, TestCluster};
 use hub_harness::observe::ClusterAssertions;
-
-// ============================================================================
-// ACP Policy YAML templates
-// ============================================================================
 
 const ACME_POLICY_YAML: &str = r#"
 name: acme-training-policy
@@ -140,14 +88,9 @@ resources:
         expr: signer
 "#;
 
-// ============================================================================
-// Service identity — a disposable file-keyring key
-// ============================================================================
-
 struct ServiceIdentity {
     label: String,
     private_key_hex: String,
-    /// secp256k1 did:key (multicodec 0xe7) — used for ACP grants and JWT auth.
     did_key: String,
     _keyring_dir: PathBuf,
 }
@@ -181,13 +124,7 @@ impl ServiceIdentity {
 
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
 
-// ============================================================================
-// Hub.rs CLI helper for ACP operations
-// ============================================================================
-
 const HARDHAT_KEY_0: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-/// Hardhat key 1 — used exclusively for funding orbis nodes (raw EVM transfers)
-/// to avoid nonce conflicts with HARDHAT_KEY_0 used by the hubd CLI.
 const HARDHAT_KEY_1: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 
 struct HubdCli {
@@ -244,8 +181,7 @@ impl HubdCli {
 
         self.exec(&["acp", "create-policy", yaml])?;
 
-        // Poll for the new policy to appear (tx already submitted, waiting for block finalization)
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             let after_output = self.exec(&["acp", "list-policies"])?;
             let after: Vec<String> = serde_json::from_str(&after_output)
@@ -332,8 +268,6 @@ impl HubdCli {
         let nonce = self.get_evm_nonce(HARDHAT_KEY_1)?;
         let raw_tx = sign_eth_transfer(HARDHAT_KEY_1, to_address, value_wei, nonce, self.chain_id);
         let result = self.exec(&["tx", "send-raw", &hex::encode(raw_tx)])?;
-        // send-raw returns {"tx_hash":"0x..."} but doesn't wait for receipt.
-        // Parse the tx_hash and poll for confirmation.
         let json: serde_json::Value = serde_json::from_str(result.trim())
             .map_err(|e| eyre::eyre!("parse send-raw response: {}", e))?;
         let tx_hash = json
@@ -444,16 +378,11 @@ fn sign_eth_transfer(
     signed.encoded_2718()
 }
 
-/// Derive an EVM address (0x-prefixed hex) from a secp256k1 private key hex.
 fn evm_address_from_private_key(key_hex: &str) -> String {
     let key_bytes = hex::decode(key_hex).expect("valid hex key");
     let signer = PrivateKeySigner::from_slice(&key_bytes).expect("valid signing key");
     format!("{:#x}", signer.address())
 }
-
-// ============================================================================
-// Helper: Compute secp256k1 did:key from compressed public key hex
-// ============================================================================
 
 fn secp256k1_did_from_compressed_pubkey_hex(pubkey_hex: &str) -> String {
     let pubkey_bytes = hex::decode(pubkey_hex).expect("decode pubkey hex");
@@ -462,17 +391,12 @@ fn secp256k1_did_from_compressed_pubkey_hex(pubkey_hex: &str) -> String {
         33,
         "expected 33-byte compressed secp256k1 pubkey"
     );
-    // varint(0xe7) = [0xe7, 0x01] for secp256k1-pub multicodec
     let mut codec_bytes = Vec::with_capacity(2 + 33);
     codec_bytes.extend_from_slice(&[0xe7, 0x01]);
     codec_bytes.extend_from_slice(&pubkey_bytes);
     let encoded = bs58::encode(&codec_bytes).into_string();
     format!("did:key:z{}", encoded)
 }
-
-// ============================================================================
-// Helper: Poll hub.rs bulletin for DKG completion post
-// ============================================================================
 
 async fn wait_for_dkg_post(
     hub_cli: &HubdCli,
@@ -529,33 +453,19 @@ async fn wait_for_dkg_post(
     }
 }
 
-// ============================================================================
-// Helper: BLS12-381 did:key from raw public key bytes
-// ============================================================================
-
-/// Create a `did:key:z...` from a BLS12-381 G1 compressed public key.
-/// Multicodec 0xea (bls12_381-g1-pub) varint-encodes to [0xea, 0x01].
 fn bls_did_key(public_key_bytes: &[u8]) -> String {
-    let mut buf = vec![0xea, 0x01]; // varint(0xea) for bls12_381-g1-pub
+    let mut buf = vec![0xea, 0x01];
     buf.extend_from_slice(public_key_bytes);
     let encoded = bs58::encode(&buf).into_string();
     format!("did:key:z{}", encoded)
 }
 
-/// Create a BLS did:key from a hex-encoded public key string (as returned by
-/// Orbis `DerivePublicKey`).
 fn bls_did_key_from_hex(public_key_hex: &str) -> String {
     let bytes =
         hex::decode(public_key_hex).unwrap_or_else(|e| panic!("invalid BLS public key hex: {}", e));
     bls_did_key(&bytes)
 }
 
-// ============================================================================
-// Helper: check if a GraphQL response denies access
-// ============================================================================
-
-/// Returns `true` only if the response indicates ACP denial (GraphQL errors or empty data).
-/// Panics on network/transport errors — those are not "denied", they're test failures.
 fn is_acp_denied(result: &Result<serde_json::Value, eyre::Report>, data_path: &str) -> bool {
     let body = result
         .as_ref()
@@ -574,8 +484,6 @@ fn is_write_acp_denied(
     let body = result
         .as_ref()
         .expect("GraphQL request failed (network error, not ACP denial)");
-    // Denied if errors are present OR the create result is missing/empty.
-    // DefraDB returns arrays for mutations, so check for empty array too.
     if body.get("errors").is_some() {
         return true;
     }
@@ -585,10 +493,6 @@ fn is_write_acp_denied(
     }
 }
 
-// ============================================================================
-// The test
-// ============================================================================
-
 #[tokio::test]
 #[ignore = "spec test: requires hubd, defra, and orbis-node on PATH"]
 async fn secure_training_data_compartments() {
@@ -596,10 +500,6 @@ async fn secure_training_data_compartments() {
         .with_env_filter("info")
         .with_test_writer()
         .try_init();
-
-    // ================================================================
-    // Phase 1: Infrastructure
-    // ================================================================
 
     let run_id = generate_run_id();
     let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -662,10 +562,6 @@ async fn secure_training_data_compartments() {
         .expect("ring should start");
 
     // Step 2a. Fund orbis nodes on hub.rs
-    // Orbis nodes generate their own secp256k1 signing key on first boot
-    // and write the EVM address to public_key.txt and compressed secp256k1
-    // public key to signer_pubkey.txt. We read both, fund the EVM address,
-    // and compute the secp256k1 DID for ACP authorization.
     let mut evm_addresses = Vec::with_capacity(ring.node_count());
     let mut node_signer_dids = Vec::with_capacity(ring.node_count());
     for i in 0..ring.node_count() {
@@ -720,10 +616,7 @@ async fn secure_training_data_compartments() {
         node_infos.push(info);
     }
 
-    // Step 3. Register bulletin namespace + add collaborators on hub.rs
-    // hub.rs add_collaborator now accepts a DID string (not an EVM address).
-    // We pass the secp256k1 DID so it matches what create_post checks via
-    // signature recovery.
+    // Step 3. Register bulletin namespace + add collaborators
     eprintln!("[backbone] Step 3: Registering bulletin namespace on hub.rs...");
     hub_cli
         .register_namespace(BULLETIN_RING_NAMESPACE)
@@ -748,7 +641,7 @@ async fn secure_training_data_compartments() {
         .do_dkg(&ring.node(0).grpc_addr(), ring.threshold(), &peer_ids)
         .expect("DKG should succeed");
 
-    // Step 3b. Poll for DKG post on hub.rs (replaces CometBFT subscription)
+    // Step 3b. Poll for DKG post on hub.rs
     eprintln!("[backbone] Step 3b: Polling for DKG post on hub.rs...");
     let (ring_id, post_payload) =
         wait_for_dkg_post(&hub_cli, BULLETIN_RING_NAMESPACE, Duration::from_secs(120))
@@ -777,11 +670,7 @@ async fn secure_training_data_compartments() {
         .register_object(&ring_policy_id, "ring", &ring_id)
         .expect("register ring object");
 
-    // ================================================================
-    // Phase 2: Identity setup
-    // ================================================================
-
-    // Step 5. Derive PLATFORM_DID from ring (BLS did:key, multicodec 0xea)
+    // Step 5. Derive PLATFORM_DID from ring
     let platform_derived = orbis_cli
         .derive_public_key(
             &ring.node(0).grpc_addr(),
@@ -792,7 +681,7 @@ async fn secure_training_data_compartments() {
     let platform_did = bls_did_key_from_hex(&platform_derived.derived_public_key);
     eprintln!("[backbone] Step 5: PLATFORM_DID: {}", platform_did);
 
-    // Step 6. Derive ACME_DID from ring (BLS did:key — compartment identity for acme blocks)
+    // Step 6. Derive ACME_DID from ring
     let acme_derived = orbis_cli
         .derive_public_key(
             &ring.node(0).grpc_addr(),
@@ -803,7 +692,7 @@ async fn secure_training_data_compartments() {
     let acme_did = bls_did_key_from_hex(&acme_derived.derived_public_key);
     eprintln!("[backbone] Step 6: ACME_DID: {}", acme_did);
 
-    // Step 7. Derive GLOBEX_DID from ring (BLS did:key — compartment identity for globex blocks)
+    // Step 7. Derive GLOBEX_DID from ring
     let globex_derived = orbis_cli
         .derive_public_key(
             &ring.node(0).grpc_addr(),
@@ -846,8 +735,7 @@ async fn secure_training_data_compartments() {
         globex_defra_svc.label,
     );
 
-    // Step 10. Authorize DefraDB service accounts as ring signers.
-    // signer_did_for_pk derives an Ed25519 did:key (0xed) used for Orbis ring ACP.
+    // Step 10. Authorize DefraDB service accounts as ring signers
     let acme_defra_signer_did = signer_did_for_pk(&acme_defra_svc.private_key_hex);
     hub_cli
         .set_relationship(
@@ -871,26 +759,19 @@ async fn secure_training_data_compartments() {
         .expect("grant globex_defra_svc signer on ring");
     eprintln!("[backbone] Step 10: DefraDB service accounts authorized as ring signers");
 
-    // ================================================================
-    // Phase 3: Acme compartment
-    // ================================================================
-
     // Step 11. Create acme ACP policy
     eprintln!("[backbone] Step 11: Creating acme ACP policy...");
     let acme_policy_id = hub_cli
         .create_policy(ACME_POLICY_YAML)
         .expect("create acme ACP policy");
 
-    // Register collection-level object for CREATE gating.
-    // Convention: collection object_id = resource name from @policy directive.
     let transcript_object = "transcript";
     hub_cli
         .register_object(&acme_policy_id, "transcript", transcript_object)
         .expect("register transcript collection object");
     eprintln!("[backbone] Acme policy: {}", acme_policy_id);
 
-    // Step 12. Grant TRAINING_SVC writer on collection (gates CREATE).
-    // Read access is per-document via owner relation (set during register_object).
+    // Step 12. Grant TRAINING_SVC writer on transcript collection
     hub_cli
         .set_relationship(
             &acme_policy_id,
@@ -902,11 +783,7 @@ async fn secure_training_data_compartments() {
         .expect("grant training_svc writer on transcript collection");
     eprintln!("[backbone] Step 12: TRAINING_SVC granted writer on transcript collection");
 
-    // Step 13: Per-document reader grants for INFERENCE_SVC happen after doc creation (Step 16b)
-    eprintln!("[backbone] Step 13: (deferred — per-document reader grants after doc creation)");
-
-    // Step 13b. Fund DefraDB service accounts on hub.rs.
-    // DefraDB's HubRsProvider submits EVM transactions for ACP operations.
+    // Step 13. Fund DefraDB service accounts on hub.rs
     let acme_defra_evm_addr = evm_address_from_private_key(&acme_defra_svc.private_key_hex);
     let globex_defra_evm_addr = evm_address_from_private_key(&globex_defra_svc.private_key_hex);
     for (label, addr) in &[
@@ -916,12 +793,10 @@ async fn secure_training_data_compartments() {
         hub_cli
             .fund_evm_address(addr, "1000000000000000000")
             .unwrap_or_else(|e| panic!("fund {} on hub.rs: {}", label, e));
-        eprintln!("[backbone] Step 13b: Funded {} on hub.rs: {}", label, addr);
+        eprintln!("[backbone] Step 13: Funded {} on hub.rs: {}", label, addr);
     }
 
-    // Step 14. Start DefraDB node with Orbis signer (derivation="acme-corp").
-    // The node identity (secp256k1) authenticates to Orbis via JWT.
-    // The Orbis signer derives the BLS compartment key and signs blocks with it.
+    // Step 14. Start acme DefraDB with Orbis signer (derivation="acme-corp")
     let defra_binary = test_infra::BinaryResolver::new("DEFRA", "defra")
         .cargo_package("cli")
         .resolve()
@@ -1017,8 +892,20 @@ async fn secure_training_data_compartments() {
         acme_doc_ids.len()
     );
 
-    // Step 16b. Grant INFERENCE_SVC reader on each transcript document (per-document ACP).
-    // In the Go model, reader grants are per-document, not collection-level.
+    // Step 16b. INFERENCE_SVC reads BEFORE being granted reader — denied.
+    let pre_grant_query = acme_client
+        .graphql(
+            r#"query { Transcript { _docID call_id } }"#,
+            Some(&inference_svc.private_key_hex),
+        )
+        .await;
+    assert!(
+        is_acp_denied(&pre_grant_query, "/data/Transcript"),
+        "INFERENCE_SVC should be denied BEFORE reader grant"
+    );
+    eprintln!("[backbone] Step 16b: INFERENCE_SVC denied before reader grant (sad path)");
+
+    // Step 16c. Grant INFERENCE_SVC reader on each transcript document
     for doc_id in &acme_doc_ids {
         hub_cli
             .set_relationship(
@@ -1033,12 +920,11 @@ async fn secure_training_data_compartments() {
             });
     }
     eprintln!(
-        "[backbone] Step 16b: INFERENCE_SVC granted reader on {} transcript documents",
+        "[backbone] Step 16c: INFERENCE_SVC granted reader on {} transcript documents",
         acme_doc_ids.len()
     );
 
-    // Step 17. INFERENCE_SVC reads back — sees transcripts (reader grant).
-    // Client authenticates with secp256k1 key → JWT. ACP checks the secp256k1 did:key.
+    // Step 17. INFERENCE_SVC reads back — sees transcripts (reader grant)
     let query = r#"query { Transcript { _docID call_id content customer } }"#;
     let query_body = acme_client
         .graphql(query, Some(&inference_svc.private_key_hex))
@@ -1058,8 +944,7 @@ async fn secure_training_data_compartments() {
         docs.len()
     );
 
-    // Step 18. INFERENCE_SVC attempts UPDATE on existing doc — denied (reader only).
-    // CREATE is permissionless in Rust DefraDB, so we test UPDATE denial instead.
+    // Step 18. INFERENCE_SVC attempts UPDATE — denied (reader only)
     let inference_write = format!(
         r#"mutation {{ update_Transcript(docID: "{}", input: {{ content: "hacked" }}) {{ _docID }} }}"#,
         acme_doc_ids[0]
@@ -1074,11 +959,7 @@ async fn secure_training_data_compartments() {
     );
     eprintln!("[backbone] Step 18: INFERENCE_SVC update denied (reader only)");
 
-    // ================================================================
-    // Phase 4: Globex compartment + isolation
-    // ================================================================
-
-    // Step 19. Create globex ACP policy + grant GLOBEX_SVC writer on collection
+    // Step 19. Create globex ACP policy + grant GLOBEX_SVC writer
     eprintln!("[backbone] Step 19: Creating globex ACP policy...");
     let globex_policy_id = hub_cli
         .create_policy(GLOBEX_POLICY_YAML)
@@ -1103,7 +984,7 @@ async fn secure_training_data_compartments() {
         globex_policy_id
     );
 
-    // Step 20. Start second DefraDB with Orbis signer (derivation="globex-inc")
+    // Step 20. Start globex DefraDB with Orbis signer (derivation="globex-inc")
     let globex_defra_ports = test_infra::allocate_ports(2).expect("globex defra ports");
     let globex_defra_dir = run_dir.node_dir("defra-globex").expect("globex defra dir");
     let globex_defra_log_dir = globex_defra_dir.join("logs");
@@ -1157,7 +1038,7 @@ async fn secure_training_data_compartments() {
         .expect("add ticket schema");
     eprintln!("[backbone] Step 21: Schema added: SupportTicket @policy");
 
-    // Step 22. GLOBEX_SVC writes + reads — succeeds (owner has read via policy)
+    // Step 22. GLOBEX_SVC writes + reads tickets
     let tickets = vec![
         (
             "GLOB-001",
@@ -1216,7 +1097,7 @@ async fn secure_training_data_compartments() {
         ticket_docs.len()
     );
 
-    // Step 23. GLOBEX_SVC queries acme's DefraDB — denied (cross-compartment isolation)
+    // Step 23. Cross-compartment isolation: globex -> acme (denied)
     eprintln!("[backbone] Step 23: Testing cross-compartment isolation: globex -> acme...");
     let cross_acme = acme_client
         .graphql(
@@ -1231,7 +1112,7 @@ async fn secure_training_data_compartments() {
     );
     eprintln!("[backbone] PASSED: GLOBEX_SVC denied on acme transcripts");
 
-    // Step 24. TRAINING_SVC queries globex's DefraDB — denied (reverse isolation)
+    // Step 24. Cross-compartment isolation: acme -> globex (denied)
     eprintln!("[backbone] Step 24: Testing cross-compartment isolation: acme -> globex...");
     let cross_globex = globex_client
         .graphql(
@@ -1246,11 +1127,7 @@ async fn secure_training_data_compartments() {
     );
     eprintln!("[backbone] PASSED: TRAINING_SVC denied on globex tickets");
 
-    // ================================================================
-    // Phase 5: Cross-compartment audit + lifecycle
-    // ================================================================
-
-    // Step 25. Grant AUDIT_SVC reader on each document in both compartments (per-document)
+    // Step 25. Grant AUDIT_SVC reader on all docs in both compartments
     for doc_id in &acme_doc_ids {
         hub_cli
             .set_relationship(
@@ -1327,8 +1204,7 @@ async fn secure_training_data_compartments() {
         audit_globex_docs.len()
     );
 
-    // Step 28. AUDIT_SVC attempts UPDATE on either — denied (reader only).
-    // CREATE is permissionless, so we test UPDATE denial instead.
+    // Step 28. AUDIT_SVC attempts UPDATE — denied (reader only)
     let audit_update_acme = acme_client
         .graphql(
             &format!(
@@ -1361,7 +1237,7 @@ async fn secure_training_data_compartments() {
     );
     eprintln!("[backbone] Step 28b: AUDIT_SVC update denied on globex");
 
-    // Step 29. Revoke AUDIT_SVC from acme — can no longer read acme, still reads globex
+    // Step 29. Revoke AUDIT_SVC from acme, verify still reads globex
     eprintln!("[backbone] Step 29: Revoking AUDIT_SVC from acme...");
     for doc_id in &acme_doc_ids {
         hub_cli
@@ -1414,11 +1290,10 @@ async fn secure_training_data_compartments() {
         still_globex_docs.len()
     );
 
-    // Step 30. Rotate TRAINING_SVC — new key works, old key denied
+    // Step 30. Key rotation: new key works, old key denied
     eprintln!("[backbone] Step 30: Rotating TRAINING_SVC key...");
     let new_training_svc = ServiceIdentity::new_file_keyring("training-svc-v2", run_dir.path());
 
-    // Grant new key writer on collection (gates CREATE)
     hub_cli
         .set_relationship(
             &acme_policy_id,
@@ -1462,7 +1337,6 @@ async fn secure_training_data_compartments() {
     }
     eprintln!("[backbone] PASSED: New TRAINING_SVC writes successfully");
 
-    // Revoke old key's writer on collection (prevents CREATE)
     hub_cli
         .delete_relationship(
             &acme_policy_id,
@@ -1473,8 +1347,6 @@ async fn secure_training_data_compartments() {
         )
         .expect("revoke old training_svc writer on transcript collection");
 
-    // Old training_svc tries to UPDATE an existing doc — should be denied after writer revocation.
-    // CREATE is permissionless, so we test UPDATE denial instead.
     let old_key_write = format!(
         r#"mutation {{ update_Transcript(docID: "{}", input: {{ content: "old-key-hack" }}) {{ _docID }} }}"#,
         acme_doc_ids[0]
@@ -1516,16 +1388,6 @@ async fn secure_training_data_compartments() {
     }
     eprintln!("[backbone] PASSED: Rotated TRAINING_SVC still works after old key revoked");
 
-    // ================================================================
-    // Phase 6: ACP Light Client verification
-    // ================================================================
-
-    eprintln!("[backbone] === Phase 6: ACP Light Client verification ===");
-
-    // Hub.rs cluster is already running from Phase 1 — reuse acme_policy_id
-    // from Step 11 (already created on hub.rs with transcript object registered
-    // and TRAINING_SVC granted writer+reader).
-
     // Step 34. Start AcpLightClient
     eprintln!("[backbone] Step 34: Starting ACP light client...");
     let hub_rpc = hub_cluster.node(0).rpc_url();
@@ -1545,8 +1407,8 @@ async fn secure_training_data_compartments() {
         sync.height, sync.module_state_root
     );
 
-    // Step 36. check_access(TRAINING_SVC, write) → allowed
-    eprintln!("[backbone] Step 36: Checking TRAINING_SVC writer access...");
+    // Step 36. Verify policy existence with Merkle proof
+    eprintln!("[backbone] Step 36: Checking policy existence...");
     let policy_check = light_client
         .check_policy(&acme_policy_id)
         .await
@@ -1558,8 +1420,8 @@ async fn secure_training_data_compartments() {
         policy_check.verified_at_height
     );
 
-    // Step 37. Verify non-existence proof for absent policy
-    eprintln!("[backbone] Step 37: Checking non-existent policy (non-existence proof)...");
+    // Step 37. Non-existence proof for absent policy
+    eprintln!("[backbone] Step 37: Checking non-existent policy...");
     let absent_check = light_client
         .check_policy("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
         .await
@@ -1571,13 +1433,12 @@ async fn secure_training_data_compartments() {
     );
     eprintln!("[backbone] PASSED: Non-existent policy denied with proof");
 
-    // Record the current module_state_root before mutation
     let root_before = light_client
         .header_chain()
         .latest_module_state_root()
         .expect("should have module_state_root");
 
-    // Step 38. Mutate: re-grant audit_svc reader on first doc (revoked in Step 29) to change module_state_root
+    // Step 38. Re-grant audit_svc reader (revoked in Step 29) to mutate state
     eprintln!("[backbone] Step 38: Mutating ACP state on hub.rs...");
     hub_cli
         .set_relationship(
@@ -1604,7 +1465,7 @@ async fn secure_training_data_compartments() {
         "module_state_root should differ after ACP mutation"
     );
 
-    // Step 40. Re-check policy — cache was invalidated, re-verified with new root
+    // Step 40. Re-check policy after state change (cache invalidation)
     eprintln!("[backbone] Step 40: Re-checking policy after state change...");
     let recheck = light_client
         .check_policy(&acme_policy_id)
@@ -1620,7 +1481,7 @@ async fn secure_training_data_compartments() {
         recheck.verified_at_height
     );
 
-    // Step 41. Measure and assert revocation SLA
+    // Step 41. Revocation SLA <= 5 blocks
     let revocation_blocks = new_sync.height.saturating_sub(sync.height);
     eprintln!(
         "[backbone] Step 41: Revocation SLA: {} blocks from tx to cache invalidation",
@@ -1632,41 +1493,15 @@ async fn secure_training_data_compartments() {
         revocation_blocks
     );
 
-    // Final health check: assert hub.rs had no unexpected errors during the entire test
+    // Final: hub.rs cluster health check
     hub_state
         .assert_no_errors()
         .expect("hub.rs cluster should have no unexpected errors");
     eprintln!("[backbone] Hub.rs cluster health: no unexpected errors");
 
     drop(hub_cluster);
-    eprintln!("[backbone] === Phase 6 complete: ACP Light Client verified ===");
-
-    // ================================================================
-    // Done
-    // ================================================================
     drop(globex_defra);
     drop(acme_defra);
 
-    eprintln!("[backbone] === Secure training data compartments test complete (41 steps) ===");
-    eprintln!("[backbone] Summary:");
-    eprintln!(
-        "[backbone]   Ring: {} (T=2, N=3)",
-        &ring_id[..16.min(ring_id.len())]
-    );
-    eprintln!("[backbone]   PLATFORM_DID: {}", platform_did);
-    eprintln!("[backbone]   ACME_DID:     {}", acme_did);
-    eprintln!("[backbone]   GLOBEX_DID:   {}", globex_did);
-    eprintln!("[backbone]   Acme policy:   {}", acme_policy_id);
-    eprintln!("[backbone]   Globex policy: {}", globex_policy_id);
-    eprintln!(
-        "[backbone]   Transcripts: {} + rotation writes",
-        transcripts.len()
-    );
-    eprintln!("[backbone]   Tickets: {}", tickets.len());
-    eprintln!("[backbone]   Ring signing policy: {}", ring_policy_id);
-    eprintln!("[backbone]   Cross-compartment isolation: 2 tests");
-    eprintln!("[backbone]   Cross-compartment audit: 4 tests");
-    eprintln!("[backbone]   Permission revocation: 2 tests");
-    eprintln!("[backbone]   Key rotation: 3 tests");
-    eprintln!("[backbone]   ACP light client: 6 tests (hub.rs proofs + cache invalidation)");
+    eprintln!("[backbone] All 41 steps passed.");
 }
