@@ -96,8 +96,8 @@ impl DefraClient {
     /// Deploy a schema via `client schema add '<sdl>'`.
     pub fn schema_add(&self, sdl: &str) -> Result<Value> {
         let out = self.exec(&["client", "schema", "add", sdl])?;
-        let json_str = out.find('{').map(|i| &out[i..]).unwrap_or(&out);
-        serde_json::from_str(json_str).wrap_err("failed to parse schema_add output")
+        let json_start = out.find(|c| c == '{' || c == '[').unwrap_or(0);
+        serde_json::from_str(&out[json_start..]).wrap_err("failed to parse schema_add output")
     }
 
     /// Execute a GraphQL query/mutation via `client query '<gql>'`.
@@ -461,8 +461,8 @@ impl DefraClient {
     /// Deploy a schema with identity.
     pub fn schema_add_with_identity(&self, sdl: &str, hex_key: &str) -> Result<Value> {
         let out = self.exec(&["client", "-i", hex_key, "schema", "add", sdl])?;
-        let json_str = out.find('{').map(|i| &out[i..]).unwrap_or(&out);
-        serde_json::from_str(json_str).wrap_err("failed to parse schema_add output")
+        let json_start = out.find(|c| c == '{' || c == '[').unwrap_or(0);
+        serde_json::from_str(&out[json_start..]).wrap_err("failed to parse schema_add output")
     }
 
     // ---- ACP Document operations ----
