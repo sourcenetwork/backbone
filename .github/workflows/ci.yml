@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DEFRA_REF: main
+  HUBD_REF: main
+  ORBIS_REF: jack/integration-testing
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: [self-hosted, macOS, ARM64, studio]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: [self-hosted, macOS, ARM64, studio]
+    env:
+      GIT_CONFIG_GLOBAL: /tmp/.gitconfig-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git auth
+        run: |
+          echo '[url "https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/"]' > /tmp/.gitconfig-ci
+          echo '  insteadOf = https://github.com/sourcenetwork/' >> /tmp/.gitconfig-ci
+      - run: cargo clippy --all -- -D warnings
+      - name: Cleanup
+        if: always()
+        run: |
+          git checkout -- . && git clean -fd
+          rm -f /tmp/.gitconfig-ci
+
+  unit-test:
+    name: Unit Tests
+    runs-on: [self-hosted, macOS, ARM64, studio]
+    env:
+      GIT_CONFIG_GLOBAL: /tmp/.gitconfig-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git auth
+        run: |
+          echo '[url "https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/"]' > /tmp/.gitconfig-ci
+          echo '  insteadOf = https://github.com/sourcenetwork/' >> /tmp/.gitconfig-ci
+      - run: cargo test --workspace
+      - name: Cleanup
+        if: always()
+        run: |
+          git checkout -- . && git clean -fd
+          rm -f /tmp/.gitconfig-ci
+
+  hub-light-client:
+    name: Hub Light Client
+    runs-on: [self-hosted, macOS, ARM64, studio]
+    env:
+      GIT_CONFIG_GLOBAL: /tmp/.gitconfig-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git auth
+        run: |
+          echo '[url "https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/"]' > /tmp/.gitconfig-ci
+          echo '  insteadOf = https://github.com/sourcenetwork/' >> /tmp/.gitconfig-ci
+      - name: Ensure binaries
+        run: bash .github/scripts/ensure-binaries.sh
+      - name: Run hub light client tests
+        run: |
+          export PATH="$HOME/.sourcenetwork/bin:$PATH"
+          cargo test --test hub_light_client -- --ignored --nocapture
+      - name: Cleanup
+        if: always()
+        run: |
+          git checkout -- . && git clean -fd
+          pkill -f "target/.*(defra|hubd|orbis)" || true
+          rm -rf target/e2e/
+          rm -f /tmp/.gitconfig-ci
+          if (( $(du -sm target 2>/dev/null | cut -f1) > 20000 )); then cargo clean; fi
+
+  full-stack:
+    name: Full Stack
+    runs-on: [self-hosted, macOS, ARM64, studio]
+    env:
+      GIT_CONFIG_GLOBAL: /tmp/.gitconfig-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git auth
+        run: |
+          echo '[url "https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/"]' > /tmp/.gitconfig-ci
+          echo '  insteadOf = https://github.com/sourcenetwork/' >> /tmp/.gitconfig-ci
+      - name: Ensure binaries
+        run: bash .github/scripts/ensure-binaries.sh
+      - name: Run full stack tests
+        run: |
+          export PATH="$HOME/.sourcenetwork/bin:$PATH"
+          cargo test --test full_stack -- --ignored --nocapture
+      - name: Cleanup
+        if: always()
+        run: |
+          git checkout -- . && git clean -fd
+          pkill -f "target/.*(defra|hubd|orbis)" || true
+          rm -rf target/e2e/
+          rm -f /tmp/.gitconfig-ci
+          if (( $(du -sm target 2>/dev/null | cut -f1) > 20000 )); then cargo clean; fi

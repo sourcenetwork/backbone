@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -187,9 +188,17 @@ impl TestClusterBuilder {
         let rust_binary_path = if self.rust_nodes > 0 {
             let source = self.rust_binary.clone().unwrap_or_else(|| {
                 if is_iroh {
-                    BinarySource::WorkspaceWithFeatures(vec!["iroh".to_string()])
+                    if let Ok(path) = std::env::var("DEFRA_IROH_BINARY") {
+                        BinarySource::Path(PathBuf::from(path))
+                    } else {
+                        BinarySource::WorkspaceWithFeatures(vec!["iroh".to_string()])
+                    }
                 } else {
-                    BinarySource::Workspace
+                    if let Ok(path) = std::env::var("DEFRA_RUST_BINARY") {
+                        BinarySource::Path(PathBuf::from(path))
+                    } else {
+                        BinarySource::Workspace
+                    }
                 }
             });
             // Use OnceLock for workspace builds to avoid parallel rebuilds
