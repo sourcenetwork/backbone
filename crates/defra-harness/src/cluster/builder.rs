@@ -35,6 +35,11 @@ pub struct TestClusterBuilder {
     query_timeout: Option<u64>,
     p2p_transport: Option<String>,
     keyring: KeyringBackend,
+    acp_cache_ttl: Option<u64>,
+    acp_circuit_breaker_threshold: Option<u32>,
+    acp_circuit_breaker_reset_timeout: Option<u64>,
+    acp_request_timeout: Option<u64>,
+    acp_receipt_timeout: Option<u64>,
 }
 
 impl Default for TestClusterBuilder {
@@ -64,6 +69,11 @@ impl TestClusterBuilder {
             query_timeout: None,
             p2p_transport: None,
             keyring: KeyringBackend::None,
+            acp_cache_ttl: None,
+            acp_circuit_breaker_threshold: None,
+            acp_circuit_breaker_reset_timeout: None,
+            acp_request_timeout: None,
+            acp_receipt_timeout: None,
         }
     }
 
@@ -168,6 +178,31 @@ impl TestClusterBuilder {
     pub fn with_iroh_transport(mut self) -> Self {
         self.p2p_transport = Some("iroh".to_string());
         self.p2p_enabled = true;
+        self
+    }
+
+    pub fn with_acp_cache_ttl(mut self, secs: u64) -> Self {
+        self.acp_cache_ttl = Some(secs);
+        self
+    }
+
+    pub fn with_acp_circuit_breaker_threshold(mut self, threshold: u32) -> Self {
+        self.acp_circuit_breaker_threshold = Some(threshold);
+        self
+    }
+
+    pub fn with_acp_circuit_breaker_reset_timeout(mut self, secs: u64) -> Self {
+        self.acp_circuit_breaker_reset_timeout = Some(secs);
+        self
+    }
+
+    pub fn with_acp_request_timeout(mut self, secs: u64) -> Self {
+        self.acp_request_timeout = Some(secs);
+        self
+    }
+
+    pub fn with_acp_receipt_timeout(mut self, secs: u64) -> Self {
+        self.acp_receipt_timeout = Some(secs);
         self
     }
 
@@ -335,6 +370,11 @@ impl TestClusterBuilder {
                 store: self.store.clone(),
                 query_timeout: self.query_timeout,
                 p2p_transport: self.p2p_transport.clone(),
+                acp_cache_ttl: self.acp_cache_ttl,
+                acp_circuit_breaker_threshold: self.acp_circuit_breaker_threshold,
+                acp_circuit_breaker_reset_timeout: self.acp_circuit_breaker_reset_timeout,
+                acp_request_timeout: self.acp_request_timeout,
+                acp_receipt_timeout: self.acp_receipt_timeout,
             };
 
             // Release port guards right before spawn so the child process can bind
@@ -388,6 +428,11 @@ impl TestClusterBuilder {
                 store: self.store.clone(),
                 query_timeout: self.query_timeout,
                 p2p_transport: None,
+                acp_cache_ttl: self.acp_cache_ttl,
+                acp_circuit_breaker_threshold: self.acp_circuit_breaker_threshold,
+                acp_circuit_breaker_reset_timeout: self.acp_circuit_breaker_reset_timeout,
+                acp_request_timeout: self.acp_request_timeout,
+                acp_receipt_timeout: self.acp_receipt_timeout,
             };
 
             // Release port guards right before spawn so the child process can bind
