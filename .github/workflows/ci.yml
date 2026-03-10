@@ -56,6 +56,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Configure git auth
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+      - name: Debug PAT access
+        run: |
+          echo "PAT length: ${#PRIVATE_REPO_PAT}"
+          echo "PAT prefix: ${PRIVATE_REPO_PAT:0:4}..."
+          echo "--- API test ---"
+          curl -s -o /dev/null -w "orbis-rs: %{http_code}\n" -H "Authorization: token $PRIVATE_REPO_PAT" https://api.github.com/repos/sourcenetwork/orbis-rs
+          curl -s -o /dev/null -w "defradb.rs: %{http_code}\n" -H "Authorization: token $PRIVATE_REPO_PAT" https://api.github.com/repos/sourcenetwork/defradb.rs
+          echo "--- git ls-remote test ---"
+          git ls-remote "https://${PRIVATE_REPO_PAT}@github.com/sourcenetwork/orbis-rs.git" HEAD 2>&1 | head -1 || echo "git ls-remote failed"
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
       - name: Ensure binaries
         run: bash .github/scripts/ensure-binaries.sh
         env:
