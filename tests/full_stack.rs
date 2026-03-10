@@ -279,7 +279,7 @@ impl HubdCli {
     }
 
     fn wait_for_tx_receipt(&self, tx_hash: &str) -> eyre::Result<()> {
-        for _attempt in 0..50 {
+        for _attempt in 0..400 {
             let body = format!(
                 r#"{{"jsonrpc":"2.0","method":"eth_getTransactionReceipt","params":["{}"],"id":1}}"#,
                 tx_hash
@@ -304,9 +304,9 @@ impl HubdCli {
                     return Ok(());
                 }
             }
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(300));
         }
-        eyre::bail!("receipt not available after 50 attempts for {}", tx_hash)
+        eyre::bail!("receipt not available after 400 attempts for {}", tx_hash)
     }
 
     fn get_evm_nonce(&self, key_hex: &str) -> eyre::Result<u64> {
