@@ -80,7 +80,6 @@ jobs:
           pkill -f "target/.*(defra|hubd|orbis)" || true
           rm -rf target/e2e/
           rm -f /tmp/.gitconfig-ci
-          if (( $(du -sm target 2>/dev/null | cut -f1) > 20000 )); then cargo clean; fi
 
   full-stack:
     name: Full Stack
@@ -106,4 +105,3 @@ jobs:
           pkill -f "target/.*(defra|hubd|orbis)" || true
           rm -rf target/e2e/
           rm -f /tmp/.gitconfig-ci
-          if (( $(du -sm target 2>/dev/null | cut -f1) > 20000 )); then cargo clean; fi
