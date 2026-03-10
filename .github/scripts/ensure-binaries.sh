@@ -13,6 +13,7 @@ set -euo pipefail
 #   ORBIS_REF    — git ref for orbis-rs    (e.g. "jack/integration-testing")
 #
 # Optional:
+#   GITHUB_PAT   — PAT for private repo access (used in git URLs)
 #   CACHE_DIR    — override binary cache root (default: ~/.sourcenetwork/bin)
 #   SRC_DIR      — override source clone root (default: ~/.sourcenetwork/src)
 #   MAX_VERSIONS — versions to keep per component (default: 3)
@@ -23,21 +24,33 @@ MAX_VERSIONS="${MAX_VERSIONS:-3}"
 
 mkdir -p "$CACHE_DIR" "$SRC_DIR"
 
+repo_url() {
+    local repo=$1
+    if [[ -n "${GITHUB_PAT:-}" ]]; then
+        echo "https://${GITHUB_PAT}@github.com/sourcenetwork/${repo}.git"
+    else
+        echo "https://github.com/sourcenetwork/${repo}.git"
+    fi
+}
+
 resolve_commit() {
     local repo=$1 ref=$2
-    git ls-remote "https://github.com/sourcenetwork/${repo}.git" "$ref" \
+    git ls-remote "$(repo_url "$repo")" "$ref" \
         | head -1 | cut -f1
 }
 
 ensure_clone() {
     local repo=$1 ref=$2 commit=$3
     local src="$SRC_DIR/$repo"
+    local url
+    url=$(repo_url "$repo")
 
     if [[ -d "$src/.git" ]]; then
+        git -C "$src" remote set-url origin "$url"
         git -C "$src" fetch origin "$ref" --quiet
     else
         echo "  Cloning $repo..."
-        git clone "https://github.com/sourcenetwork/${repo}.git" "$src" --quiet
+        git clone "$url" "$src" --quiet
     fi
     git -C "$src" checkout "$commit" --quiet --force
 }

@@ -188,17 +188,17 @@ impl TestClusterBuilder {
         let rust_binary_path = if self.rust_nodes > 0 {
             let source = self.rust_binary.clone().unwrap_or_else(|| {
                 if is_iroh {
-                    if let Ok(path) = std::env::var("DEFRA_IROH_BINARY") {
-                        BinarySource::Path(PathBuf::from(path))
-                    } else {
-                        BinarySource::WorkspaceWithFeatures(vec!["iroh".to_string()])
-                    }
+                    std::env::var("DEFRA_IROH_BINARY")
+                        .ok()
+                        .map(|p| BinarySource::Path(PathBuf::from(p)))
+                        .unwrap_or_else(|| {
+                            BinarySource::WorkspaceWithFeatures(vec!["iroh".to_string()])
+                        })
                 } else {
-                    if let Ok(path) = std::env::var("DEFRA_RUST_BINARY") {
-                        BinarySource::Path(PathBuf::from(path))
-                    } else {
-                        BinarySource::Workspace
-                    }
+                    std::env::var("DEFRA_RUST_BINARY")
+                        .ok()
+                        .map(|p| BinarySource::Path(PathBuf::from(p)))
+                        .unwrap_or(BinarySource::Workspace)
                 }
             });
             // Use OnceLock for workspace builds to avoid parallel rebuilds

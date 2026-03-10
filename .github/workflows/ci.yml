@@ -69,6 +69,8 @@ jobs:
           echo '  insteadOf = https://github.com/sourcenetwork/' >> /tmp/.gitconfig-ci
       - name: Ensure binaries
         run: bash .github/scripts/ensure-binaries.sh
+        env:
+          GITHUB_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
       - name: Run hub light client tests
         run: |
           export PATH="$HOME/.sourcenetwork/bin:$PATH"
@@ -94,6 +96,8 @@ jobs:
           echo '  insteadOf = https://github.com/sourcenetwork/' >> /tmp/.gitconfig-ci
       - name: Ensure binaries
         run: bash .github/scripts/ensure-binaries.sh
+        env:
+          GITHUB_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
       - name: Run full stack tests
         run: |
           export PATH="$HOME/.sourcenetwork/bin:$PATH"

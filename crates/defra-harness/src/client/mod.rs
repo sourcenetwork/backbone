@@ -96,7 +96,7 @@ impl DefraClient {
     /// Deploy a schema via `client collection add '<sdl>'`.
     pub fn schema_add(&self, sdl: &str) -> Result<Value> {
         let out = self.exec(&["client", "collection", "add", sdl])?;
-        let json_start = out.find(|c| c == '{' || c == '[').unwrap_or(0);
+        let json_start = out.find(['{', '[']).unwrap_or(0);
         serde_json::from_str(&out[json_start..]).wrap_err("failed to parse schema_add output")
     }
 
@@ -120,7 +120,14 @@ impl DefraClient {
 
     /// Get a document via `client document get --collection-name <n> <id>`.
     pub fn collection_get(&self, name: &str, doc_id: &str) -> Result<Value> {
-        let out = self.exec(&["client", "document", "get", "--collection-name", name, doc_id])?;
+        let out = self.exec(&[
+            "client",
+            "document",
+            "get",
+            "--collection-name",
+            name,
+            doc_id,
+        ])?;
         serde_json::from_str(&out).wrap_err("failed to parse collection_get output")
     }
 
@@ -455,7 +462,7 @@ impl DefraClient {
     /// Deploy a schema with identity.
     pub fn schema_add_with_identity(&self, sdl: &str, hex_key: &str) -> Result<Value> {
         let out = self.exec(&["client", "-i", hex_key, "collection", "add", sdl])?;
-        let json_start = out.find(|c| c == '{' || c == '[').unwrap_or(0);
+        let json_start = out.find(['{', '[']).unwrap_or(0);
         serde_json::from_str(&out[json_start..]).wrap_err("failed to parse schema_add output")
     }
 

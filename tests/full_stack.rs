@@ -181,7 +181,7 @@ impl HubdCli {
 
         self.exec(&["acp", "create-policy", yaml])?;
 
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             let after_output = self.exec(&["acp", "list-policies"])?;
             let after: Vec<String> = serde_json::from_str(&after_output)
@@ -1138,7 +1138,10 @@ async fn secure_training_data_compartments() {
                 &audit_svc.did_key,
             )
             .unwrap_or_else(|e| {
-                panic!("grant audit_svc reader on acme transcript {}: {}", doc_id, e)
+                panic!(
+                    "grant audit_svc reader on acme transcript {}: {}",
+                    doc_id, e
+                )
             });
     }
     for doc_id in &globex_doc_ids {
