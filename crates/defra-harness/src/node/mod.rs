@@ -206,6 +206,11 @@ pub struct NodeConfig {
     pub store: Option<String>,
     pub query_timeout: Option<u64>,
     pub p2p_transport: Option<String>,
+    pub acp_cache_ttl: Option<u64>,
+    pub acp_circuit_breaker_threshold: Option<u32>,
+    pub acp_circuit_breaker_reset_timeout: Option<u64>,
+    pub acp_request_timeout: Option<u64>,
+    pub acp_receipt_timeout: Option<u64>,
 }
 
 impl NodeConfig {
@@ -236,6 +241,11 @@ impl NodeConfig {
             store: None,
             query_timeout: None,
             p2p_transport: None,
+            acp_cache_ttl: None,
+            acp_circuit_breaker_threshold: None,
+            acp_circuit_breaker_reset_timeout: None,
+            acp_request_timeout: None,
+            acp_receipt_timeout: None,
         }
     }
 }

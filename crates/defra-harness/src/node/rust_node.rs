@@ -198,6 +198,27 @@ impl DefraNode for RustNode {
             args.push(timeout.to_string());
         }
 
+        if let Some(ttl) = config.acp_cache_ttl {
+            args.push("--acp-cache-ttl".to_string());
+            args.push(ttl.to_string());
+        }
+        if let Some(threshold) = config.acp_circuit_breaker_threshold {
+            args.push("--acp-circuit-breaker-threshold".to_string());
+            args.push(threshold.to_string());
+        }
+        if let Some(timeout) = config.acp_circuit_breaker_reset_timeout {
+            args.push("--acp-circuit-breaker-reset-timeout".to_string());
+            args.push(timeout.to_string());
+        }
+        if let Some(timeout) = config.acp_request_timeout {
+            args.push("--acp-request-timeout".to_string());
+            args.push(timeout.to_string());
+        }
+        if let Some(timeout) = config.acp_receipt_timeout {
+            args.push("--acp-receipt-timeout".to_string());
+            args.push(timeout.to_string());
+        }
+
         (self.binary_path.clone(), args, envs)
     }
 
