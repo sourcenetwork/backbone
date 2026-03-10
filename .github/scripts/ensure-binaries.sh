@@ -145,7 +145,7 @@ echo "=== Ensuring binary dependencies ==="
 
 # defra and hub.rs: binaries built by their own CI, just verify symlinks exist
 echo "--- defra/hub.rs (pre-built by their CI) ---"
-for bin in defra defra-iroh hubd; do
+for bin in defra-iroh hubd; do
     if [[ -x "$CACHE_DIR/$bin" ]]; then
         echo "  $bin: $(readlink "$CACHE_DIR/$bin")"
     else
@@ -169,7 +169,7 @@ prune_old_versions "orbis-rs"
 # Final verification
 echo ""
 echo "=== Binary versions ==="
-for bin in defra defra-iroh hubd orbis-node cli-tool; do
+for bin in defra-iroh hubd orbis-node cli-tool; do
     if [[ -x "$CACHE_DIR/$bin" ]]; then
         echo "  $bin: $(readlink "$CACHE_DIR/$bin")"
     else

@@ -634,7 +634,7 @@ fn is_write_acp_denied(
 }
 
 #[tokio::test]
-#[ignore = "spec test: requires hubd, defra, and orbis-node on PATH"]
+#[ignore = "spec test: requires hubd, defra-iroh, and orbis-node on PATH"]
 async fn secure_training_data_compartments() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -949,7 +949,7 @@ async fn secure_training_data_compartments() {
     }
 
     // Step 14. Start acme DefraDB with Orbis signer (derivation="acme-corp")
-    let defra_binary = test_infra::BinaryResolver::new("DEFRA", "defra")
+    let defra_binary = test_infra::BinaryResolver::new("DEFRA", "defra-iroh")
         .cargo_package("cli")
         .resolve()
         .expect("find defra binary");
