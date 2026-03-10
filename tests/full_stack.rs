@@ -466,31 +466,40 @@ fn bls_did_key_from_hex(public_key_hex: &str) -> String {
     bls_did_key(&bytes)
 }
 
-/// Wait for the chain to advance `n` blocks beyond the current height.
-/// Used after ACP mutations to ensure the state change is finalized
-/// and DefraDB's ACP light client has received the updated header via websocket.
-async fn wait_for_block_advance(
+/// Wait for ACP state to propagate from hub.rs to DefraDB's light client.
+///
+/// 1. Wait for the chain to advance `n` blocks (ensures the tx is finalized).
+/// 2. Add a brief delay for websocket delivery + cache invalidation.
+///
+/// The chain advancing doesn't guarantee DefraDB has received the header
+/// via websocket yet. Actual propagation depends on:
+/// - Websocket delivery latency (hub.rs → DefraDB subscriber)
+/// - Cache invalidation processing time
+/// - Module state root comparison + proof refetch
+async fn wait_for_acp_propagation(
     hub_state: &hub_harness::observe::ClusterState,
-    n: u64,
     label: &str,
 ) {
     let current = hub_state.node(0).effective_height();
-    let target = current + n;
+    let target = current + 2;
     let t = Instant::now();
     hub_state
         .wait_for_height(target, Duration::from_secs(30))
         .await
         .unwrap_or_else(|e| {
             panic!(
-                "{}: chain didn't advance {} blocks (current={}, target={}): {}",
-                label, n, current, target, e
+                "{}: chain didn't advance 2 blocks (current={}, target={}): {}",
+                label, current, target, e
             )
         });
+    // Additional delay for websocket propagation to DefraDB's light client.
+    // The chain has advanced, but the WS subscription + cache invalidation
+    // may lag by 1-2 seconds.
+    tokio::time::sleep(Duration::from_secs(3)).await;
     eprintln!(
-        "[backbone]   {} ACP propagation: {:.2}s ({} blocks, height {}→{})",
+        "[backbone]   {} ACP propagation: {:.2}s (height {}→{})",
         label,
         t.elapsed().as_secs_f64(),
-        n,
         current,
         target
     );
@@ -973,7 +982,7 @@ async fn secure_training_data_compartments() {
     );
 
     // Wait for ACP state to propagate via websocket before querying
-    wait_for_block_advance(&hub_state, 2, "Step 16d").await;
+    wait_for_acp_propagation(&hub_state, "Step 16d").await;
 
     // Step 17. INFERENCE_SVC reads back — sees transcripts (reader grant)
     let query = r#"query { Transcript { _docID call_id content customer } }"#;
@@ -1227,7 +1236,7 @@ async fn secure_training_data_compartments() {
     );
 
     // Wait for ACP grants to propagate
-    wait_for_block_advance(&hub_state, 2, "Step 25").await;
+    wait_for_acp_propagation(&hub_state, "Step 25").await;
 
     // Step 26. AUDIT_SVC reads acme transcripts — succeeds
     let t = Instant::now();
@@ -1330,7 +1339,7 @@ async fn secure_training_data_compartments() {
     }
 
     // Wait for revocation to propagate
-    wait_for_block_advance(&hub_state, 2, "Step 29").await;
+    wait_for_acp_propagation(&hub_state, "Step 29").await;
 
     let revoked_acme = acme_client
         .graphql(
@@ -1381,7 +1390,7 @@ async fn secure_training_data_compartments() {
         .expect("grant new_training_svc writer on transcript collection");
 
     // Wait for grant to propagate before writing
-    wait_for_block_advance(&hub_state, 2, "Step 30-grant").await;
+    wait_for_acp_propagation(&hub_state, "Step 30-grant").await;
 
     let new_key_write = r#"mutation {
         create_Transcript(input: {
@@ -1438,7 +1447,7 @@ async fn secure_training_data_compartments() {
         .expect("revoke old training_svc writer on transcript collection");
 
     // Wait for revocation to propagate via websocket
-    wait_for_block_advance(&hub_state, 2, "Step 30-revoke").await;
+    wait_for_acp_propagation(&hub_state, "Step 30-revoke").await;
 
     // Old training_svc tries to UPDATE the new document — should be denied.
     // The old key doesn't own this doc (new_training_svc does) and its writer
