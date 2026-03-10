@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alloy_consensus::{SignableTransaction, TxLegacy};
 use alloy_eips::eip2718::Encodable2718;
@@ -466,6 +466,36 @@ fn bls_did_key_from_hex(public_key_hex: &str) -> String {
     bls_did_key(&bytes)
 }
 
+/// Wait for the chain to advance `n` blocks beyond the current height.
+/// Used after ACP mutations to ensure the state change is finalized
+/// and DefraDB's ACP light client has received the updated header via websocket.
+async fn wait_for_block_advance(
+    hub_state: &hub_harness::observe::ClusterState,
+    n: u64,
+    label: &str,
+) {
+    let current = hub_state.node(0).effective_height();
+    let target = current + n;
+    let t = Instant::now();
+    hub_state
+        .wait_for_height(target, Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "{}: chain didn't advance {} blocks (current={}, target={}): {}",
+                label, n, current, target, e
+            )
+        });
+    eprintln!(
+        "[backbone]   {} ACP propagation: {:.2}s ({} blocks, height {}→{})",
+        label,
+        t.elapsed().as_secs_f64(),
+        n,
+        current,
+        target
+    );
+}
+
 fn is_acp_denied(result: &Result<serde_json::Value, eyre::Report>, data_path: &str) -> bool {
     let body = result
         .as_ref()
@@ -866,19 +896,28 @@ async fn secure_training_data_compartments() {
     ];
 
     let mut acme_doc_ids: Vec<String> = Vec::new();
+    let batch_start = Instant::now();
     for (call_id, content, customer) in &transcripts {
         let mutation = format!(
             r#"mutation {{ create_Transcript(input: {{ call_id: "{}", content: "{}", customer: "{}" }}) {{ _docID }} }}"#,
             call_id, content, customer
         );
+        let write_start = Instant::now();
         let result = acme_client
             .graphql(&mutation, Some(&training_svc.private_key_hex))
             .await
             .unwrap_or_else(|e| panic!("write transcript {}: {}", call_id, e));
+        let write_dur = write_start.elapsed();
         if let Some(doc_id) = result
             .pointer("/data/add_Transcript/0/_docID")
             .and_then(|v| v.as_str())
         {
+            eprintln!(
+                "[backbone]   write {}: {:.2}s (docID: {})",
+                call_id,
+                write_dur.as_secs_f64(),
+                doc_id
+            );
             acme_doc_ids.push(doc_id.to_string());
         }
     }
@@ -888,8 +927,9 @@ async fn secure_training_data_compartments() {
         "should have captured all transcript doc IDs"
     );
     eprintln!(
-        "[backbone] Step 16: TRAINING_SVC wrote {} transcripts",
-        acme_doc_ids.len()
+        "[backbone] Step 16: TRAINING_SVC wrote {} transcripts in {:.2}s",
+        acme_doc_ids.len(),
+        batch_start.elapsed().as_secs_f64()
     );
 
     // Step 16b. INFERENCE_SVC reads BEFORE being granted reader — denied.
@@ -906,7 +946,9 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Step 16b: INFERENCE_SVC denied before reader grant (sad path)");
 
     // Step 16c. Grant INFERENCE_SVC reader on each transcript document
+    let grant_start = Instant::now();
     for doc_id in &acme_doc_ids {
+        let t = Instant::now();
         hub_cli
             .set_relationship(
                 &acme_policy_id,
@@ -918,14 +960,24 @@ async fn secure_training_data_compartments() {
             .unwrap_or_else(|e| {
                 panic!("grant inference_svc reader on transcript {}: {}", doc_id, e)
             });
+        eprintln!(
+            "[backbone]   grant reader on {}: {:.2}s",
+            doc_id,
+            t.elapsed().as_secs_f64()
+        );
     }
     eprintln!(
-        "[backbone] Step 16c: INFERENCE_SVC granted reader on {} transcript documents",
-        acme_doc_ids.len()
+        "[backbone] Step 16c: INFERENCE_SVC granted reader on {} documents in {:.2}s",
+        acme_doc_ids.len(),
+        grant_start.elapsed().as_secs_f64()
     );
+
+    // Wait for ACP state to propagate via websocket before querying
+    wait_for_block_advance(&hub_state, 2, "Step 16d").await;
 
     // Step 17. INFERENCE_SVC reads back — sees transcripts (reader grant)
     let query = r#"query { Transcript { _docID call_id content customer } }"#;
+    let t = Instant::now();
     let query_body = acme_client
         .graphql(query, Some(&inference_svc.private_key_hex))
         .await
@@ -940,8 +992,9 @@ async fn secure_training_data_compartments() {
         "inference_svc should see exactly 3 transcripts (has reader grant)"
     );
     eprintln!(
-        "[backbone] Step 17: INFERENCE_SVC reads {} transcripts",
-        docs.len()
+        "[backbone] Step 17: INFERENCE_SVC reads {} transcripts in {:.2}s",
+        docs.len(),
+        t.elapsed().as_secs_f64()
     );
 
     // Step 18. INFERENCE_SVC attempts UPDATE — denied (reader only)
@@ -1055,19 +1108,28 @@ async fn secure_training_data_compartments() {
     ];
 
     let mut globex_doc_ids: Vec<String> = Vec::new();
+    let batch_start = Instant::now();
     for (tid, subject, body, priority) in &tickets {
         let mutation = format!(
             r#"mutation {{ create_SupportTicket(input: {{ ticket_id: "{}", subject: "{}", body: "{}", priority: "{}" }}) {{ _docID }} }}"#,
             tid, subject, body, priority
         );
+        let write_start = Instant::now();
         let result = globex_client
             .graphql(&mutation, Some(&globex_svc.private_key_hex))
             .await
             .unwrap_or_else(|e| panic!("write ticket {}: {}", tid, e));
+        let write_dur = write_start.elapsed();
         if let Some(doc_id) = result
             .pointer("/data/add_SupportTicket/0/_docID")
             .and_then(|v| v.as_str())
         {
+            eprintln!(
+                "[backbone]   write {}: {:.2}s (docID: {})",
+                tid,
+                write_dur.as_secs_f64(),
+                doc_id
+            );
             globex_doc_ids.push(doc_id.to_string());
         }
     }
@@ -1092,8 +1154,9 @@ async fn secure_training_data_compartments() {
         "globex_svc should see exactly 2 tickets (owner has read access)"
     );
     eprintln!(
-        "[backbone] Step 22: GLOBEX_SVC wrote {} tickets, reads back {}",
+        "[backbone] Step 22: GLOBEX_SVC wrote {} tickets in {:.2}s, reads back {}",
         tickets.len(),
+        batch_start.elapsed().as_secs_f64(),
         ticket_docs.len()
     );
 
@@ -1163,7 +1226,11 @@ async fn secure_training_data_compartments() {
         globex_doc_ids.len()
     );
 
+    // Wait for ACP grants to propagate
+    wait_for_block_advance(&hub_state, 2, "Step 25").await;
+
     // Step 26. AUDIT_SVC reads acme transcripts — succeeds
+    let t = Instant::now();
     let audit_acme = acme_client
         .graphql(
             r#"query { Transcript { _docID call_id content } }"#,
@@ -1181,11 +1248,13 @@ async fn secure_training_data_compartments() {
         "audit_svc should see exactly 3 acme transcripts"
     );
     eprintln!(
-        "[backbone] Step 26: AUDIT_SVC reads {} acme transcripts",
-        audit_acme_docs.len()
+        "[backbone] Step 26: AUDIT_SVC reads {} acme transcripts in {:.2}s",
+        audit_acme_docs.len(),
+        t.elapsed().as_secs_f64()
     );
 
     // Step 27. AUDIT_SVC reads globex tickets — succeeds
+    let t = Instant::now();
     let audit_globex = globex_client
         .graphql(
             r#"query { SupportTicket { _docID ticket_id subject } }"#,
@@ -1203,8 +1272,9 @@ async fn secure_training_data_compartments() {
         "audit_svc should see exactly 2 globex tickets"
     );
     eprintln!(
-        "[backbone] Step 27: AUDIT_SVC reads {} globex tickets",
-        audit_globex_docs.len()
+        "[backbone] Step 27: AUDIT_SVC reads {} globex tickets in {:.2}s",
+        audit_globex_docs.len(),
+        t.elapsed().as_secs_f64()
     );
 
     // Step 28. AUDIT_SVC attempts UPDATE — denied (reader only)
@@ -1259,6 +1329,9 @@ async fn secure_training_data_compartments() {
             });
     }
 
+    // Wait for revocation to propagate
+    wait_for_block_advance(&hub_state, 2, "Step 29").await;
+
     let revoked_acme = acme_client
         .graphql(
             r#"query { Transcript { _docID call_id } }"#,
@@ -1307,6 +1380,9 @@ async fn secure_training_data_compartments() {
         )
         .expect("grant new_training_svc writer on transcript collection");
 
+    // Wait for grant to propagate before writing
+    wait_for_block_advance(&hub_state, 2, "Step 30-grant").await;
+
     let new_key_write = r#"mutation {
         create_Transcript(input: {
             call_id: "call-004",
@@ -1316,10 +1392,15 @@ async fn secure_training_data_compartments() {
             _docID
         }
     }"#;
+    let t = Instant::now();
     let new_key_result = acme_client
         .graphql(new_key_write, Some(&new_training_svc.private_key_hex))
         .await
         .expect("new training_svc write");
+    eprintln!(
+        "[backbone]   new key write: {:.2}s",
+        t.elapsed().as_secs_f64()
+    );
 
     // Extract the new document's ID so we can test old-key denial against it.
     // The old key doesn't own this document, so after writer revocation it has no access.
@@ -1356,9 +1437,8 @@ async fn secure_training_data_compartments() {
         )
         .expect("revoke old training_svc writer on transcript collection");
 
-    // Wait for the light client to sync the new state root after deletion.
-    // The websocket header subscription needs time to deliver the new block.
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // Wait for revocation to propagate via websocket
+    wait_for_block_advance(&hub_state, 2, "Step 30-revoke").await;
 
     // Old training_svc tries to UPDATE the new document — should be denied.
     // The old key doesn't own this doc (new_training_svc does) and its writer
