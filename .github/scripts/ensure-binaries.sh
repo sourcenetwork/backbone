@@ -123,6 +123,11 @@ prune_old_versions() {
 }
 
 echo "=== Ensuring binary dependencies ==="
+if [[ -n "${GITHUB_PAT:-}" ]]; then
+    echo "Using GITHUB_PAT for private repo access"
+else
+    echo "No GITHUB_PAT set — using ambient git credentials"
+fi
 
 # Resolve commits
 DEFRA_COMMIT=$(resolve_commit "defradb.rs" "$DEFRA_REF")

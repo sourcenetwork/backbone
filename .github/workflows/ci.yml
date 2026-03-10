@@ -57,6 +57,8 @@ jobs:
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - name: Ensure binaries
         run: bash .github/scripts/ensure-binaries.sh
+        env:
+          GITHUB_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
       - name: Run hub light client tests
         run: |
           export PATH="$HOME/.sourcenetwork/bin:$PATH"
@@ -78,6 +80,8 @@ jobs:
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - name: Ensure binaries
         run: bash .github/scripts/ensure-binaries.sh
+        env:
+          GITHUB_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
       - name: Run full stack tests
         run: |
           export PATH="$HOME/.sourcenetwork/bin:$PATH"
