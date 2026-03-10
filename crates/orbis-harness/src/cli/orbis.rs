@@ -90,7 +90,11 @@ impl OrbisCliClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(eyre!("cli-tool info failed (exit {}): {}", output.status, stderr.trim()));
+            return Err(eyre!(
+                "cli-tool info failed (exit {}): {}",
+                output.status,
+                stderr.trim()
+            ));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -110,7 +114,10 @@ impl OrbisCliClient {
         }
 
         if peer_id.is_empty() {
-            return Err(eyre!("cli-tool info: could not parse peer_id from output: {}", stdout));
+            return Err(eyre!(
+                "cli-tool info: could not parse peer_id from output: {}",
+                stdout
+            ));
         }
 
         Ok(NodeInfoResult {
@@ -159,7 +166,10 @@ impl OrbisCliClient {
         }
 
         if session_id.is_empty() {
-            return Err(eyre!("cli-tool dkg: could not parse session_id from output: {}", stdout));
+            return Err(eyre!(
+                "cli-tool dkg: could not parse session_id from output: {}",
+                stdout
+            ));
         }
 
         Ok(DkgResult {
