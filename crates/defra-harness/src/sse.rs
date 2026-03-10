@@ -157,10 +157,7 @@ pub async fn wait_for_acp_invalidation(
         {
             let current = events.lock().unwrap();
             for ev in current.iter() {
-                if let Some(h) = ev
-                    .pointer("/data/height")
-                    .and_then(|v| v.as_u64())
-                {
+                if let Some(h) = ev.pointer("/data/height").and_then(|v| v.as_u64()) {
                     if h > min_height {
                         eprintln!(
                             "[backbone]   ACP cache invalidated at height {} (waited {:.2}s)",
