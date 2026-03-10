@@ -106,11 +106,11 @@ impl DefraClient {
         self.parse_query_output(&out)
     }
 
-    // ---- Collection operations ----
+    // ---- Document operations ----
 
-    /// Create a document via `client collection create --name <n> '<json>'`.
+    /// Create a document via `client document add --collection-name <n> '<json>'`.
     pub fn collection_create(&self, name: &str, doc: &str) -> Result<Value> {
-        let out = self.exec(&["client", "collection", "create", "--name", name, doc])?;
+        let out = self.exec(&["client", "document", "add", "--collection-name", name, doc])?;
         let trimmed = out.trim();
         if trimmed.is_empty() {
             return Ok(Value::Null);
@@ -118,19 +118,19 @@ impl DefraClient {
         serde_json::from_str(trimmed).wrap_err("failed to parse collection_create output")
     }
 
-    /// Get a document via `client collection get --name <n> <id>`.
+    /// Get a document via `client document get --collection-name <n> <id>`.
     pub fn collection_get(&self, name: &str, doc_id: &str) -> Result<Value> {
-        let out = self.exec(&["client", "collection", "get", "--name", name, doc_id])?;
+        let out = self.exec(&["client", "document", "get", "--collection-name", name, doc_id])?;
         serde_json::from_str(&out).wrap_err("failed to parse collection_get output")
     }
 
-    /// Delete a document via `client collection delete --name <n> --docID <id>`.
+    /// Delete a document via `client document delete --collection-name <n> --docID <id>`.
     pub fn collection_delete(&self, name: &str, doc_id: &str) -> Result<String> {
         self.exec(&[
             "client",
-            "collection",
+            "document",
             "delete",
-            "--name",
+            "--collection-name",
             name,
             "--docID",
             doc_id,
@@ -166,13 +166,13 @@ impl DefraClient {
         self.exec(&["client", "collection", "truncate", "--name", name])
     }
 
-    /// Update a document via `client collection update --name <n> --docID <id> --updater '<json>'`.
+    /// Update a document via `client document update --collection-name <n> --docID <id> --updater '<json>'`.
     pub fn collection_update(&self, name: &str, doc_id: &str, updater: &str) -> Result<String> {
         self.exec(&[
             "client",
-            "collection",
+            "document",
             "update",
-            "--name",
+            "--collection-name",
             name,
             "--docID",
             doc_id,
@@ -1039,7 +1039,7 @@ impl DefraClient {
     ) -> Result<Value> {
         let out = self.exec_with_identity(
             hex_key,
-            &["client", "collection", "create", "--name", name, doc],
+            &["client", "document", "add", "--collection-name", name, doc],
         )?;
         let trimmed = out.trim();
         if trimmed.is_empty() {
@@ -1058,9 +1058,9 @@ impl DefraClient {
             hex_key,
             &[
                 "client",
-                "collection",
+                "document",
                 "delete",
-                "--name",
+                "--collection-name",
                 name,
                 "--docID",
                 doc_id,
@@ -1079,9 +1079,9 @@ impl DefraClient {
             hex_key,
             &[
                 "client",
-                "collection",
+                "document",
                 "update",
-                "--name",
+                "--collection-name",
                 name,
                 "--docID",
                 doc_id,
