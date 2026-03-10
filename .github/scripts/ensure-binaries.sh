@@ -13,7 +13,7 @@ set -euo pipefail
 #   ORBIS_REF    — git ref for orbis-rs    (e.g. "jack/integration-testing")
 #
 # Optional:
-#   GITHUB_PAT   — PAT for private repo access (used in git URLs)
+#   PRIVATE_REPO_PAT   — PAT for private repo access (used in git URLs)
 #   CACHE_DIR    — override binary cache root (default: ~/.sourcenetwork/bin)
 #   SRC_DIR      — override source clone root (default: ~/.sourcenetwork/src)
 #   MAX_VERSIONS — versions to keep per component (default: 3)
@@ -26,8 +26,8 @@ mkdir -p "$CACHE_DIR" "$SRC_DIR"
 
 repo_url() {
     local repo=$1
-    if [[ -n "${GITHUB_PAT:-}" ]]; then
-        echo "https://${GITHUB_PAT}@github.com/sourcenetwork/${repo}.git"
+    if [[ -n "${PRIVATE_REPO_PAT:-}" ]]; then
+        echo "https://${PRIVATE_REPO_PAT}@github.com/sourcenetwork/${repo}.git"
     else
         echo "https://github.com/sourcenetwork/${repo}.git"
     fi
@@ -131,10 +131,10 @@ prune_old_versions() {
 }
 
 echo "=== Ensuring binary dependencies ==="
-if [[ -n "${GITHUB_PAT:-}" ]]; then
-    echo "Using GITHUB_PAT for private repo access"
+if [[ -n "${PRIVATE_REPO_PAT:-}" ]]; then
+    echo "Using PRIVATE_REPO_PAT for private repo access"
 else
-    echo "No GITHUB_PAT set — using ambient git credentials"
+    echo "No PRIVATE_REPO_PAT set — using ambient git credentials"
 fi
 
 # Resolve commits
