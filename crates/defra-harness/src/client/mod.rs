@@ -143,23 +143,17 @@ impl DefraClient {
         Self::parse_collection_list(&out)
     }
 
-    /// List document IDs via `client collection docIDs --name <n>`.
+    /// List document IDs via GraphQL query.
     ///
-    /// Both Go and Rust output line-separated `{"docID": "..."}` objects.
+    /// Go v1.0.0-rc1 removed `client collection docIDs`; both runtimes
+    /// now use a GraphQL query to enumerate documents.
     pub fn collection_doc_ids(&self, name: &str) -> Result<Vec<String>> {
-        let subcmd = divergences::doc_ids_subcommand(self.kind);
-        let out = self.exec(&["client", "collection", subcmd, "--name", name])?;
-        let trimmed = out.trim();
-
-        let doc_id_key = divergences::doc_id_key(self.kind);
+        let gql = format!("query {{ {} {{ _docID }} }}", name);
+        let data = self.query(&gql)?;
         let mut ids = Vec::new();
-        for line in trimmed.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Ok(obj) = serde_json::from_str::<Value>(line) {
-                if let Some(id) = obj.get(doc_id_key).and_then(|v| v.as_str()) {
+        if let Some(arr) = data.get(name).and_then(|v| v.as_array()) {
+            for doc in arr {
+                if let Some(id) = doc.get("_docID").and_then(|v| v.as_str()) {
                     ids.push(id.to_string());
                 }
             }
@@ -604,16 +598,16 @@ impl DefraClient {
     /// Add an encrypted index.
     ///
     /// DIVERGENCE:
-    /// - Rust: `client encrypted-index add <collection> <field>` (positional)
-    /// - Go:   `client encrypted-index add --collection <c> --field <f>` (flags)
+    /// - Rust: `client encrypted-index new <collection> <field>` (positional)
+    /// - Go:   `client encrypted-index new --collection <c> --field <f>` (flags)
     pub fn encrypted_index_add(&self, collection: &str, field: &str) -> Result<Value> {
         let out = if divergences::encrypted_index_uses_positional_args(self.kind) {
-            self.exec(&["client", "encrypted-index", "add", collection, field])?
+            self.exec(&["client", "encrypted-index", "new", collection, field])?
         } else {
             self.exec(&[
                 "client",
                 "encrypted-index",
-                "add",
+                "new",
                 "--collection",
                 collection,
                 "--field",
