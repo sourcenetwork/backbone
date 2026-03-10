@@ -25,7 +25,7 @@ impl Default for HealthCheckConfig {
 }
 
 fn check_node_health(cli: &OrbisCliClient, addr: &str) -> bool {
-    cli.query_node_info(addr).is_ok()
+    cli.is_healthy(addr)
 }
 
 /// Wait for all nodes to become healthy.
