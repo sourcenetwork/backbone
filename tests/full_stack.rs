@@ -476,10 +476,9 @@ fn bls_did_key_from_hex(public_key_hex: &str) -> String {
 /// - Websocket delivery latency (hub.rs → DefraDB subscriber)
 /// - Cache invalidation processing time
 /// - Module state root comparison + proof refetch
-async fn wait_for_acp_propagation(
-    hub_state: &hub_harness::observe::ClusterState,
-    label: &str,
-) {
+/// Wait for the chain to advance 2 blocks (ensures ACP tx is finalized).
+/// Used before Orbis writes where the signing nodes check ACP directly.
+async fn wait_for_block_finality(hub_state: &hub_harness::observe::ClusterState, label: &str) {
     let current = hub_state.node(0).effective_height();
     let target = current + 2;
     let t = Instant::now();
@@ -492,17 +491,118 @@ async fn wait_for_acp_propagation(
                 label, current, target, e
             )
         });
-    // Additional delay for websocket propagation to DefraDB's light client.
-    // The chain has advanced, but the WS subscription + cache invalidation
-    // may lag by 1-2 seconds.
-    tokio::time::sleep(Duration::from_secs(3)).await;
     eprintln!(
-        "[backbone]   {} ACP propagation: {:.2}s (height {}→{})",
+        "[backbone]   {} block finality: {:.2}s (height {}→{})",
         label,
         t.elapsed().as_secs_f64(),
         current,
         target
     );
+}
+
+/// Poll a DefraDB query until the array at `pointer` has `expected` elements.
+/// This tests the real end-to-end ACP propagation path: hub.rs → websocket →
+/// DefraDB light client cache invalidation → proof re-fetch → query succeeds.
+async fn poll_query_count(
+    client: &DefraHttpClient,
+    query: &str,
+    identity: &str,
+    pointer: &str,
+    expected: usize,
+    label: &str,
+) -> serde_json::Value {
+    let t = Instant::now();
+    let timeout = Duration::from_secs(30);
+    loop {
+        if let Ok(body) = client.graphql(query, Some(identity)).await {
+            let count = body
+                .pointer(pointer)
+                .and_then(|v| v.as_array())
+                .map_or(0, |a| a.len());
+            if count == expected {
+                eprintln!(
+                    "[backbone]   {} ACP synced in {:.2}s ({} docs)",
+                    label,
+                    t.elapsed().as_secs_f64(),
+                    count
+                );
+                return body;
+            }
+        }
+        if t.elapsed() > timeout {
+            panic!(
+                "{}: expected {} docs at {} but didn't get them within {}s",
+                label,
+                expected,
+                pointer,
+                timeout.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Poll a DefraDB query until it returns ACP denial.
+/// Used after revoking access to confirm DefraDB's light client has synced the revocation.
+async fn poll_query_denied(
+    client: &DefraHttpClient,
+    query: &str,
+    identity: &str,
+    data_path: &str,
+    label: &str,
+) {
+    let t = Instant::now();
+    let timeout = Duration::from_secs(30);
+    loop {
+        let result = client.graphql(query, Some(identity)).await;
+        if is_acp_denied(&result, data_path) {
+            eprintln!(
+                "[backbone]   {} ACP revocation synced in {:.2}s",
+                label,
+                t.elapsed().as_secs_f64()
+            );
+            return;
+        }
+        if t.elapsed() > timeout {
+            panic!(
+                "{}: ACP revocation didn't propagate within {}s",
+                label,
+                timeout.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Poll a DefraDB mutation until it returns write ACP denial.
+async fn poll_write_denied(
+    client: &DefraHttpClient,
+    mutation: &str,
+    identity: &str,
+    data_path: &str,
+    label: &str,
+) {
+    let t = Instant::now();
+    let timeout = Duration::from_secs(30);
+    loop {
+        let result = client.graphql(mutation, Some(identity)).await;
+        if is_write_acp_denied(&result, data_path) {
+            eprintln!(
+                "[backbone]   {} write revocation synced in {:.2}s",
+                label,
+                t.elapsed().as_secs_f64()
+            );
+            return;
+        }
+        if t.elapsed() > timeout {
+            panic!(
+                "{}: write ACP revocation didn't propagate within {}s",
+                label,
+                timeout.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 fn is_acp_denied(result: &Result<serde_json::Value, eyre::Report>, data_path: &str) -> bool {
@@ -548,9 +648,11 @@ async fn secure_training_data_compartments() {
     let run_dir =
         test_infra::TestRunDir::new(&base_dir, "BACKBONE_E2E_KEEP").expect("create run dir");
 
+    let test_start = Instant::now();
     let orbis_operator_keys = generate_identity_keys(&run_id, 3);
 
     // Step 1a. Start hub.rs single node (bulletin + ACP)
+    let t = Instant::now();
     eprintln!("[backbone] Step 1a: Starting hub.rs node...");
     let hubd_binary = hub_harness::resolve_binary().expect("resolve hubd binary");
     let hub_chain_id: u64 = 9003;
@@ -574,7 +676,10 @@ async fn secure_training_data_compartments() {
         .wait_for_height(3, Duration::from_secs(30))
         .await
         .expect("hub.rs should reach height 3");
-    eprintln!("[backbone] Hub.rs node ready");
+    eprintln!(
+        "[backbone] Hub.rs node ready in {:.2}s",
+        t.elapsed().as_secs_f64()
+    );
 
     let hub_cli = HubdCli::new(
         hubd_binary,
@@ -584,6 +689,7 @@ async fn secure_training_data_compartments() {
     );
 
     // Step 2. Start Orbis ring (T=2, N=3) with hub.rs for bulletin + ACP
+    let t = Instant::now();
     eprintln!("[backbone] Step 2: Starting Orbis ring (3 nodes, threshold 2)...");
     let ring = OrbisRing::builder()
         .nodes(3)
@@ -693,12 +799,14 @@ async fn secure_training_data_compartments() {
     let ring_pk_hex = ring_payload.ring_pk;
 
     eprintln!(
-        "[backbone] Ring ready. PK: {}..., ID: {}...",
+        "[backbone] Ring ready in {:.2}s. PK: {}..., ID: {}...",
+        t.elapsed().as_secs_f64(),
         &ring_pk_hex[..32.min(ring_pk_hex.len())],
         &ring_id[..16.min(ring_id.len())],
     );
 
     // Step 4. Create ring signing policy + register ring object
+    let t = Instant::now();
     eprintln!("[backbone] Step 4: Creating ring signing ACP policy...");
     let ring_policy_id = hub_cli
         .create_policy(RING_SIGNING_POLICY_YAML)
@@ -796,9 +904,13 @@ async fn secure_training_data_compartments() {
             &globex_defra_signer_did,
         )
         .expect("grant globex_defra_svc signer on ring");
-    eprintln!("[backbone] Step 10: DefraDB service accounts authorized as ring signers");
+    eprintln!(
+        "[backbone] Steps 4-10: Policy + identities setup in {:.2}s",
+        t.elapsed().as_secs_f64()
+    );
 
     // Step 11. Create acme ACP policy
+    let t = Instant::now();
     eprintln!("[backbone] Step 11: Creating acme ACP policy...");
     let acme_policy_id = hub_cli
         .create_policy(ACME_POLICY_YAML)
@@ -887,7 +999,10 @@ async fn secure_training_data_compartments() {
         .schema_add(&transcript_schema)
         .await
         .expect("add transcript schema");
-    eprintln!("[backbone] Step 15: Schema added: Transcript @policy");
+    eprintln!(
+        "[backbone] Steps 11-15: ACP policies + DefraDB setup in {:.2}s",
+        t.elapsed().as_secs_f64()
+    );
 
     // Step 16. TRAINING_SVC writes training transcripts
     let transcripts = vec![
@@ -981,29 +1096,25 @@ async fn secure_training_data_compartments() {
         grant_start.elapsed().as_secs_f64()
     );
 
-    // Wait for ACP state to propagate via websocket before querying
-    wait_for_acp_propagation(&hub_state, "Step 16d").await;
-
     // Step 17. INFERENCE_SVC reads back — sees transcripts (reader grant)
+    // Poll until DefraDB's ACP light client has synced the reader grants.
     let query = r#"query { Transcript { _docID call_id content customer } }"#;
-    let t = Instant::now();
-    let query_body = acme_client
-        .graphql(query, Some(&inference_svc.private_key_hex))
-        .await
-        .expect("inference_svc query transcripts");
+    let query_body = poll_query_count(
+        &acme_client,
+        query,
+        &inference_svc.private_key_hex,
+        "/data/Transcript",
+        3,
+        "Step 17",
+    )
+    .await;
     let docs = query_body
         .pointer("/data/Transcript")
         .and_then(|v| v.as_array())
         .expect("Transcript array");
-    assert_eq!(
-        docs.len(),
-        3,
-        "inference_svc should see exactly 3 transcripts (has reader grant)"
-    );
     eprintln!(
-        "[backbone] Step 17: INFERENCE_SVC reads {} transcripts in {:.2}s",
-        docs.len(),
-        t.elapsed().as_secs_f64()
+        "[backbone] Step 17: INFERENCE_SVC reads {} transcripts",
+        docs.len()
     );
 
     // Step 18. INFERENCE_SVC attempts UPDATE — denied (reader only)
@@ -1200,6 +1311,7 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] PASSED: TRAINING_SVC denied on globex tickets");
 
     // Step 25. Grant AUDIT_SVC reader on all docs in both compartments
+    let t = Instant::now();
     for doc_id in &acme_doc_ids {
         hub_cli
             .set_relationship(
@@ -1230,60 +1342,49 @@ async fn secure_training_data_compartments() {
             });
     }
     eprintln!(
-        "[backbone] Step 25: AUDIT_SVC granted reader on {} acme docs + {} globex docs",
+        "[backbone] Step 25: AUDIT_SVC granted reader on {} acme docs + {} globex docs in {:.2}s",
         acme_doc_ids.len(),
-        globex_doc_ids.len()
+        globex_doc_ids.len(),
+        t.elapsed().as_secs_f64()
     );
 
-    // Wait for ACP grants to propagate
-    wait_for_acp_propagation(&hub_state, "Step 25").await;
-
     // Step 26. AUDIT_SVC reads acme transcripts — succeeds
-    let t = Instant::now();
-    let audit_acme = acme_client
-        .graphql(
-            r#"query { Transcript { _docID call_id content } }"#,
-            Some(&audit_svc.private_key_hex),
-        )
-        .await
-        .expect("audit_svc query acme transcripts");
+    // Poll until DefraDB's light client has synced the reader grants.
+    let audit_acme = poll_query_count(
+        &acme_client,
+        r#"query { Transcript { _docID call_id content } }"#,
+        &audit_svc.private_key_hex,
+        "/data/Transcript",
+        3,
+        "Step 26",
+    )
+    .await;
     let audit_acme_docs = audit_acme
         .pointer("/data/Transcript")
         .and_then(|v| v.as_array())
         .expect("Transcript array for audit");
-    assert_eq!(
-        audit_acme_docs.len(),
-        3,
-        "audit_svc should see exactly 3 acme transcripts"
-    );
     eprintln!(
-        "[backbone] Step 26: AUDIT_SVC reads {} acme transcripts in {:.2}s",
-        audit_acme_docs.len(),
-        t.elapsed().as_secs_f64()
+        "[backbone] Step 26: AUDIT_SVC reads {} acme transcripts",
+        audit_acme_docs.len()
     );
 
     // Step 27. AUDIT_SVC reads globex tickets — succeeds
-    let t = Instant::now();
-    let audit_globex = globex_client
-        .graphql(
-            r#"query { SupportTicket { _docID ticket_id subject } }"#,
-            Some(&audit_svc.private_key_hex),
-        )
-        .await
-        .expect("audit_svc query globex tickets");
+    let audit_globex = poll_query_count(
+        &globex_client,
+        r#"query { SupportTicket { _docID ticket_id subject } }"#,
+        &audit_svc.private_key_hex,
+        "/data/SupportTicket",
+        2,
+        "Step 27",
+    )
+    .await;
     let audit_globex_docs = audit_globex
         .pointer("/data/SupportTicket")
         .and_then(|v| v.as_array())
         .expect("SupportTicket array for audit");
-    assert_eq!(
-        audit_globex_docs.len(),
-        2,
-        "audit_svc should see exactly 2 globex tickets"
-    );
     eprintln!(
-        "[backbone] Step 27: AUDIT_SVC reads {} globex tickets in {:.2}s",
-        audit_globex_docs.len(),
-        t.elapsed().as_secs_f64()
+        "[backbone] Step 27: AUDIT_SVC reads {} globex tickets",
+        audit_globex_docs.len()
     );
 
     // Step 28. AUDIT_SVC attempts UPDATE — denied (reader only)
@@ -1320,6 +1421,7 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Step 28b: AUDIT_SVC update denied on globex");
 
     // Step 29. Revoke AUDIT_SVC from acme, verify still reads globex
+    let t = Instant::now();
     eprintln!("[backbone] Step 29: Revoking AUDIT_SVC from acme...");
     for doc_id in &acme_doc_ids {
         hub_cli
@@ -1337,21 +1439,20 @@ async fn secure_training_data_compartments() {
                 )
             });
     }
-
-    // Wait for revocation to propagate
-    wait_for_acp_propagation(&hub_state, "Step 29").await;
-
-    let revoked_acme = acme_client
-        .graphql(
-            r#"query { Transcript { _docID call_id } }"#,
-            Some(&audit_svc.private_key_hex),
-        )
-        .await;
-
-    assert!(
-        is_acp_denied(&revoked_acme, "/data/Transcript"),
-        "Revoked AUDIT_SVC should not read acme transcripts"
+    eprintln!(
+        "[backbone]   Step 29 revocation txs: {:.2}s",
+        t.elapsed().as_secs_f64()
     );
+
+    // Poll until revocation propagates to DefraDB's light client
+    poll_query_denied(
+        &acme_client,
+        r#"query { Transcript { _docID call_id } }"#,
+        &audit_svc.private_key_hex,
+        "/data/Transcript",
+        "Step 29",
+    )
+    .await;
     eprintln!("[backbone] PASSED: Revoked AUDIT_SVC can no longer read acme transcripts");
 
     let still_globex = globex_client
@@ -1376,6 +1477,7 @@ async fn secure_training_data_compartments() {
     );
 
     // Step 30. Key rotation: new key works, old key denied
+    let step30_start = Instant::now();
     eprintln!("[backbone] Step 30: Rotating TRAINING_SVC key...");
     let new_training_svc = ServiceIdentity::new_file_keyring("training-svc-v2", run_dir.path());
 
@@ -1389,8 +1491,8 @@ async fn secure_training_data_compartments() {
         )
         .expect("grant new_training_svc writer on transcript collection");
 
-    // Wait for grant to propagate before writing
-    wait_for_acp_propagation(&hub_state, "Step 30-grant").await;
+    // Wait for block finality before writing (Orbis nodes check ACP directly)
+    wait_for_block_finality(&hub_state, "Step 30-grant").await;
 
     let new_key_write = r#"mutation {
         create_Transcript(input: {
@@ -1446,24 +1548,22 @@ async fn secure_training_data_compartments() {
         )
         .expect("revoke old training_svc writer on transcript collection");
 
-    // Wait for revocation to propagate via websocket
-    wait_for_acp_propagation(&hub_state, "Step 30-revoke").await;
-
     // Old training_svc tries to UPDATE the new document — should be denied.
     // The old key doesn't own this doc (new_training_svc does) and its writer
     // relationship was revoked, so no relation grants update access.
+    // Poll until DefraDB's light client has synced the revocation.
     let old_key_write = format!(
         r#"mutation {{ update_Transcript(docID: "{}", input: {{ content: "old-key-hack" }}) {{ _docID }} }}"#,
         new_doc_id
     );
-    let old_key_result = acme_client
-        .graphql(&old_key_write, Some(&training_svc.private_key_hex))
-        .await;
-
-    assert!(
-        is_write_acp_denied(&old_key_result, "/data/update_Transcript"),
-        "Old TRAINING_SVC should be denied after revocation"
-    );
+    poll_write_denied(
+        &acme_client,
+        &old_key_write,
+        &training_svc.private_key_hex,
+        "/data/update_Transcript",
+        "Step 30-revoke",
+    )
+    .await;
     eprintln!("[backbone] PASSED: Old TRAINING_SVC denied after revocation");
 
     let rotated_verify = acme_client
@@ -1491,9 +1591,13 @@ async fn secure_training_data_compartments() {
             .is_some_and(|a| !a.is_empty());
         assert!(found, "rotated training_svc transcript 2 should exist");
     }
-    eprintln!("[backbone] PASSED: Rotated TRAINING_SVC still works after old key revoked");
+    eprintln!(
+        "[backbone] Step 30: Key rotation complete in {:.2}s",
+        step30_start.elapsed().as_secs_f64()
+    );
 
     // Step 34. Start AcpLightClient
+    let t = Instant::now();
     eprintln!("[backbone] Step 34: Starting ACP light client...");
     let hub_rpc = hub_cluster.node(0).rpc_url();
     let hub_ws = hub_cluster.node(0).ws_url();
@@ -1602,11 +1706,18 @@ async fn secure_training_data_compartments() {
     hub_state
         .assert_no_errors()
         .expect("hub.rs cluster should have no unexpected errors");
+    eprintln!(
+        "[backbone] Steps 34-41: Light client verification in {:.2}s",
+        t.elapsed().as_secs_f64()
+    );
     eprintln!("[backbone] Hub.rs cluster health: no unexpected errors");
 
     drop(hub_cluster);
     drop(globex_defra);
     drop(acme_defra);
 
-    eprintln!("[backbone] All 41 steps passed.");
+    eprintln!(
+        "[backbone] All 41 steps passed in {:.2}s",
+        test_start.elapsed().as_secs_f64()
+    );
 }
