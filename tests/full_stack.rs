@@ -876,7 +876,7 @@ async fn secure_training_data_compartments() {
             .await
             .unwrap_or_else(|e| panic!("write transcript {}: {}", call_id, e));
         if let Some(doc_id) = result
-            .pointer("/data/create_Transcript/0/_docID")
+            .pointer("/data/add_Transcript/0/_docID")
             .and_then(|v| v.as_str())
         {
             acme_doc_ids.push(doc_id.to_string());
@@ -1065,7 +1065,7 @@ async fn secure_training_data_compartments() {
             .await
             .unwrap_or_else(|e| panic!("write ticket {}: {}", tid, e));
         if let Some(doc_id) = result
-            .pointer("/data/create_SupportTicket/0/_docID")
+            .pointer("/data/add_SupportTicket/0/_docID")
             .and_then(|v| v.as_str())
         {
             globex_doc_ids.push(doc_id.to_string());
@@ -1324,7 +1324,7 @@ async fn secure_training_data_compartments() {
     // Extract the new document's ID so we can test old-key denial against it.
     // The old key doesn't own this document, so after writer revocation it has no access.
     let new_doc_id = new_key_result
-        .pointer("/data/create_Transcript/0/_docID")
+        .pointer("/data/add_Transcript/0/_docID")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let new_doc_id = match new_doc_id {
@@ -1386,7 +1386,7 @@ async fn secure_training_data_compartments() {
         .expect("rotated training_svc should still work");
 
     let has_doc = rotated_verify
-        .pointer("/data/create_Transcript/0/_docID")
+        .pointer("/data/add_Transcript/0/_docID")
         .is_some();
     if !has_doc {
         let verify = acme_client

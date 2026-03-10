@@ -61,6 +61,13 @@ build_if_missing() {
     local cache_path="$CACHE_DIR/$repo/$commit"
     local src="$SRC_DIR/$repo"
 
+    # Build a features fingerprint from all specs
+    local features_fingerprint=""
+    for spec in "$@"; do
+        IFS=: read -r _pkg _binary _output features <<< "$spec"
+        features_fingerprint="${features_fingerprint}${features:-default};"
+    done
+
     local all_present=true
     for spec in "$@"; do
         IFS=: read -r _pkg binary output features <<< "$spec"
@@ -70,6 +77,22 @@ build_if_missing() {
             break
         fi
     done
+
+    # Check features match (rebuild if features changed)
+    if $all_present && [[ -f "$cache_path/.features" ]]; then
+        local cached_features
+        cached_features=$(cat "$cache_path/.features")
+        if [[ "$cached_features" != "$features_fingerprint" ]]; then
+            echo "Features changed for $repo@${commit:0:12}, rebuilding..."
+            all_present=false
+            rm -rf "$cache_path"
+        fi
+    elif $all_present && [[ ! -f "$cache_path/.features" ]]; then
+        # Old cache without features file — rebuild
+        echo "No features record for $repo@${commit:0:12}, rebuilding..."
+        all_present=false
+        rm -rf "$cache_path"
+    fi
 
     if $all_present; then
         echo "Cache hit: $repo@${commit:0:12}"
@@ -83,7 +106,7 @@ build_if_missing() {
             output="${output:-$binary}"
             local feat_args=()
             if [[ -n "${features:-}" ]]; then
-                feat_args=(--features "$features")
+                feat_args=(--no-default-features --features "$features")
             fi
             echo "  Building $output (cargo build -p $package ${feat_args[*]:-} --release)..."
             cargo build --manifest-path "$src/Cargo.toml" \
@@ -91,6 +114,7 @@ build_if_missing() {
             cp "$src/target/release/$binary" "$cache_path/$output"
             chmod +x "$cache_path/$output"
         done
+        echo "$features_fingerprint" > "$cache_path/.features"
         echo "  Built: $repo@${commit:0:12}"
     fi
 
@@ -137,7 +161,8 @@ ORBIS_COMMIT=$(resolve_commit "orbis-rs" "$ORBIS_REF")
 echo "orbis-rs: $ORBIS_REF → ${ORBIS_COMMIT:0:12}"
 
 build_if_missing "orbis-rs" "$ORBIS_REF" "$ORBIS_COMMIT" \
-    "orbis-node:orbis-node" "cli-tool:cli-tool"
+    "orbis-node:orbis-node::bls12-381,redb,bulletin-hubrs,iroh,authz-sourcehub" \
+    "cli-tool:cli-tool"
 
 prune_old_versions "orbis-rs"
 
