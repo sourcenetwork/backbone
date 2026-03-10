@@ -3,9 +3,9 @@ set -euo pipefail
 
 # Build and cache cross-repo binary dependencies for integration tests.
 #
-# Uses immutable commit-hash directories under ~/.sourcenetwork/bin/ so
-# multiple concurrent jobs can safely share the cache. Top-level symlinks
-# point to the active version.
+# Persistent local clones under ~/.sourcenetwork/src/ enable warm incremental
+# builds. Finished binaries go into immutable commit-hash directories under
+# ~/.sourcenetwork/bin/ with top-level symlinks for PATH consumption.
 #
 # Required env vars (set in ci.yml):
 #   DEFRA_REF    — git ref for defradb.rs  (e.g. "main")
@@ -13,15 +13,15 @@ set -euo pipefail
 #   ORBIS_REF    — git ref for orbis-rs    (e.g. "jack/integration-testing")
 #
 # Optional:
-#   CACHE_DIR    — override cache root (default: ~/.sourcenetwork/bin)
+#   CACHE_DIR    — override binary cache root (default: ~/.sourcenetwork/bin)
+#   SRC_DIR      — override source clone root (default: ~/.sourcenetwork/src)
 #   MAX_VERSIONS — versions to keep per component (default: 3)
 
 CACHE_DIR="${CACHE_DIR:-$HOME/.sourcenetwork/bin}"
+SRC_DIR="${SRC_DIR:-$HOME/.sourcenetwork/src}"
 MAX_VERSIONS="${MAX_VERSIONS:-3}"
-BUILD_DIR=$(mktemp -d)
-trap 'rm -rf "$BUILD_DIR"' EXIT
 
-mkdir -p "$CACHE_DIR"
+mkdir -p "$CACHE_DIR" "$SRC_DIR"
 
 resolve_commit() {
     local repo=$1 ref=$2
@@ -29,17 +29,34 @@ resolve_commit() {
         | head -1 | cut -f1
 }
 
+ensure_clone() {
+    local repo=$1 ref=$2 commit=$3
+    local src="$SRC_DIR/$repo"
+
+    if [[ -d "$src/.git" ]]; then
+        git -C "$src" fetch origin "$ref" --quiet
+    else
+        echo "  Cloning $repo..."
+        git clone "https://github.com/sourcenetwork/${repo}.git" "$src" --quiet
+    fi
+    git -C "$src" checkout "$commit" --quiet --force
+}
+
 build_if_missing() {
     local repo=$1 ref=$2 commit=$3
     shift 3
-    # Remaining args are "package:binary" pairs
+    # Remaining args are "package:binary" or "package:binary:output" specs.
+    # "output" is the filename in the cache dir (defaults to binary name).
+    # Use "package:binary:output:features" to pass --features to cargo build.
     local cache_path="$CACHE_DIR/$repo/$commit"
+    local src="$SRC_DIR/$repo"
 
-    # Check if all binaries exist
+    # Check if all binaries already exist
     local all_present=true
     for spec in "$@"; do
-        local binary="${spec#*:}"
-        if [[ ! -x "$cache_path/$binary" ]]; then
+        IFS=: read -r _pkg binary output features <<< "$spec"
+        output="${output:-$binary}"
+        if [[ ! -x "$cache_path/$output" ]]; then
             all_present=false
             break
         fi
@@ -49,33 +66,30 @@ build_if_missing() {
         echo "Cache hit: $repo@${commit:0:12}"
     else
         echo "Cache miss: $repo@${commit:0:12} — building..."
-        local src="$BUILD_DIR/$repo"
-        git clone --depth 1 --branch "$ref" \
-            "https://github.com/sourcenetwork/${repo}.git" "$src" 2>&1 | tail -1
+        ensure_clone "$repo" "$ref" "$commit"
 
         mkdir -p "$cache_path"
         for spec in "$@"; do
-            local package="${spec%%:*}"
-            local binary="${spec#*:}"
-            echo "  Building $binary (cargo install -p $package)..."
-            cargo install --git "https://github.com/sourcenetwork/${repo}.git" \
-                --branch "$ref" \
-                -p "$package" \
-                --root "$cache_path" \
-                --force 2>&1 | tail -5
-            # cargo install puts binaries in $root/bin/
-            if [[ -f "$cache_path/bin/$binary" ]]; then
-                mv "$cache_path/bin/$binary" "$cache_path/$binary"
+            IFS=: read -r package binary output features <<< "$spec"
+            output="${output:-$binary}"
+            local feat_args=()
+            if [[ -n "${features:-}" ]]; then
+                feat_args=(--features "$features")
             fi
+            echo "  Building $output (cargo build -p $package ${feat_args[*]:-} --release)..."
+            cargo build --manifest-path "$src/Cargo.toml" \
+                -p "$package" "${feat_args[@]}" --release 2>&1 | tail -5
+            cp "$src/target/release/$binary" "$cache_path/$output"
+            chmod +x "$cache_path/$output"
         done
-        rm -rf "$cache_path/bin" "$cache_path/.crates.toml" "$cache_path/.crates2.json"
         echo "  Built: $repo@${commit:0:12}"
     fi
 
     # Update top-level symlinks
     for spec in "$@"; do
-        local binary="${spec#*:}"
-        ln -sf "$cache_path/$binary" "$CACHE_DIR/$binary"
+        IFS=: read -r _pkg binary output _features <<< "$spec"
+        output="${output:-$binary}"
+        ln -sf "$cache_path/$output" "$CACHE_DIR/$output"
     done
 }
 
@@ -107,7 +121,10 @@ echo "hub.rs:     $HUBD_REF → ${HUBD_COMMIT:0:12}"
 echo "orbis-rs:   $ORBIS_REF → ${ORBIS_COMMIT:0:12}"
 
 # Build missing binaries
-build_if_missing "defradb.rs" "$DEFRA_REF" "$DEFRA_COMMIT" "cli:defra"
+# defra: standard binary + iroh variant (same repo/commit, different features)
+build_if_missing "defradb.rs" "$DEFRA_REF" "$DEFRA_COMMIT" \
+    "cli:defra" \
+    "cli:defra:defra-iroh:iroh"
 build_if_missing "hub.rs" "$HUBD_REF" "$HUBD_COMMIT" "hubd:hubd"
 build_if_missing "orbis-rs" "$ORBIS_REF" "$ORBIS_COMMIT" "orbis-node:orbis-node" "cli-tool:cli-tool"
 
@@ -119,7 +136,7 @@ prune_old_versions "orbis-rs"
 # Verify all binaries are available
 echo ""
 echo "=== Binary versions ==="
-for bin in defra hubd orbis-node cli-tool; do
+for bin in defra defra-iroh hubd orbis-node cli-tool; do
     if [[ -x "$CACHE_DIR/$bin" ]]; then
         echo "  $bin: $(readlink "$CACHE_DIR/$bin")"
     else
