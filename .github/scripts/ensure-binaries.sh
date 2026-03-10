@@ -3,20 +3,21 @@ set -euo pipefail
 
 # Build and cache cross-repo binary dependencies for integration tests.
 #
-# Persistent local clones under ~/.sourcenetwork/src/ enable warm incremental
-# builds. Finished binaries go into immutable commit-hash directories under
-# ~/.sourcenetwork/bin/ with top-level symlinks for PATH consumption.
+# defra and hub.rs binaries are built by their own CI and cached on the
+# studios. This script just verifies they exist (via symlinks).
+#
+# orbis-rs has no CI on the studios, so this script resolves the commit,
+# clones/fetches into a persistent local checkout, and does an incremental
+# cargo build --release.
 #
 # Required env vars (set in ci.yml):
-#   DEFRA_REF    — git ref for defradb.rs  (e.g. "main")
-#   HUBD_REF     — git ref for hub.rs      (e.g. "main")
 #   ORBIS_REF    — git ref for orbis-rs    (e.g. "jack/integration-testing")
 #
 # Optional:
-#   PRIVATE_REPO_PAT   — PAT for private repo access (used in git URLs)
-#   CACHE_DIR    — override binary cache root (default: ~/.sourcenetwork/bin)
-#   SRC_DIR      — override source clone root (default: ~/.sourcenetwork/src)
-#   MAX_VERSIONS — versions to keep per component (default: 3)
+#   PRIVATE_REPO_PAT — PAT for private repo access (used in git URLs)
+#   CACHE_DIR        — override binary cache root (default: ~/.sourcenetwork/bin)
+#   SRC_DIR          — override source clone root (default: ~/.sourcenetwork/src)
+#   MAX_VERSIONS     — versions to keep per component (default: 3)
 
 CACHE_DIR="${CACHE_DIR:-$HOME/.sourcenetwork/bin}"
 SRC_DIR="${SRC_DIR:-$HOME/.sourcenetwork/src}"
@@ -35,20 +36,7 @@ repo_url() {
 
 resolve_commit() {
     local repo=$1 ref=$2
-    local url
-    url=$(repo_url "$repo")
-
-    # Try authenticated URL first, fall back to git config insteadOf
-    local result
-    result=$(git ls-remote "$url" "$ref" 2>&1)
-    if [[ $? -ne 0 ]]; then
-        echo "  Direct URL failed for $repo, trying via gitconfig..." >&2
-        result=$(git ls-remote "https://github.com/sourcenetwork/${repo}.git" "$ref" 2>&1) || {
-            echo "  git ls-remote failed for $repo: $result" >&2
-            return 1
-        }
-    fi
-    echo "$result" | head -1 | cut -f1
+    git ls-remote "$(repo_url "$repo")" "$ref" | head -1 | cut -f1
 }
 
 ensure_clone() {
@@ -70,13 +58,9 @@ ensure_clone() {
 build_if_missing() {
     local repo=$1 ref=$2 commit=$3
     shift 3
-    # Remaining args are "package:binary" or "package:binary:output" specs.
-    # "output" is the filename in the cache dir (defaults to binary name).
-    # Use "package:binary:output:features" to pass --features to cargo build.
     local cache_path="$CACHE_DIR/$repo/$commit"
     local src="$SRC_DIR/$repo"
 
-    # Check if all binaries already exist
     local all_present=true
     for spec in "$@"; do
         IFS=: read -r _pkg binary output features <<< "$spec"
@@ -110,7 +94,6 @@ build_if_missing() {
         echo "  Built: $repo@${commit:0:12}"
     fi
 
-    # Update top-level symlinks
     for spec in "$@"; do
         IFS=: read -r _pkg binary output _features <<< "$spec"
         output="${output:-$binary}"
@@ -135,35 +118,30 @@ prune_old_versions() {
 }
 
 echo "=== Ensuring binary dependencies ==="
-if [[ -n "${PRIVATE_REPO_PAT:-}" ]]; then
-    echo "Using PRIVATE_REPO_PAT for private repo access"
-else
-    echo "No PRIVATE_REPO_PAT set — using ambient git credentials"
-fi
 
-# Resolve commits
-DEFRA_COMMIT=$(resolve_commit "defradb.rs" "$DEFRA_REF")
-HUBD_COMMIT=$(resolve_commit "hub.rs" "$HUBD_REF")
+# defra and hub.rs: binaries built by their own CI, just verify symlinks exist
+echo "--- defra/hub.rs (pre-built by their CI) ---"
+for bin in defra defra-iroh hubd; do
+    if [[ -x "$CACHE_DIR/$bin" ]]; then
+        echo "  $bin: $(readlink "$CACHE_DIR/$bin")"
+    else
+        echo "  ERROR: $bin not found in $CACHE_DIR" >&2
+        echo "  defra and hub.rs CI must run first to populate the binary cache." >&2
+        exit 1
+    fi
+done
+
+# orbis-rs: no CI on studios, build here
+echo "--- orbis-rs (built by ensure-binaries) ---"
 ORBIS_COMMIT=$(resolve_commit "orbis-rs" "$ORBIS_REF")
+echo "orbis-rs: $ORBIS_REF → ${ORBIS_COMMIT:0:12}"
 
-echo "defradb.rs: $DEFRA_REF → ${DEFRA_COMMIT:0:12}"
-echo "hub.rs:     $HUBD_REF → ${HUBD_COMMIT:0:12}"
-echo "orbis-rs:   $ORBIS_REF → ${ORBIS_COMMIT:0:12}"
+build_if_missing "orbis-rs" "$ORBIS_REF" "$ORBIS_COMMIT" \
+    "orbis-node:orbis-node" "cli-tool:cli-tool"
 
-# Build missing binaries
-# defra: standard binary + iroh variant (same repo/commit, different features)
-build_if_missing "defradb.rs" "$DEFRA_REF" "$DEFRA_COMMIT" \
-    "cli:defra" \
-    "cli:defra:defra-iroh:iroh"
-build_if_missing "hub.rs" "$HUBD_REF" "$HUBD_COMMIT" "hubd:hubd"
-build_if_missing "orbis-rs" "$ORBIS_REF" "$ORBIS_COMMIT" "orbis-node:orbis-node" "cli-tool:cli-tool"
-
-# Prune old versions
-prune_old_versions "defradb.rs"
-prune_old_versions "hub.rs"
 prune_old_versions "orbis-rs"
 
-# Verify all binaries are available
+# Final verification
 echo ""
 echo "=== Binary versions ==="
 for bin in defra defra-iroh hubd orbis-node cli-tool; do
@@ -174,6 +152,3 @@ for bin in defra defra-iroh hubd orbis-node cli-tool; do
         exit 1
     fi
 done
-
-echo ""
-echo "Add to PATH: export PATH=\"$CACHE_DIR:\$PATH\""
