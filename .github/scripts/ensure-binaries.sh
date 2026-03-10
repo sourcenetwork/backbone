@@ -37,13 +37,17 @@ resolve_commit() {
     local repo=$1 ref=$2
     local url
     url=$(repo_url "$repo")
-    # Debug: show URL structure (PAT is masked by CI)
-    echo "  Resolving $repo @ $ref via ${url%%@*}@..." >&2
+
+    # Try authenticated URL first, fall back to git config insteadOf
     local result
-    result=$(git ls-remote "$url" "$ref" 2>&1) || {
-        echo "  git ls-remote failed: $result" >&2
-        return 1
-    }
+    result=$(git ls-remote "$url" "$ref" 2>&1)
+    if [[ $? -ne 0 ]]; then
+        echo "  Direct URL failed for $repo, trying via gitconfig..." >&2
+        result=$(git ls-remote "https://github.com/sourcenetwork/${repo}.git" "$ref" 2>&1) || {
+            echo "  git ls-remote failed for $repo: $result" >&2
+            return 1
+        }
+    fi
     echo "$result" | head -1 | cut -f1
 }
 
