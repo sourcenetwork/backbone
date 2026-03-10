@@ -229,7 +229,7 @@ impl DefraClient {
         unique: bool,
         use_flag: bool,
     ) -> Result<String> {
-        let mut args = vec!["client", "index", "create"];
+        let mut args = vec!["client", "index", "new"];
         if use_flag {
             args.push("--collection");
         }
@@ -285,13 +285,13 @@ impl DefraClient {
 
     /// Create a transaction via `client tx create`.
     pub fn tx_create(&self) -> Result<String> {
-        let out = self.exec(&["client", "tx", "create"])?;
+        let out = self.exec(&["client", "tx", "new"])?;
         Self::parse_tx_id(&out)
     }
 
-    /// Create a concurrent transaction via `client tx create --concurrent`.
+    /// Create a concurrent transaction via `client tx new --concurrent`.
     pub fn tx_create_concurrent(&self) -> Result<String> {
-        let out = self.exec(&["client", "tx", "create", "--concurrent"])?;
+        let out = self.exec(&["client", "tx", "new", "--concurrent"])?;
         Self::parse_tx_id(&out)
     }
 
@@ -1120,7 +1120,7 @@ impl DefraClient {
     ) -> Result<Value> {
         let fields_csv = fields.join(",");
         let use_flag = !divergences::index_uses_positional_args(self.kind);
-        let mut args = vec!["client", "index", "create"];
+        let mut args = vec!["client", "index", "new"];
         if use_flag {
             args.push("--collection");
         }
