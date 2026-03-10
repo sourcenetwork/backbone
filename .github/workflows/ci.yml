@@ -12,6 +12,7 @@ env:
   HUBD_REF: main
   ORBIS_REF: jack/integration-testing
   CARGO_TERM_COLOR: always
+  PROTOC: /opt/homebrew/bin/protoc
 
 jobs:
   fmt:
