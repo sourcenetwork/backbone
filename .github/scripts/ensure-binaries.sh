@@ -87,7 +87,7 @@ build_if_missing() {
             fi
             echo "  Building $output (cargo build -p $package ${feat_args[*]:-} --release)..."
             cargo build --manifest-path "$src/Cargo.toml" \
-                -p "$package" "${feat_args[@]}" --release 2>&1 | tail -5
+                -p "$package" ${feat_args[@]+"${feat_args[@]}"} --release 2>&1 | tail -5
             cp "$src/target/release/$binary" "$cache_path/$output"
             chmod +x "$cache_path/$output"
         done
