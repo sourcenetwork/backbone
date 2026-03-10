@@ -35,8 +35,16 @@ repo_url() {
 
 resolve_commit() {
     local repo=$1 ref=$2
-    git ls-remote "$(repo_url "$repo")" "$ref" \
-        | head -1 | cut -f1
+    local url
+    url=$(repo_url "$repo")
+    # Debug: show URL structure (PAT is masked by CI)
+    echo "  Resolving $repo @ $ref via ${url%%@*}@..." >&2
+    local result
+    result=$(git ls-remote "$url" "$ref" 2>&1) || {
+        echo "  git ls-remote failed: $result" >&2
+        return 1
+    }
+    echo "$result" | head -1 | cut -f1
 }
 
 ensure_clone() {
