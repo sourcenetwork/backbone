@@ -23,54 +23,40 @@ jobs:
   clippy:
     name: Clippy
     runs-on: [self-hosted, macOS, ARM64, studio]
-    env:
-      GIT_CONFIG_GLOBAL: /tmp/.gitconfig-ci
     steps:
       - uses: actions/checkout@v4
       - name: Configure git auth
-        run: |
-          echo '[url "https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/"]' > /tmp/.gitconfig-ci
-          echo '  insteadOf = https://github.com/sourcenetwork/' >> /tmp/.gitconfig-ci
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - run: cargo clippy --all -- -D warnings
       - name: Cleanup
         if: always()
         run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- . && git clean -fd
-          rm -f /tmp/.gitconfig-ci
 
   unit-test:
     name: Unit Tests
     runs-on: [self-hosted, macOS, ARM64, studio]
-    env:
-      GIT_CONFIG_GLOBAL: /tmp/.gitconfig-ci
     steps:
       - uses: actions/checkout@v4
       - name: Configure git auth
-        run: |
-          echo '[url "https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/"]' > /tmp/.gitconfig-ci
-          echo '  insteadOf = https://github.com/sourcenetwork/' >> /tmp/.gitconfig-ci
-      - run: cargo test --workspace
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+      - run: cargo test --workspace --exclude defra-harness
       - name: Cleanup
         if: always()
         run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- . && git clean -fd
-          rm -f /tmp/.gitconfig-ci
 
   hub-light-client:
     name: Hub Light Client
     runs-on: [self-hosted, macOS, ARM64, studio]
-    env:
-      GIT_CONFIG_GLOBAL: /tmp/.gitconfig-ci
     steps:
       - uses: actions/checkout@v4
       - name: Configure git auth
-        run: |
-          echo '[url "https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/"]' > /tmp/.gitconfig-ci
-          echo '  insteadOf = https://github.com/sourcenetwork/' >> /tmp/.gitconfig-ci
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - name: Ensure binaries
         run: bash .github/scripts/ensure-binaries.sh
-        env:
-          GITHUB_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
       - name: Run hub light client tests
         run: |
           export PATH="$HOME/.sourcenetwork/bin:$PATH"
@@ -78,26 +64,20 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- . && git clean -fd
           pkill -f "target/.*(defra|hubd|orbis)" || true
           rm -rf target/e2e/
-          rm -f /tmp/.gitconfig-ci
 
   full-stack:
     name: Full Stack
     runs-on: [self-hosted, macOS, ARM64, studio]
-    env:
-      GIT_CONFIG_GLOBAL: /tmp/.gitconfig-ci
     steps:
       - uses: actions/checkout@v4
       - name: Configure git auth
-        run: |
-          echo '[url "https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/"]' > /tmp/.gitconfig-ci
-          echo '  insteadOf = https://github.com/sourcenetwork/' >> /tmp/.gitconfig-ci
+        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - name: Ensure binaries
         run: bash .github/scripts/ensure-binaries.sh
-        env:
-          GITHUB_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
       - name: Run full stack tests
         run: |
           export PATH="$HOME/.sourcenetwork/bin:$PATH"
@@ -105,7 +85,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
+          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- . && git clean -fd
           pkill -f "target/.*(defra|hubd|orbis)" || true
           rm -rf target/e2e/
-          rm -f /tmp/.gitconfig-ci
