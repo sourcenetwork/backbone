@@ -145,9 +145,43 @@ impl DefraHttpClient {
         Ok(())
     }
 
+    /// Fetch ACP light client status from DefraDB.
+    ///
+    /// GET /api/v0/acp/status — returns height, module_state_root,
+    /// cache_entries, last_invalidation_height, connected.
+    pub async fn acp_status(&self) -> Result<AcpLightClientStatus> {
+        let url = format!("{}/api/v0/acp/status", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| eyre!("acp status request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(eyre!("acp status HTTP {}: {}", status, body));
+        }
+
+        resp.json()
+            .await
+            .map_err(|e| eyre!("failed to parse acp status response: {}", e))
+    }
+
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
+}
+
+/// ACP light client status from DefraDB's `/api/v0/acp/status` endpoint.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AcpLightClientStatus {
+    pub height: u64,
+    pub module_state_root: String,
+    pub cache_entries: usize,
+    pub last_invalidation_height: u64,
+    pub connected: bool,
 }
 
 #[cfg(test)]

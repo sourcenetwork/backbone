@@ -16,6 +16,7 @@ use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 
 use defra_harness::node::RustNode;
+use defra_harness::sse::{open_acp_events_sse, wait_for_acp_invalidation};
 use orbis_harness::cli::signer_did_for_pk;
 use orbis_harness::cli::types::RingPayload;
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
@@ -990,6 +991,7 @@ async fn secure_training_data_compartments() {
 
     // Step 15. Deploy Transcript schema with @policy
     let acme_client = DefraHttpClient::new(&acme_defra.api_url);
+    let (_acme_acp_sse, acme_acp_events) = open_acp_events_sse(&acme_defra.api_url).await;
 
     let transcript_schema = format!(
         r#"type Transcript @policy(id: "{}", resource: "transcript") {{ call_id: String  content: String  customer: String }}"#,
@@ -1070,6 +1072,11 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Step 16b: INFERENCE_SVC denied before reader grant (sad path)");
 
     // Step 16c. Grant INFERENCE_SVC reader on each transcript document
+    let acme_height_before_grants = acme_client
+        .acp_status()
+        .await
+        .map(|s| s.height)
+        .unwrap_or(0);
     let grant_start = Instant::now();
     for doc_id in &acme_doc_ids {
         let t = Instant::now();
@@ -1097,7 +1104,13 @@ async fn secure_training_data_compartments() {
     );
 
     // Step 17. INFERENCE_SVC reads back — sees transcripts (reader grant)
-    // Poll until DefraDB's ACP light client has synced the reader grants.
+    // Wait for DefraDB's ACP light client to invalidate cache after the grants.
+    wait_for_acp_invalidation(
+        &acme_acp_events,
+        acme_height_before_grants,
+        Duration::from_secs(30),
+    )
+    .await;
     let query = r#"query { Transcript { _docID call_id content customer } }"#;
     let query_body = poll_query_count(
         &acme_client,
@@ -1200,6 +1213,7 @@ async fn secure_training_data_compartments() {
 
     // Step 21. Deploy SupportTicket schema with @policy
     let globex_client = DefraHttpClient::new(&globex_defra.api_url);
+    let (_globex_acp_sse, globex_acp_events) = open_acp_events_sse(&globex_defra.api_url).await;
 
     let ticket_schema = format!(
         r#"type SupportTicket @policy(id: "{}", resource: "ticket") {{ ticket_id: String  subject: String  body: String  priority: String }}"#,
@@ -1311,6 +1325,16 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] PASSED: TRAINING_SVC denied on globex tickets");
 
     // Step 25. Grant AUDIT_SVC reader on all docs in both compartments
+    let acme_height_before_audit = acme_client
+        .acp_status()
+        .await
+        .map(|s| s.height)
+        .unwrap_or(0);
+    let globex_height_before_audit = globex_client
+        .acp_status()
+        .await
+        .map(|s| s.height)
+        .unwrap_or(0);
     let t = Instant::now();
     for doc_id in &acme_doc_ids {
         hub_cli
@@ -1348,8 +1372,21 @@ async fn secure_training_data_compartments() {
         t.elapsed().as_secs_f64()
     );
 
+    // Wait for both DefraDB nodes to invalidate ACP caches after the grants.
+    wait_for_acp_invalidation(
+        &acme_acp_events,
+        acme_height_before_audit,
+        Duration::from_secs(30),
+    )
+    .await;
+    wait_for_acp_invalidation(
+        &globex_acp_events,
+        globex_height_before_audit,
+        Duration::from_secs(30),
+    )
+    .await;
+
     // Step 26. AUDIT_SVC reads acme transcripts — succeeds
-    // Poll until DefraDB's light client has synced the reader grants.
     let audit_acme = poll_query_count(
         &acme_client,
         r#"query { Transcript { _docID call_id content } }"#,
@@ -1421,6 +1458,11 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Step 28b: AUDIT_SVC update denied on globex");
 
     // Step 29. Revoke AUDIT_SVC from acme, verify still reads globex
+    let acme_height_before_revoke = acme_client
+        .acp_status()
+        .await
+        .map(|s| s.height)
+        .unwrap_or(0);
     let t = Instant::now();
     eprintln!("[backbone] Step 29: Revoking AUDIT_SVC from acme...");
     for doc_id in &acme_doc_ids {
@@ -1444,7 +1486,13 @@ async fn secure_training_data_compartments() {
         t.elapsed().as_secs_f64()
     );
 
-    // Poll until revocation propagates to DefraDB's light client
+    // Wait for cache invalidation, then verify revocation took effect
+    wait_for_acp_invalidation(
+        &acme_acp_events,
+        acme_height_before_revoke,
+        Duration::from_secs(30),
+    )
+    .await;
     poll_query_denied(
         &acme_client,
         r#"query { Transcript { _docID call_id } }"#,
@@ -1538,6 +1586,11 @@ async fn secure_training_data_compartments() {
     };
     eprintln!("[backbone] PASSED: New TRAINING_SVC writes successfully");
 
+    let acme_height_before_key_revoke = acme_client
+        .acp_status()
+        .await
+        .map(|s| s.height)
+        .unwrap_or(0);
     hub_cli
         .delete_relationship(
             &acme_policy_id,
@@ -1548,10 +1601,13 @@ async fn secure_training_data_compartments() {
         )
         .expect("revoke old training_svc writer on transcript collection");
 
-    // Old training_svc tries to UPDATE the new document — should be denied.
-    // The old key doesn't own this doc (new_training_svc does) and its writer
-    // relationship was revoked, so no relation grants update access.
-    // Poll until DefraDB's light client has synced the revocation.
+    // Wait for cache invalidation, then verify old key is denied.
+    wait_for_acp_invalidation(
+        &acme_acp_events,
+        acme_height_before_key_revoke,
+        Duration::from_secs(30),
+    )
+    .await;
     let old_key_write = format!(
         r#"mutation {{ update_Transcript(docID: "{}", input: {{ content: "old-key-hack" }}) {{ _docID }} }}"#,
         new_doc_id

@@ -133,3 +133,52 @@ pub async fn wait_for_merge_events(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// Open an SSE connection to `/api/v0/events?event=acp-cache-invalidated`.
+///
+/// Subscribes to ACP cache invalidation events emitted when the light client
+/// detects a module state root change and invalidates stale cache entries.
+pub async fn open_acp_events_sse(api_url: &str) -> (JoinHandle<()>, Arc<Mutex<Vec<Value>>>) {
+    open_events_sse(api_url, "acp-cache-invalidated").await
+}
+
+/// Wait until an `acp-cache-invalidated` event arrives with `height > min_height`.
+///
+/// Used after hub.rs ACP mutations (set_relationship, register_object) to wait
+/// for DefraDB's light client to pick up the state root change and invalidate
+/// its cache, so subsequent queries reflect the new permissions.
+pub async fn wait_for_acp_invalidation(
+    events: &Arc<Mutex<Vec<Value>>>,
+    min_height: u64,
+    timeout: Duration,
+) {
+    let start = tokio::time::Instant::now();
+    loop {
+        {
+            let current = events.lock().unwrap();
+            for ev in current.iter() {
+                if let Some(h) = ev
+                    .pointer("/data/height")
+                    .and_then(|v| v.as_u64())
+                {
+                    if h > min_height {
+                        eprintln!(
+                            "[backbone]   ACP cache invalidated at height {} (waited {:.2}s)",
+                            h,
+                            start.elapsed().as_secs_f64()
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        if start.elapsed() >= timeout {
+            let current = events.lock().unwrap().clone();
+            panic!(
+                "timed out waiting for ACP cache invalidation above height {} after {:?} (events: {:?})",
+                min_height, timeout, current
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
