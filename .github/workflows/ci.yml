@@ -45,7 +45,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          clean: false
       - name: Configure git auth
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - run: cargo test --workspace --exclude defra-harness
@@ -53,6 +52,31 @@ jobs:
         run: |
           cargo test --test hub_light_client --no-run
           cargo test --test full_stack --no-run
+      - name: Stage integration test binaries
+        run: |
+          mkdir -p ci-artifacts
+          find_test_bin() {
+            local prefix="$1"
+            local candidate
+            for candidate in $(ls -t target/debug/deps/${prefix}-* 2>/dev/null); do
+              if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+                echo "$candidate"
+                return 0
+              fi
+            done
+            echo "missing executable for ${prefix}" >&2
+            return 1
+          }
+
+          cp "$(find_test_bin hub_light_client)" ci-artifacts/hub_light_client
+          cp "$(find_test_bin full_stack)" ci-artifacts/full_stack
+          chmod +x ci-artifacts/hub_light_client ci-artifacts/full_stack
+      - name: Upload integration test binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-binaries
+          path: ci-artifacts/
+          if-no-files-found: error
       - name: Cleanup
         if: always()
         run: |
@@ -67,9 +91,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          clean: false
       - name: Configure git auth
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+      - name: Download integration test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: integration-test-binaries
+          path: ci-artifacts
       - name: Ensure binaries
         run: bash .github/scripts/ensure-binaries.sh
         env:
@@ -77,7 +105,8 @@ jobs:
       - name: Run hub light client tests
         run: |
           export PATH="$HOME/.sourcenetwork/bin:$PATH"
-          cargo test --test hub_light_client -- --ignored --nocapture
+          chmod +x ci-artifacts/hub_light_client
+          ./ci-artifacts/hub_light_client --ignored --nocapture
       - name: Cleanup
         if: always()
         run: |
@@ -94,9 +123,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          clean: false
       - name: Configure git auth
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+      - name: Download integration test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: integration-test-binaries
+          path: ci-artifacts
       - name: Ensure binaries
         run: bash .github/scripts/ensure-binaries.sh
         env:
@@ -104,7 +137,8 @@ jobs:
       - name: Run full stack tests
         run: |
           export PATH="$HOME/.sourcenetwork/bin:$PATH"
-          cargo test --test full_stack -- --ignored --nocapture
+          chmod +x ci-artifacts/full_stack
+          ./ci-artifacts/full_stack --ignored --nocapture
       - name: Cleanup
         if: always()
         run: |
