@@ -908,6 +908,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-signer",
  "alloy-signer-local",
+ "alloy-sol-types",
  "bs58",
  "defra-harness",
  "eyre",

@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 
 use alloy_consensus::{SignableTransaction, TxLegacy};
 use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{TxKind, U256};
+use alloy_primitives::{Address, Bytes, FixedBytes, TxKind, U256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
+use alloy_sol_types::{sol, SolCall};
 
 use defra_harness::node::RustNode;
 use defra_harness::sse::{open_acp_events_sse, wait_for_acp_invalidation};
@@ -128,6 +129,45 @@ const BULLETIN_RING_NAMESPACE: &str = "orbis";
 
 const HARDHAT_KEY_0: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const HARDHAT_KEY_1: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const ACP_PRECOMPILE_ADDRESS: &str = "0x0000000000000000000000000000000000000810";
+const HUB_EVM_GAS_PRICE: u128 = 1_000_000_000;
+const HUB_EVM_GAS_LIMIT: u64 = 5_000_000;
+
+sol! {
+    interface IAcpHarness {
+        function setRelationship(
+            bytes32 policyId,
+            string resource,
+            string objectId,
+            string relation,
+            string actor
+        ) external returns (bool recordExisted, bytes record);
+
+        function deleteRelationship(
+            bytes32 policyId,
+            string resource,
+            string objectId,
+            string relation,
+            string actor
+        ) external returns (bool recordFound);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AcpRelationshipTxKind {
+    Set,
+    Delete,
+}
+
+#[derive(Clone, Copy)]
+struct AcpRelationshipTx<'a> {
+    kind: AcpRelationshipTxKind,
+    policy_id: &'a str,
+    resource: &'a str,
+    object_id: &'a str,
+    relation: &'a str,
+    actor: &'a str,
+}
 
 struct HubdCli {
     binary: PathBuf,
@@ -269,15 +309,73 @@ impl HubdCli {
     fn fund_evm_address(&self, to_address: &str, value_wei: &str) -> eyre::Result<String> {
         let nonce = self.get_evm_nonce(HARDHAT_KEY_1)?;
         let raw_tx = sign_eth_transfer(HARDHAT_KEY_1, to_address, value_wei, nonce, self.chain_id);
+        let tx_hash = self.send_raw_evm_tx(&raw_tx)?;
+        self.wait_for_tx_receipt(&tx_hash)?;
+        Ok(tx_hash.to_string())
+    }
+
+    fn send_raw_evm_tx(&self, raw_tx: &[u8]) -> eyre::Result<String> {
         let result = self.exec(&["tx", "send-raw", &hex::encode(raw_tx)])?;
         let json: serde_json::Value = serde_json::from_str(result.trim())
             .map_err(|e| eyre::eyre!("parse send-raw response: {}", e))?;
-        let tx_hash = json
-            .get("tx_hash")
+        json.get("tx_hash")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| eyre::eyre!("no tx_hash in send-raw response: {}", result))?;
-        self.wait_for_tx_receipt(tx_hash)?;
-        Ok(result)
+            .ok_or_else(|| eyre::eyre!("no tx_hash in send-raw response: {}", result))
+            .map(|tx_hash| tx_hash.to_string())
+    }
+
+    fn submit_set_relationship_raw_with_nonce(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        actor: &str,
+        nonce: u64,
+    ) -> eyre::Result<String> {
+        let calldata = IAcpHarness::setRelationshipCall {
+            policyId: parse_policy_id_bytes32(policy_id)?,
+            resource: resource.to_string(),
+            objectId: object_id.to_string(),
+            relation: relation.to_string(),
+            actor: actor.to_string(),
+        }
+        .abi_encode();
+        let raw_tx = sign_evm_call(
+            &self.key,
+            acp_precompile_address(),
+            calldata.into(),
+            nonce,
+            self.chain_id,
+        );
+        self.send_raw_evm_tx(&raw_tx)
+    }
+
+    fn submit_delete_relationship_raw_with_nonce(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+        relation: &str,
+        actor: &str,
+        nonce: u64,
+    ) -> eyre::Result<String> {
+        let calldata = IAcpHarness::deleteRelationshipCall {
+            policyId: parse_policy_id_bytes32(policy_id)?,
+            resource: resource.to_string(),
+            objectId: object_id.to_string(),
+            relation: relation.to_string(),
+            actor: actor.to_string(),
+        }
+        .abi_encode();
+        let raw_tx = sign_evm_call(
+            &self.key,
+            acp_precompile_address(),
+            calldata.into(),
+            nonce,
+            self.chain_id,
+        );
+        self.send_raw_evm_tx(&raw_tx)
     }
 
     fn wait_for_tx_receipt(&self, tx_hash: &str) -> eyre::Result<()> {
@@ -378,6 +476,52 @@ fn sign_eth_transfer(
     let sig = signer.sign_hash_sync(&sig_hash).expect("sign transfer");
     let signed = tx.into_signed(sig);
     signed.encoded_2718()
+}
+
+fn sign_evm_call(
+    from_key_hex: &str,
+    to: Address,
+    calldata: Bytes,
+    nonce: u64,
+    chain_id: u64,
+) -> Vec<u8> {
+    let key_bytes = hex::decode(from_key_hex).expect("valid hex key");
+    let signer = PrivateKeySigner::from_slice(&key_bytes).expect("valid signing key");
+
+    let tx = TxLegacy {
+        chain_id: Some(chain_id),
+        nonce,
+        gas_price: HUB_EVM_GAS_PRICE,
+        gas_limit: HUB_EVM_GAS_LIMIT,
+        to: TxKind::Call(to),
+        value: U256::ZERO,
+        input: calldata,
+    };
+
+    let sig_hash = tx.signature_hash();
+    let sig = signer.sign_hash_sync(&sig_hash).expect("sign evm call");
+    let signed = tx.into_signed(sig);
+    signed.encoded_2718()
+}
+
+fn acp_precompile_address() -> Address {
+    ACP_PRECOMPILE_ADDRESS
+        .parse()
+        .expect("valid ACP precompile address")
+}
+
+fn parse_policy_id_bytes32(policy_id: &str) -> eyre::Result<FixedBytes<32>> {
+    let hex_policy_id = policy_id.strip_prefix("0x").unwrap_or(policy_id);
+    let bytes = hex::decode(hex_policy_id)
+        .map_err(|e| eyre::eyre!("decode policy id '{}': {}", policy_id, e))?;
+    if bytes.len() != 32 {
+        eyre::bail!(
+            "policy id '{}' should be 32 bytes, got {}",
+            policy_id,
+            bytes.len()
+        );
+    }
+    Ok(FixedBytes::<32>::from_slice(&bytes))
 }
 
 fn evm_address_from_private_key(key_hex: &str) -> String {
@@ -562,6 +706,71 @@ async fn configure_replication_link(
     source
         .p2p_replicator_set(collections, &dest_addr)
         .unwrap_or_else(|e| panic!("{}: set replicator: {}", label, e));
+}
+
+fn graphql_string_literal(value: &str) -> String {
+    serde_json::to_string(value).expect("serialize GraphQL string literal")
+}
+
+fn extract_doc_ids(body: &serde_json::Value, pointer: &str, label: &str) -> Vec<String> {
+    body.pointer(pointer)
+        .and_then(|value| value.as_array())
+        .unwrap_or_else(|| panic!("{}: expected array at {}", label, pointer))
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .get("_docID")
+                .and_then(|doc_id| doc_id.as_str())
+                .unwrap_or_else(|| panic!("{}: missing _docID at {}[{}]", label, pointer, index))
+                .to_string()
+        })
+        .collect()
+}
+
+fn submit_acp_relationship_txs(
+    hub_cli: &HubdCli,
+    txs: &[AcpRelationshipTx<'_>],
+) -> eyre::Result<Vec<String>> {
+    let mut nonce = hub_cli.get_evm_nonce(&hub_cli.key)?;
+    let mut tx_hashes = Vec::with_capacity(txs.len());
+    for tx in txs {
+        let tx_hash = match tx.kind {
+            AcpRelationshipTxKind::Set => hub_cli.submit_set_relationship_raw_with_nonce(
+                tx.policy_id,
+                tx.resource,
+                tx.object_id,
+                tx.relation,
+                tx.actor,
+                nonce,
+            )?,
+            AcpRelationshipTxKind::Delete => hub_cli.submit_delete_relationship_raw_with_nonce(
+                tx.policy_id,
+                tx.resource,
+                tx.object_id,
+                tx.relation,
+                tx.actor,
+                nonce,
+            )?,
+        };
+        tx_hashes.push(tx_hash);
+        nonce += 1;
+    }
+    Ok(tx_hashes)
+}
+
+fn wait_for_tx_receipts(hub_cli: &HubdCli, tx_hashes: &[String], label: &str) -> eyre::Result<()> {
+    let t = Instant::now();
+    for tx_hash in tx_hashes {
+        hub_cli.wait_for_tx_receipt(tx_hash)?;
+    }
+    eprintln!(
+        "[backbone]   {} receipts confirmed in {:.2}s ({} txs)",
+        label,
+        t.elapsed().as_secs_f64(),
+        tx_hashes.len()
+    );
+    Ok(())
 }
 
 /// Poll a DefraDB query until the array at `pointer` has `expected` elements.
@@ -1164,31 +1373,47 @@ async fn secure_training_data_compartments() {
         ),
     ];
 
-    let mut acme_doc_ids: Vec<String> = Vec::new();
     let batch_start = Instant::now();
-    for (call_id, content, customer) in &transcripts {
-        let mutation = format!(
-            r#"mutation {{ create_Transcript(input: {{ call_id: "{}", content: "{}", customer: "{}" }}) {{ _docID }} }}"#,
-            call_id, content, customer
+    let transcript_inputs = transcripts
+        .iter()
+        .map(|(call_id, content, customer)| {
+            format!(
+                "{{ call_id: {}, content: {}, customer: {} }}",
+                graphql_string_literal(call_id),
+                graphql_string_literal(content),
+                graphql_string_literal(customer)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mutation = format!(
+        "mutation {{ add_Transcript(input: [{}]) {{ _docID call_id }} }}",
+        transcript_inputs
+    );
+    let write_start = Instant::now();
+    let result = acme_client
+        .graphql(&mutation, Some(&training_svc.private_key_hex))
+        .await
+        .unwrap_or_else(|e| panic!("batch write transcripts: {}", e));
+    let write_dur = write_start.elapsed();
+    let acme_doc_ids = extract_doc_ids(&result, "/data/add_Transcript", "Step 16");
+    let created_transcripts = result
+        .pointer("/data/add_Transcript")
+        .and_then(|value| value.as_array())
+        .expect("Step 16 add_Transcript array");
+    for (index, entry) in created_transcripts.iter().enumerate() {
+        let call_id = entry
+            .get("call_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("<missing call_id>");
+        let doc_id = entry
+            .get("_docID")
+            .and_then(|value| value.as_str())
+            .unwrap_or("<missing _docID>");
+        eprintln!(
+            "[backbone]   batch write transcript[{}]: call_id={} docID={}",
+            index, call_id, doc_id
         );
-        let write_start = Instant::now();
-        let result = acme_client
-            .graphql(&mutation, Some(&training_svc.private_key_hex))
-            .await
-            .unwrap_or_else(|e| panic!("write transcript {}: {}", call_id, e));
-        let write_dur = write_start.elapsed();
-        if let Some(doc_id) = result
-            .pointer("/data/add_Transcript/0/_docID")
-            .and_then(|v| v.as_str())
-        {
-            eprintln!(
-                "[backbone]   write {}: {:.2}s (docID: {})",
-                call_id,
-                write_dur.as_secs_f64(),
-                doc_id
-            );
-            acme_doc_ids.push(doc_id.to_string());
-        }
     }
     assert_eq!(
         acme_doc_ids.len(),
@@ -1196,9 +1421,10 @@ async fn secure_training_data_compartments() {
         "should have captured all transcript doc IDs"
     );
     eprintln!(
-        "[backbone] Step 16: TRAINING_SVC wrote {} transcripts in {:.2}s",
+        "[backbone] Step 16: TRAINING_SVC wrote {} transcripts in {:.2}s (single batch, mutation {:.2}s)",
         acme_doc_ids.len(),
-        batch_start.elapsed().as_secs_f64()
+        batch_start.elapsed().as_secs_f64(),
+        write_dur.as_secs_f64()
     );
     let replicated_transcripts = poll_query_count(
         &platform_client,
@@ -1238,25 +1464,30 @@ async fn secure_training_data_compartments() {
         .map(|s| s.height)
         .unwrap_or(0);
     let grant_start = Instant::now();
-    for doc_id in &acme_doc_ids {
-        let t = Instant::now();
-        hub_cli
-            .set_relationship(
-                &acme_policy_id,
-                "transcript",
-                doc_id,
-                "reader",
-                &inference_svc.did_key,
-            )
-            .unwrap_or_else(|e| {
-                panic!("grant inference_svc reader on transcript {}: {}", doc_id, e)
-            });
-        eprintln!(
-            "[backbone]   grant reader on {}: {:.2}s",
-            doc_id,
-            t.elapsed().as_secs_f64()
-        );
+    let grant_txs = acme_doc_ids
+        .iter()
+        .map(|doc_id| AcpRelationshipTx {
+            kind: AcpRelationshipTxKind::Set,
+            policy_id: &acme_policy_id,
+            resource: "transcript",
+            object_id: doc_id.as_str(),
+            relation: "reader",
+            actor: &inference_svc.did_key,
+        })
+        .collect::<Vec<_>>();
+    let submit_start = Instant::now();
+    let grant_tx_hashes = submit_acp_relationship_txs(&hub_cli, &grant_txs)
+        .unwrap_or_else(|e| panic!("submit Step 16c grant tx batch: {}", e));
+    eprintln!(
+        "[backbone]   Step 16c submitted {} grant txs in {:.2}s",
+        grant_tx_hashes.len(),
+        submit_start.elapsed().as_secs_f64()
+    );
+    for (doc_id, tx_hash) in acme_doc_ids.iter().zip(grant_tx_hashes.iter()) {
+        eprintln!("[backbone]   grant reader on {} tx={}", doc_id, tx_hash);
     }
+    wait_for_tx_receipts(&hub_cli, &grant_tx_hashes, "Step 16c")
+        .unwrap_or_else(|e| panic!("wait for Step 16c grant receipts: {}", e));
     eprintln!(
         "[backbone] Step 16c: INFERENCE_SVC granted reader on {} documents in {:.2}s",
         acme_doc_ids.len(),
@@ -1414,31 +1645,48 @@ async fn secure_training_data_compartments() {
         ),
     ];
 
-    let mut globex_doc_ids: Vec<String> = Vec::new();
     let batch_start = Instant::now();
-    for (tid, subject, body, priority) in &tickets {
-        let mutation = format!(
-            r#"mutation {{ create_SupportTicket(input: {{ ticket_id: "{}", subject: "{}", body: "{}", priority: "{}" }}) {{ _docID }} }}"#,
-            tid, subject, body, priority
+    let ticket_inputs = tickets
+        .iter()
+        .map(|(ticket_id, subject, body, priority)| {
+            format!(
+                "{{ ticket_id: {}, subject: {}, body: {}, priority: {} }}",
+                graphql_string_literal(ticket_id),
+                graphql_string_literal(subject),
+                graphql_string_literal(body),
+                graphql_string_literal(priority)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mutation = format!(
+        "mutation {{ add_SupportTicket(input: [{}]) {{ _docID ticket_id }} }}",
+        ticket_inputs
+    );
+    let write_start = Instant::now();
+    let result = globex_client
+        .graphql(&mutation, Some(&globex_svc.private_key_hex))
+        .await
+        .unwrap_or_else(|e| panic!("batch write tickets: {}", e));
+    let write_dur = write_start.elapsed();
+    let globex_doc_ids = extract_doc_ids(&result, "/data/add_SupportTicket", "Step 22");
+    let created_tickets = result
+        .pointer("/data/add_SupportTicket")
+        .and_then(|value| value.as_array())
+        .expect("Step 22 add_SupportTicket array");
+    for (index, entry) in created_tickets.iter().enumerate() {
+        let ticket_id = entry
+            .get("ticket_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("<missing ticket_id>");
+        let doc_id = entry
+            .get("_docID")
+            .and_then(|value| value.as_str())
+            .unwrap_or("<missing _docID>");
+        eprintln!(
+            "[backbone]   batch write ticket[{}]: ticket_id={} docID={}",
+            index, ticket_id, doc_id
         );
-        let write_start = Instant::now();
-        let result = globex_client
-            .graphql(&mutation, Some(&globex_svc.private_key_hex))
-            .await
-            .unwrap_or_else(|e| panic!("write ticket {}: {}", tid, e));
-        let write_dur = write_start.elapsed();
-        if let Some(doc_id) = result
-            .pointer("/data/add_SupportTicket/0/_docID")
-            .and_then(|v| v.as_str())
-        {
-            eprintln!(
-                "[backbone]   write {}: {:.2}s (docID: {})",
-                tid,
-                write_dur.as_secs_f64(),
-                doc_id
-            );
-            globex_doc_ids.push(doc_id.to_string());
-        }
     }
     assert_eq!(
         globex_doc_ids.len(),
@@ -1461,9 +1709,10 @@ async fn secure_training_data_compartments() {
         "globex_svc should see exactly 2 tickets (owner has read access)"
     );
     eprintln!(
-        "[backbone] Step 22: GLOBEX_SVC wrote {} tickets in {:.2}s, reads back {}",
+        "[backbone] Step 22: GLOBEX_SVC wrote {} tickets in {:.2}s (single batch, mutation {:.2}s), reads back {}",
         tickets.len(),
         batch_start.elapsed().as_secs_f64(),
+        write_dur.as_secs_f64(),
         ticket_docs.len()
     );
     let replicated_tickets = poll_query_count(
@@ -1526,35 +1775,35 @@ async fn secure_training_data_compartments() {
         .map(|s| s.height)
         .unwrap_or(0);
     let t = Instant::now();
-    for doc_id in &acme_doc_ids {
-        hub_cli
-            .set_relationship(
-                &acme_policy_id,
-                "transcript",
-                doc_id,
-                "reader",
-                &audit_svc.did_key,
-            )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "grant audit_svc reader on acme transcript {}: {}",
-                    doc_id, e
-                )
-            });
-    }
-    for doc_id in &globex_doc_ids {
-        hub_cli
-            .set_relationship(
-                &globex_policy_id,
-                "ticket",
-                doc_id,
-                "reader",
-                &audit_svc.did_key,
-            )
-            .unwrap_or_else(|e| {
-                panic!("grant audit_svc reader on globex ticket {}: {}", doc_id, e)
-            });
-    }
+    let mut audit_grant_txs = acme_doc_ids
+        .iter()
+        .map(|doc_id| AcpRelationshipTx {
+            kind: AcpRelationshipTxKind::Set,
+            policy_id: &acme_policy_id,
+            resource: "transcript",
+            object_id: doc_id.as_str(),
+            relation: "reader",
+            actor: &audit_svc.did_key,
+        })
+        .collect::<Vec<_>>();
+    audit_grant_txs.extend(globex_doc_ids.iter().map(|doc_id| AcpRelationshipTx {
+        kind: AcpRelationshipTxKind::Set,
+        policy_id: &globex_policy_id,
+        resource: "ticket",
+        object_id: doc_id.as_str(),
+        relation: "reader",
+        actor: &audit_svc.did_key,
+    }));
+    let submit_start = Instant::now();
+    let audit_grant_hashes = submit_acp_relationship_txs(&hub_cli, &audit_grant_txs)
+        .unwrap_or_else(|e| panic!("submit Step 25 audit grant tx batch: {}", e));
+    eprintln!(
+        "[backbone]   Step 25 submitted {} audit grant txs in {:.2}s",
+        audit_grant_hashes.len(),
+        submit_start.elapsed().as_secs_f64()
+    );
+    wait_for_tx_receipts(&hub_cli, &audit_grant_hashes, "Step 25")
+        .unwrap_or_else(|e| panic!("wait for Step 25 audit grant receipts: {}", e));
     eprintln!(
         "[backbone] Step 25: AUDIT_SVC granted reader on {} acme docs + {} globex docs in {:.2}s",
         acme_doc_ids.len(),
@@ -1655,22 +1904,27 @@ async fn secure_training_data_compartments() {
         .unwrap_or(0);
     let t = Instant::now();
     eprintln!("[backbone] Step 29: Revoking AUDIT_SVC from acme...");
-    for doc_id in &acme_doc_ids {
-        hub_cli
-            .delete_relationship(
-                &acme_policy_id,
-                "transcript",
-                doc_id,
-                "reader",
-                &audit_svc.did_key,
-            )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "revoke audit_svc reader on acme transcript {}: {}",
-                    doc_id, e
-                )
-            });
-    }
+    let revoke_txs = acme_doc_ids
+        .iter()
+        .map(|doc_id| AcpRelationshipTx {
+            kind: AcpRelationshipTxKind::Delete,
+            policy_id: &acme_policy_id,
+            resource: "transcript",
+            object_id: doc_id.as_str(),
+            relation: "reader",
+            actor: &audit_svc.did_key,
+        })
+        .collect::<Vec<_>>();
+    let submit_start = Instant::now();
+    let revoke_tx_hashes = submit_acp_relationship_txs(&hub_cli, &revoke_txs)
+        .unwrap_or_else(|e| panic!("submit Step 29 revoke tx batch: {}", e));
+    eprintln!(
+        "[backbone]   Step 29 submitted {} revoke txs in {:.2}s",
+        revoke_tx_hashes.len(),
+        submit_start.elapsed().as_secs_f64()
+    );
+    wait_for_tx_receipts(&hub_cli, &revoke_tx_hashes, "Step 29")
+        .unwrap_or_else(|e| panic!("wait for Step 29 revoke receipts: {}", e));
     eprintln!(
         "[backbone]   Step 29 revocation txs: {:.2}s",
         t.elapsed().as_secs_f64()
