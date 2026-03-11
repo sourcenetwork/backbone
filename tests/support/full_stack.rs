@@ -360,9 +360,13 @@ pub async fn poll_write_denied(
         }
         if t.elapsed() > timeout {
             panic!(
-                "{}: write ACP revocation didn't propagate within {}s",
+                "{}: write ACP revocation didn't propagate within {}s. Last result: {}",
                 label,
-                timeout.as_secs()
+                timeout.as_secs(),
+                match &result {
+                    Ok(body) => format!("ok: {}", body),
+                    Err(err) => format!("err: {}", err),
+                }
             );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;

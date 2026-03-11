@@ -1273,7 +1273,9 @@ async fn secure_training_data_compartments() {
         )
         .expect("revoke old training_svc writer on transcript collection");
 
-    // Wait for cache invalidation, then verify old key is denied.
+    // DefraDB's query gate invalidation is not enough here: create authorization is
+    // enforced on the Orbis signing path, which checks ACP against finalized hub state.
+    wait_for_block_finality(&hub_state, "Step 30-revoke").await;
     wait_for_acp_invalidation(
         &acme_acp_events,
         acme_height_before_key_revoke,
