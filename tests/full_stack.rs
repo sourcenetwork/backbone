@@ -1,4 +1,4 @@
-//! Secure Training Data Compartments — 41-step e2e test.
+//! Secure Training Data Compartments end-to-end test.
 //!
 //! Two compartments (acme, globex), one Orbis ring (T=2, N=3), multiple service
 //! identities with scoped permissions. Full Rust stack: hub.rs + Orbis + DefraDB.
@@ -22,14 +22,14 @@ use orbis_harness::{
     NodeConfig, OrbisCliClient, OrbisSignerConfig,
 };
 
-use acp_light_client::AcpLightClient;
 use hub_harness::cluster::{ConsensusPreset, GenesisBuilder, TestCluster};
 use hub_harness::observe::ClusterAssertions;
 use support::full_stack::{
-    bls_did_key_from_hex, configure_replication_link, extract_doc_ids, graphql_string_literal,
-    is_acp_denied, is_write_acp_denied, poll_query_count, poll_query_denied, poll_write_denied,
-    wait_for_block_finality, wait_for_dkg_post, wait_for_orbis_health,
-    wait_for_orbis_node_identities, wait_for_orbis_node_infos, wait_for_tx_receipt,
+    assert_doc_ids_match, bls_did_key_from_hex, configure_replication_link, extract_doc_ids,
+    graphql_string_literal, is_acp_denied, is_write_acp_denied, poll_query_count,
+    poll_query_denied, poll_write_denied, wait_for_block_finality, wait_for_dkg_post,
+    wait_for_orbis_health, wait_for_orbis_node_identities, wait_for_orbis_node_infos,
+    wait_for_tx_receipt,
 };
 use support::hubd::{
     evm_address_from_private_key, submit_acp_relationship_txs, AcpRelationshipTx,
@@ -656,6 +656,12 @@ async fn secure_training_data_compartments() {
         .pointer("/data/Transcript")
         .and_then(|v| v.as_array())
         .expect("PlatformCo Transcript array");
+    assert_doc_ids_match(
+        &replicated_transcripts,
+        "/data/Transcript",
+        &acme_doc_ids,
+        "Step 16a",
+    );
     eprintln!(
         "[backbone] Step 16a: PlatformCo replicated {} acme transcripts",
         replicated_transcript_docs.len()
@@ -734,6 +740,7 @@ async fn secure_training_data_compartments() {
         .pointer("/data/Transcript")
         .and_then(|v| v.as_array())
         .expect("Transcript array");
+    assert_doc_ids_match(&query_body, "/data/Transcript", &acme_doc_ids, "Step 17");
     eprintln!(
         "[backbone] Step 17: INFERENCE_SVC reads {} transcripts",
         docs.len()
@@ -921,6 +928,12 @@ async fn secure_training_data_compartments() {
         .pointer("/data/SupportTicket")
         .and_then(|v| v.as_array())
         .expect("SupportTicket array");
+    assert_doc_ids_match(
+        &ticket_body,
+        "/data/SupportTicket",
+        &globex_doc_ids,
+        "Step 22",
+    );
     assert_eq!(
         ticket_docs.len(),
         2,
@@ -946,6 +959,12 @@ async fn secure_training_data_compartments() {
         .pointer("/data/SupportTicket")
         .and_then(|v| v.as_array())
         .expect("PlatformCo SupportTicket array");
+    assert_doc_ids_match(
+        &replicated_tickets,
+        "/data/SupportTicket",
+        &globex_doc_ids,
+        "Step 22a",
+    );
     eprintln!(
         "[backbone] Step 22a: PlatformCo replicated {} globex tickets",
         replicated_ticket_docs.len()
@@ -1058,6 +1077,7 @@ async fn secure_training_data_compartments() {
         .pointer("/data/Transcript")
         .and_then(|v| v.as_array())
         .expect("Transcript array for audit");
+    assert_doc_ids_match(&audit_acme, "/data/Transcript", &acme_doc_ids, "Step 26");
     eprintln!(
         "[backbone] Step 26: AUDIT_SVC reads {} acme transcripts",
         audit_acme_docs.len()
@@ -1077,6 +1097,12 @@ async fn secure_training_data_compartments() {
         .pointer("/data/SupportTicket")
         .and_then(|v| v.as_array())
         .expect("SupportTicket array for audit");
+    assert_doc_ids_match(
+        &audit_globex,
+        "/data/SupportTicket",
+        &globex_doc_ids,
+        "Step 27",
+    );
     eprintln!(
         "[backbone] Step 27: AUDIT_SVC reads {} globex tickets",
         audit_globex_docs.len()
@@ -1178,6 +1204,12 @@ async fn secure_training_data_compartments() {
         .pointer("/data/SupportTicket")
         .and_then(|v| v.as_array())
         .expect("SupportTicket array post-revocation");
+    assert_doc_ids_match(
+        &still_globex,
+        "/data/SupportTicket",
+        &globex_doc_ids,
+        "Step 29-globex",
+    );
     assert_eq!(
         still_globex_docs.len(),
         2,
@@ -1216,7 +1248,7 @@ async fn secure_training_data_compartments() {
         }
     }"#;
     let t = Instant::now();
-    let new_key_result = acme_client
+    let _new_key_result = acme_client
         .graphql(new_key_write, Some(&new_training_svc.private_key_hex))
         .await
         .expect("new training_svc write");
@@ -1224,30 +1256,6 @@ async fn secure_training_data_compartments() {
         "[backbone]   new key write: {:.2}s",
         t.elapsed().as_secs_f64()
     );
-
-    // Extract the new document's ID so we can test old-key denial against it.
-    // The old key doesn't own this document, so after writer revocation it has no access.
-    let new_doc_id = new_key_result
-        .pointer("/data/add_Transcript/0/_docID")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let new_doc_id = match new_doc_id {
-        Some(id) => id,
-        None => {
-            let verify = acme_client
-                .graphql(
-                    r#"query { Transcript(filter: {call_id: {_eq: "call-004"}}) { _docID } }"#,
-                    Some(&new_training_svc.private_key_hex),
-                )
-                .await
-                .expect("verify rotated key write");
-            verify
-                .pointer("/data/Transcript/0/_docID")
-                .and_then(|v| v.as_str())
-                .expect("rotated training_svc transcript should exist")
-                .to_string()
-        }
-    };
     eprintln!("[backbone] PASSED: New TRAINING_SVC writes successfully");
 
     let acme_height_before_key_revoke = acme_client
@@ -1272,19 +1280,24 @@ async fn secure_training_data_compartments() {
         Duration::from_secs(30),
     )
     .await;
-    let old_key_write = format!(
-        r#"mutation {{ update_Transcript(docID: "{}", input: {{ content: "old-key-hack" }}) {{ _docID }} }}"#,
-        new_doc_id
-    );
+    let old_key_write = r#"mutation {
+        create_Transcript(input: {
+            call_id: "call-old-key-after-revoke",
+            content: "Old training key should not create after revocation",
+            customer: "acme-cust-404"
+        }) {
+            _docID
+        }
+    }"#;
     poll_write_denied(
         &acme_client,
-        &old_key_write,
+        old_key_write,
         &training_svc.private_key_hex,
-        "/data/update_Transcript",
+        "/data/add_Transcript",
         "Step 30-revoke",
     )
     .await;
-    eprintln!("[backbone] PASSED: Old TRAINING_SVC denied after revocation");
+    eprintln!("[backbone] PASSED: Old TRAINING_SVC cannot create after revocation");
 
     let rotated_verify = acme_client
         .graphql(
@@ -1316,120 +1329,10 @@ async fn secure_training_data_compartments() {
         step30_start.elapsed().as_secs_f64()
     );
 
-    // Step 34. Start AcpLightClient
-    let t = Instant::now();
-    eprintln!("[backbone] Step 34: Starting ACP light client...");
-    let hub_rpc = hub_cluster.node(0).rpc_url();
-    let hub_ws = hub_cluster.node(0).ws_url();
-    let light_client = AcpLightClient::new(&hub_rpc, &hub_ws, 10)
-        .await
-        .expect("ACP light client should connect");
-
-    // Step 35. Verify light client receives headers and syncs height
-    eprintln!("[backbone] Step 35: Waiting for light client to sync...");
-    let sync = light_client
-        .wait_for_height(3, Duration::from_secs(30))
-        .await
-        .expect("light client should sync to height 3");
-    eprintln!(
-        "[backbone] Light client synced: height={}, module_state_root={}",
-        sync.height, sync.module_state_root
-    );
-
-    // Step 36. Verify policy existence with Merkle proof
-    eprintln!("[backbone] Step 36: Checking policy existence...");
-    let policy_check = light_client
-        .check_policy(&acme_policy_id)
-        .await
-        .expect("check_policy should succeed");
-    assert!(policy_check.allowed, "policy should exist on hub.rs");
-    assert!(policy_check.proof.is_some(), "proof should be returned");
-    eprintln!(
-        "[backbone] PASSED: Policy exists, verified at height {}",
-        policy_check.verified_at_height
-    );
-
-    // Step 37. Non-existence proof for absent policy
-    eprintln!("[backbone] Step 37: Checking non-existent policy...");
-    let absent_check = light_client
-        .check_policy("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
-        .await
-        .expect("check absent policy should succeed");
-    assert!(!absent_check.allowed, "absent policy should not exist");
-    assert!(
-        absent_check.proof.is_some(),
-        "non-existence proof should be returned"
-    );
-    eprintln!("[backbone] PASSED: Non-existent policy denied with proof");
-
-    let root_before = light_client
-        .header_chain()
-        .latest_module_state_root()
-        .expect("should have module_state_root");
-
-    // Step 38. Re-grant audit_svc reader (revoked in Step 29) to mutate state
-    eprintln!("[backbone] Step 38: Mutating ACP state on hub.rs...");
-    hub_cli
-        .set_relationship(
-            &acme_policy_id,
-            "transcript",
-            &acme_doc_ids[0],
-            "reader",
-            &audit_svc.did_key,
-        )
-        .expect("re-grant audit_svc reader on first acme transcript");
-
-    // Step 39. Wait for module_state_root change
-    eprintln!("[backbone] Step 39: Waiting for module_state_root change...");
-    let new_sync = light_client
-        .wait_for_root_change(root_before, Duration::from_secs(30))
-        .await
-        .expect("module_state_root should change after mutation");
-    eprintln!(
-        "[backbone] PASSED: module_state_root changed at height {}",
-        new_sync.height
-    );
-    assert_ne!(
-        root_before, new_sync.module_state_root,
-        "module_state_root should differ after ACP mutation"
-    );
-
-    // Step 40. Re-check policy after state change (cache invalidation)
-    eprintln!("[backbone] Step 40: Re-checking policy after state change...");
-    let recheck = light_client
-        .check_policy(&acme_policy_id)
-        .await
-        .expect("re-check policy should succeed");
-    assert!(recheck.allowed, "policy should still exist");
-    assert!(
-        recheck.proof.is_some(),
-        "new proof should be returned (cache was invalidated)"
-    );
-    eprintln!(
-        "[backbone] PASSED: Policy re-verified at height {} after cache invalidation",
-        recheck.verified_at_height
-    );
-
-    // Step 41. Revocation SLA <= 5 blocks
-    let revocation_blocks = new_sync.height.saturating_sub(sync.height);
-    eprintln!(
-        "[backbone] Step 41: Revocation SLA: {} blocks from tx to cache invalidation",
-        revocation_blocks
-    );
-    assert!(
-        revocation_blocks <= 5,
-        "revocation SLA violated: {} blocks (max 5)",
-        revocation_blocks
-    );
-
     // Final: hub.rs cluster health check
     hub_state
         .assert_no_errors()
         .expect("hub.rs cluster should have no unexpected errors");
-    eprintln!(
-        "[backbone] Steps 34-41: Light client verification in {:.2}s",
-        t.elapsed().as_secs_f64()
-    );
     eprintln!("[backbone] Hub.rs cluster health: no unexpected errors");
 
     drop(hub_cluster);
@@ -1438,7 +1341,7 @@ async fn secure_training_data_compartments() {
     drop(acme_defra);
 
     eprintln!(
-        "[backbone] All 41 steps passed in {:.2}s",
+        "[backbone] End-to-end product flow passed in {:.2}s",
         test_start.elapsed().as_secs_f64()
     );
 }

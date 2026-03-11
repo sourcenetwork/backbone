@@ -237,6 +237,23 @@ pub fn extract_doc_ids(body: &serde_json::Value, pointer: &str, label: &str) -> 
         .collect()
 }
 
+pub fn assert_doc_ids_match(
+    body: &serde_json::Value,
+    pointer: &str,
+    expected: &[String],
+    label: &str,
+) {
+    let mut actual_doc_ids = extract_doc_ids(body, pointer, label);
+    let mut expected_doc_ids = expected.to_vec();
+    actual_doc_ids.sort();
+    expected_doc_ids.sort();
+    assert_eq!(
+        actual_doc_ids, expected_doc_ids,
+        "{}: unexpected doc IDs at {}",
+        label, pointer
+    );
+}
+
 pub fn wait_for_tx_receipt(hub_cli: &HubdCli, tx_hash: &str, label: &str) -> eyre::Result<()> {
     let t = Instant::now();
     hub_cli.wait_for_tx_receipt(tx_hash)?;
@@ -258,12 +275,14 @@ pub async fn poll_query_count(
 ) -> serde_json::Value {
     let t = Instant::now();
     let timeout = Duration::from_secs(30);
+    let mut last_response = None;
     loop {
         if let Ok(response_body) = client.graphql(query, Some(identity)).await {
             let count = response_body
                 .pointer(pointer)
                 .and_then(|v| v.as_array())
                 .map_or(0, |a| a.len());
+            last_response = Some(response_body.clone());
             if count == expected {
                 eprintln!(
                     "[backbone]   {} ACP synced in {:.2}s ({} docs)",
@@ -276,11 +295,14 @@ pub async fn poll_query_count(
         }
         if t.elapsed() > timeout {
             panic!(
-                "{}: expected {} docs at {} but didn't get them within {}s",
+                "{}: expected {} docs at {} but didn't get them within {}s. Last response: {}",
                 label,
                 expected,
                 pointer,
-                timeout.as_secs()
+                timeout.as_secs(),
+                last_response
+                    .map(|body| body.to_string())
+                    .unwrap_or_else(|| "<no successful response>".to_string())
             );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -351,8 +373,8 @@ pub fn is_acp_denied(result: &Result<serde_json::Value, eyre::Report>, data_path
     let body = result
         .as_ref()
         .expect("GraphQL request failed (network error, not ACP denial)");
-    body.get("errors").is_some()
-        || body
+    has_permission_denied_error(body)
+        && body
             .pointer(data_path)
             .and_then(|v| v.as_array())
             .is_none_or(|a| a.is_empty())
@@ -365,13 +387,35 @@ pub fn is_write_acp_denied(
     let body = result
         .as_ref()
         .expect("GraphQL request failed (network error, not ACP denial)");
-    if body.get("errors").is_some() {
-        return true;
-    }
-    match body.pointer(create_path) {
-        None => true,
-        Some(v) => v.as_array().is_some_and(|a| a.is_empty()),
-    }
+    has_permission_denied_error(body)
+        && match body.pointer(create_path) {
+            None => true,
+            Some(v) => v.as_array().is_some_and(|a| a.is_empty()) || v.is_null(),
+        }
+}
+
+fn has_permission_denied_error(body: &serde_json::Value) -> bool {
+    const DENIAL_SUBSTRINGS: &[&str] = &[
+        "permission denied",
+        "access denied",
+        "not authorized",
+        "unauthorized",
+    ];
+
+    body.get("errors")
+        .and_then(|value| value.as_array())
+        .is_some_and(|errors| {
+            errors.iter().any(|error| {
+                let message = error
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                DENIAL_SUBSTRINGS
+                    .iter()
+                    .any(|needle| message.contains(needle))
+            })
+        })
 }
 
 fn bls_did_key(public_key_bytes: &[u8]) -> String {
