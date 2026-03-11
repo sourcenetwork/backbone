@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -104,8 +103,8 @@ pub async fn configure_replication_link(
     collections: &[&str],
     label: &str,
 ) {
-    let (peer_sse, peer_events) = defra_harness::open_peer_events_sse(source_api_url).await;
-    let subscribed_before = p2p_collection_topics(source, label);
+    let (replicator_sse, replicator_events) =
+        defra_harness::open_events_sse(source_api_url, "replicator_completed").await;
     let dest_addr = p2p_addr(dest, label);
     source
         .p2p_connect(&[&dest_addr])
@@ -116,20 +115,11 @@ pub async fn configure_replication_link(
         .unwrap_or_else(|e| panic!("{}: source p2p collection add: {}", label, e));
     dest.p2p_collection_add(collections)
         .unwrap_or_else(|e| panic!("{}: destination p2p collection add: {}", label, e));
-    let subscribed_after = p2p_collection_topics(source, label);
     source
         .p2p_replicator_set(collections, &dest_addr)
         .unwrap_or_else(|e| panic!("{}: set replicator: {}", label, e));
-
-    let mut new_topics = subscribed_after
-        .difference(&subscribed_before)
-        .cloned()
-        .collect::<Vec<_>>();
-    if new_topics.is_empty() {
-        new_topics.extend(subscribed_after);
-    }
-    wait_for_collection_topic_subscriptions(&peer_events, &new_topics, label).await;
-    peer_sse.abort();
+    wait_for_event_count(&replicator_events, 1, Duration::from_secs(15), label).await;
+    replicator_sse.abort();
 }
 
 pub fn graphql_string_literal(value: &str) -> String {
@@ -288,8 +278,28 @@ pub async fn poll_query_count(
     expected: usize,
     label: &str,
 ) -> serde_json::Value {
+    poll_query_count_with_timeout(
+        client,
+        query,
+        identity,
+        pointer,
+        expected,
+        label,
+        Duration::from_secs(30),
+    )
+    .await
+}
+
+pub async fn poll_query_count_with_timeout(
+    client: &DefraHttpClient,
+    query: &str,
+    identity: &str,
+    pointer: &str,
+    expected: usize,
+    label: &str,
+    timeout: Duration,
+) -> serde_json::Value {
     let t = Instant::now();
-    let timeout = Duration::from_secs(30);
     let mut last_response = None;
     loop {
         if let Ok(response_body) = client.graphql(query, Some(identity)).await {
@@ -455,17 +465,6 @@ fn p2p_addr(client: &DefraClient, label: &str) -> String {
         .to_string()
 }
 
-fn p2p_collection_topics(client: &DefraClient, label: &str) -> HashSet<String> {
-    client
-        .p2p_collection_list()
-        .unwrap_or_else(|e| panic!("{}: fetch p2p collection list: {}", label, e))
-        .as_array()
-        .unwrap_or_else(|| panic!("{}: p2p collection list should be an array", label))
-        .iter()
-        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
-        .collect()
-}
-
 async fn wait_for_active_peer_count(client: &DefraClient, expected: usize, label: &str) {
     let t = Instant::now();
     let timeout = Duration::from_secs(15);
@@ -496,39 +495,21 @@ async fn wait_for_active_peer_count(client: &DefraClient, expected: usize, label
     }
 }
 
-async fn wait_for_collection_topic_subscriptions(
+async fn wait_for_event_count(
     events: &std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
-    topics: &[String],
+    expected: usize,
+    timeout: Duration,
     label: &str,
 ) {
     let t = Instant::now();
-    let timeout = Duration::from_secs(15);
     loop {
-        let joined_topics = {
-            let current = events.lock().unwrap();
-            current
-                .iter()
-                .filter(|event| {
-                    event
-                        .pointer("/data/event_type")
-                        .and_then(|value| value.as_str())
-                        == Some("JOINED")
-                })
-                .filter_map(|event| {
-                    event
-                        .pointer("/data/topic")
-                        .and_then(|value| value.as_str())
-                        .map(ToOwned::to_owned)
-                })
-                .collect::<HashSet<_>>()
-        };
-
-        if topics.iter().all(|topic| joined_topics.contains(topic)) {
+        let count = events.lock().unwrap().len();
+        if count >= expected {
             eprintln!(
-                "[backbone]   {} topic subscriptions ready in {:.2}s ({})",
+                "[backbone]   {} replication setup ready in {:.2}s ({} events)",
                 label,
                 t.elapsed().as_secs_f64(),
-                topics.len()
+                count
             );
             return;
         }
@@ -536,9 +517,9 @@ async fn wait_for_collection_topic_subscriptions(
         if t.elapsed() > timeout {
             let current = events.lock().unwrap().clone();
             panic!(
-                "{}: expected topic subscriptions for {:?} within {}s (events: {:?})",
+                "{}: expected {} readiness events within {}s (events: {:?})",
                 label,
-                topics,
+                expected,
                 timeout.as_secs(),
                 current
             );
