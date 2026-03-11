@@ -646,6 +646,7 @@ async fn secure_training_data_compartments() {
     );
     let replicated_transcripts = poll_replicated_doc_ids(
         &platform_client,
+        &acme_defra_cli,
         &platform_defra_cli,
         "Transcript",
         &training_svc.private_key_hex,
@@ -952,6 +953,7 @@ async fn secure_training_data_compartments() {
     );
     let replicated_tickets = poll_replicated_doc_ids(
         &platform_client,
+        &globex_defra_cli,
         &platform_defra_cli,
         "SupportTicket",
         &globex_svc.private_key_hex,
