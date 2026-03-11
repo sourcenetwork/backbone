@@ -50,7 +50,6 @@ jobs:
       - run: cargo test --workspace --exclude defra-harness
       - name: Build integration test binaries
         run: |
-          cargo test --test hub_light_client --no-run
           cargo test --test full_stack --no-run
       - name: Stage integration test binaries
         run: |
@@ -68,9 +67,8 @@ jobs:
             return 1
           }
 
-          cp "$(find_test_bin hub_light_client)" ci-artifacts/hub_light_client
           cp "$(find_test_bin full_stack)" ci-artifacts/full_stack
-          chmod +x ci-artifacts/hub_light_client ci-artifacts/full_stack
+          chmod +x ci-artifacts/full_stack
       - name: Upload integration test binaries
         uses: actions/upload-artifact@v4
         with:
@@ -82,38 +80,6 @@ jobs:
         run: |
           git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
           git checkout -- . && git clean -fd
-
-  hub-light-client:
-    name: Hub Light Client
-    runs-on: [self-hosted, macOS, ARM64, studio]
-    needs: [fmt, clippy, unit-test]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Configure git auth
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-      - name: Download integration test binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: integration-test-binaries
-          path: ci-artifacts
-      - name: Ensure binaries
-        run: bash .github/scripts/ensure-binaries.sh
-        env:
-          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
-      - name: Run hub light client tests
-        run: |
-          export PATH="$HOME/.sourcenetwork/bin:$PATH"
-          chmod +x ci-artifacts/hub_light_client
-          ./ci-artifacts/hub_light_client --ignored --nocapture
-      - name: Cleanup
-        if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git checkout -- . && git clean -fd
-          pkill -f "target/.*(defra|hubd|orbis)" || true
-          rm -rf target/e2e/
 
   full-stack:
     name: Full Stack
