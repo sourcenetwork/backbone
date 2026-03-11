@@ -27,7 +27,7 @@ use hub_harness::observe::ClusterAssertions;
 use support::full_stack::{
     assert_doc_ids_match, bls_did_key_from_hex, configure_replication_link, extract_doc_ids,
     graphql_string_literal, is_acp_denied, is_write_acp_denied, poll_query_count,
-    poll_query_count_with_timeout, poll_query_denied, poll_write_denied, wait_for_block_finality,
+    poll_query_denied, poll_replicated_doc_ids, poll_write_denied, wait_for_block_finality,
     wait_for_dkg_post, wait_for_orbis_health, wait_for_orbis_node_identities,
     wait_for_orbis_node_infos, wait_for_tx_receipt,
 };
@@ -644,12 +644,13 @@ async fn secure_training_data_compartments() {
         batch_start.elapsed().as_secs_f64(),
         write_dur.as_secs_f64()
     );
-    let replicated_transcripts = poll_query_count_with_timeout(
+    let replicated_transcripts = poll_replicated_doc_ids(
         &platform_client,
-        r#"query { Transcript { _docID call_id content customer } }"#,
+        &platform_defra_cli,
+        "Transcript",
         &training_svc.private_key_hex,
         "/data/Transcript",
-        3,
+        &acme_doc_ids,
         "Step 16a",
         Duration::from_secs(60),
     )
@@ -949,12 +950,13 @@ async fn secure_training_data_compartments() {
         write_dur.as_secs_f64(),
         ticket_docs.len()
     );
-    let replicated_tickets = poll_query_count_with_timeout(
+    let replicated_tickets = poll_replicated_doc_ids(
         &platform_client,
-        ticket_query,
+        &platform_defra_cli,
+        "SupportTicket",
         &globex_svc.private_key_hex,
         "/data/SupportTicket",
-        2,
+        &globex_doc_ids,
         "Step 22a",
         Duration::from_secs(60),
     )

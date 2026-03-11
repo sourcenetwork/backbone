@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -257,6 +258,98 @@ pub fn assert_doc_ids_match(
         "{}: unexpected doc IDs at {}",
         label, pointer
     );
+}
+
+pub async fn poll_replicated_doc_ids(
+    client: &DefraHttpClient,
+    sync_client: &DefraClient,
+    collection_name: &str,
+    identity: &str,
+    pointer: &str,
+    expected_doc_ids: &[String],
+    label: &str,
+    timeout: Duration,
+) -> serde_json::Value {
+    let t = Instant::now();
+    let expected_set = expected_doc_ids.iter().cloned().collect::<HashSet<_>>();
+    let mut last_response = None;
+    let mut last_sync_attempt: Option<Instant> = None;
+
+    loop {
+        if let Ok(response_body) = client
+            .graphql(
+                &format!("query {{ {} {{ _docID }} }}", collection_name),
+                Some(identity),
+            )
+            .await
+        {
+            let actual_doc_ids = response_body
+                .pointer(pointer)
+                .and_then(|value| value.as_array())
+                .map(|array| {
+                    array
+                        .iter()
+                        .filter_map(|value| {
+                            value
+                                .get("_docID")
+                                .and_then(|doc_id| doc_id.as_str())
+                                .map(ToOwned::to_owned)
+                        })
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default();
+
+            last_response = Some(response_body.clone());
+
+            if actual_doc_ids == expected_set {
+                eprintln!(
+                    "[backbone]   {} replicated in {:.2}s ({} docs)",
+                    label,
+                    t.elapsed().as_secs_f64(),
+                    actual_doc_ids.len()
+                );
+                return response_body;
+            }
+
+            let missing = expected_doc_ids
+                .iter()
+                .filter(|doc_id| !actual_doc_ids.contains(*doc_id))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            let should_sync = !missing.is_empty()
+                && last_sync_attempt
+                    .map(|last| last.elapsed() >= Duration::from_secs(3))
+                    .unwrap_or_else(|| t.elapsed() >= Duration::from_secs(3));
+
+            if should_sync {
+                let missing_refs = missing.iter().map(String::as_str).collect::<Vec<_>>();
+                sync_client
+                    .p2p_document_sync(collection_name, &missing_refs)
+                    .unwrap_or_else(|error| panic!("{}: p2p document sync: {}", label, error));
+                eprintln!(
+                    "[backbone]   {} requested doc sync for {} missing docs",
+                    label,
+                    missing.len()
+                );
+                last_sync_attempt = Some(Instant::now());
+            }
+        }
+
+        if t.elapsed() > timeout {
+            panic!(
+                "{}: expected doc IDs {:?} at {} but didn't get them within {}s. Last response: {}",
+                label,
+                expected_doc_ids,
+                pointer,
+                timeout.as_secs(),
+                last_response
+                    .map(|body| body.to_string())
+                    .unwrap_or_else(|| "<no successful response>".to_string())
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 pub fn wait_for_tx_receipt(hub_cli: &HubdCli, tx_hash: &str, label: &str) -> eyre::Result<()> {
