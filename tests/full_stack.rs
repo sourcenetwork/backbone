@@ -564,6 +564,7 @@ async fn secure_training_data_compartments() {
         .expect("add transcript schema on platform");
     configure_replication_link(
         &acme_defra_cli,
+        &acme_defra.api_url,
         &platform_defra_cli,
         &["Transcript"],
         "acme -> platform transcript replication",
@@ -847,6 +848,7 @@ async fn secure_training_data_compartments() {
         .expect("add ticket schema on platform");
     configure_replication_link(
         &globex_defra_cli,
+        &globex_defra.api_url,
         &platform_defra_cli,
         &["SupportTicket"],
         "globex -> platform support ticket replication",

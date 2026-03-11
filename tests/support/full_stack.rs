@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -98,10 +99,13 @@ pub async fn wait_for_block_finality(hub_state: &ClusterState, label: &str) {
 
 pub async fn configure_replication_link(
     source: &DefraClient,
+    source_api_url: &str,
     dest: &DefraClient,
     collections: &[&str],
     label: &str,
 ) {
+    let (peer_sse, peer_events) = defra_harness::open_peer_events_sse(source_api_url).await;
+    let subscribed_before = p2p_collection_topics(source, label);
     let dest_addr = p2p_addr(dest, label);
     source
         .p2p_connect(&[&dest_addr])
@@ -112,9 +116,20 @@ pub async fn configure_replication_link(
         .unwrap_or_else(|e| panic!("{}: source p2p collection add: {}", label, e));
     dest.p2p_collection_add(collections)
         .unwrap_or_else(|e| panic!("{}: destination p2p collection add: {}", label, e));
+    let subscribed_after = p2p_collection_topics(source, label);
     source
         .p2p_replicator_set(collections, &dest_addr)
         .unwrap_or_else(|e| panic!("{}: set replicator: {}", label, e));
+
+    let mut new_topics = subscribed_after
+        .difference(&subscribed_before)
+        .cloned()
+        .collect::<Vec<_>>();
+    if new_topics.is_empty() {
+        new_topics.extend(subscribed_after);
+    }
+    wait_for_collection_topic_subscriptions(&peer_events, &new_topics, label).await;
+    peer_sse.abort();
 }
 
 pub fn graphql_string_literal(value: &str) -> String {
@@ -440,6 +455,17 @@ fn p2p_addr(client: &DefraClient, label: &str) -> String {
         .to_string()
 }
 
+fn p2p_collection_topics(client: &DefraClient, label: &str) -> HashSet<String> {
+    client
+        .p2p_collection_list()
+        .unwrap_or_else(|e| panic!("{}: fetch p2p collection list: {}", label, e))
+        .as_array()
+        .unwrap_or_else(|| panic!("{}: p2p collection list should be an array", label))
+        .iter()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect()
+}
+
 async fn wait_for_active_peer_count(client: &DefraClient, expected: usize, label: &str) {
     let t = Instant::now();
     let timeout = Duration::from_secs(15);
@@ -467,6 +493,58 @@ async fn wait_for_active_peer_count(client: &DefraClient, expected: usize, label
             );
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn wait_for_collection_topic_subscriptions(
+    events: &std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    topics: &[String],
+    label: &str,
+) {
+    let t = Instant::now();
+    let timeout = Duration::from_secs(15);
+    loop {
+        let joined_topics = {
+            let current = events.lock().unwrap();
+            current
+                .iter()
+                .filter(|event| {
+                    event
+                        .pointer("/data/event_type")
+                        .and_then(|value| value.as_str())
+                        == Some("JOINED")
+                })
+                .filter_map(|event| {
+                    event
+                        .pointer("/data/topic")
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned)
+                })
+                .collect::<HashSet<_>>()
+        };
+
+        if topics.iter().all(|topic| joined_topics.contains(topic)) {
+            eprintln!(
+                "[backbone]   {} topic subscriptions ready in {:.2}s ({})",
+                label,
+                t.elapsed().as_secs_f64(),
+                topics.len()
+            );
+            return;
+        }
+
+        if t.elapsed() > timeout {
+            let current = events.lock().unwrap().clone();
+            panic!(
+                "{}: expected topic subscriptions for {:?} within {}s (events: {:?})",
+                label,
+                topics,
+                timeout.as_secs(),
+                current
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
