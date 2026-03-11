@@ -374,7 +374,7 @@ pub fn is_acp_denied(result: &Result<serde_json::Value, eyre::Report>, data_path
         .as_ref()
         .expect("GraphQL request failed (network error, not ACP denial)");
     has_permission_denied_error(body)
-        && body
+        || body
             .pointer(data_path)
             .and_then(|v| v.as_array())
             .is_none_or(|a| a.is_empty())
