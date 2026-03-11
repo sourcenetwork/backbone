@@ -5,16 +5,10 @@
 //!
 //! See `memory/full_stack_test.md` for the step-by-step breakdown.
 
-use std::path::PathBuf;
-use std::process::Command;
-use std::time::{Duration, Instant};
+mod support;
 
-use alloy_consensus::{SignableTransaction, TxLegacy};
-use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::{Address, Bytes, FixedBytes, TxKind, U256};
-use alloy_signer::SignerSync;
-use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::{sol, SolCall};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use defra_harness::node::RustNode;
 use defra_harness::sse::{open_acp_events_sse, wait_for_acp_invalidation};
@@ -31,6 +25,16 @@ use orbis_harness::{
 use acp_light_client::AcpLightClient;
 use hub_harness::cluster::{ConsensusPreset, GenesisBuilder, TestCluster};
 use hub_harness::observe::ClusterAssertions;
+use support::full_stack::{
+    bls_did_key_from_hex, configure_replication_link, extract_doc_ids, graphql_string_literal,
+    is_acp_denied, is_write_acp_denied, poll_query_count, poll_query_denied, poll_write_denied,
+    wait_for_block_finality, wait_for_dkg_post, wait_for_orbis_health,
+    wait_for_orbis_node_identities, wait_for_orbis_node_infos, wait_for_tx_receipt,
+};
+use support::hubd::{
+    evm_address_from_private_key, submit_acp_relationship_txs, AcpRelationshipTx,
+    AcpRelationshipTxKind, HubdCli, HARDHAT_KEY_0,
+};
 
 const ACME_POLICY_YAML: &str = r#"
 name: acme-training-policy
@@ -127,742 +131,6 @@ impl ServiceIdentity {
 
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
 
-const HARDHAT_KEY_0: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-const HARDHAT_KEY_1: &str = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
-const ACP_PRECOMPILE_ADDRESS: &str = "0x0000000000000000000000000000000000000810";
-const HUB_EVM_GAS_PRICE: u128 = 1_000_000_000;
-const HUB_EVM_GAS_LIMIT: u64 = 5_000_000;
-
-sol! {
-    interface IAcpHarness {
-        function batchCalls(bytes[] calls) external returns (bytes[] results);
-
-        function setRelationship(
-            bytes32 policyId,
-            string resource,
-            string objectId,
-            string relation,
-            string actor
-        ) external returns (bool recordExisted, bytes record);
-
-        function deleteRelationship(
-            bytes32 policyId,
-            string resource,
-            string objectId,
-            string relation,
-            string actor
-        ) external returns (bool recordFound);
-    }
-}
-
-#[derive(Clone, Copy)]
-enum AcpRelationshipTxKind {
-    Set,
-    Delete,
-}
-
-#[derive(Clone, Copy)]
-struct AcpRelationshipTx<'a> {
-    kind: AcpRelationshipTxKind,
-    policy_id: &'a str,
-    resource: &'a str,
-    object_id: &'a str,
-    relation: &'a str,
-    actor: &'a str,
-}
-
-struct HubdCli {
-    binary: PathBuf,
-    rpc_url: String,
-    chain_id: u64,
-    key: String,
-}
-
-impl HubdCli {
-    fn new(binary: PathBuf, rpc_url: &str, chain_id: u64, key: &str) -> Self {
-        Self {
-            binary,
-            rpc_url: rpc_url.to_string(),
-            chain_id,
-            key: key.to_string(),
-        }
-    }
-
-    fn cmd(&self) -> Command {
-        let mut cmd = Command::new(&self.binary);
-        cmd.args([
-            "client",
-            "--url",
-            &self.rpc_url,
-            "--key",
-            &self.key,
-            "--client-chain-id",
-            &self.chain_id.to_string(),
-            "--compact",
-        ]);
-        cmd
-    }
-
-    fn exec(&self, args: &[&str]) -> eyre::Result<String> {
-        let output = self.cmd().args(args).output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(eyre::eyre!(
-                "hubd client {} failed ({}): stderr={}, stdout={}",
-                args.join(" "),
-                output.status,
-                stderr.trim(),
-                stdout.trim()
-            ));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    }
-
-    fn create_policy(&self, yaml: &str) -> eyre::Result<String> {
-        let before: Vec<String> =
-            serde_json::from_str(&self.exec(&["acp", "list-policies"])?).unwrap_or_default();
-
-        self.exec(&["acp", "create-policy", yaml])?;
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            let after_output = self.exec(&["acp", "list-policies"])?;
-            let after: Vec<String> = serde_json::from_str(&after_output)
-                .map_err(|e| eyre::eyre!("parse list-policies '{}': {}", after_output, e))?;
-            let new_ids: Vec<&String> = after.iter().filter(|id| !before.contains(id)).collect();
-            match new_ids.len() {
-                1 => return Ok(new_ids[0].clone()),
-                n if n > 1 => {
-                    return Err(eyre::eyre!(
-                        "expected 1 new policy ID, got {}: {:?}",
-                        n,
-                        new_ids
-                    ))
-                }
-                _ => {}
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(eyre::eyre!("no new policy ID found after 30s polling"));
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    }
-
-    fn register_object(
-        &self,
-        policy_id: &str,
-        resource: &str,
-        object_id: &str,
-    ) -> eyre::Result<String> {
-        self.exec(&["acp", "register-object", policy_id, resource, object_id])
-    }
-
-    fn set_relationship(
-        &self,
-        policy_id: &str,
-        resource: &str,
-        object_id: &str,
-        relation: &str,
-        actor: &str,
-    ) -> eyre::Result<String> {
-        self.exec(&[
-            "acp",
-            "set-relationship",
-            policy_id,
-            resource,
-            object_id,
-            relation,
-            actor,
-        ])
-    }
-
-    fn delete_relationship(
-        &self,
-        policy_id: &str,
-        resource: &str,
-        object_id: &str,
-        relation: &str,
-        actor: &str,
-    ) -> eyre::Result<String> {
-        self.exec(&[
-            "acp",
-            "delete-relationship",
-            policy_id,
-            resource,
-            object_id,
-            relation,
-            actor,
-        ])
-    }
-
-    fn register_namespace(&self, namespace: &str) -> eyre::Result<String> {
-        self.exec(&["bulletin", "register-namespace", namespace])
-    }
-
-    fn add_collaborator(&self, namespace: &str, did: &str) -> eyre::Result<String> {
-        self.exec(&["bulletin", "add-collaborator", namespace, did])
-    }
-
-    fn list_posts(&self, namespace: &str) -> eyre::Result<String> {
-        self.exec(&["bulletin", "list-posts", "--namespace", namespace])
-    }
-
-    fn fund_evm_address(&self, to_address: &str, value_wei: &str) -> eyre::Result<String> {
-        let nonce = self.get_evm_nonce(HARDHAT_KEY_1)?;
-        let raw_tx = sign_eth_transfer(HARDHAT_KEY_1, to_address, value_wei, nonce, self.chain_id);
-        let tx_hash = self.send_raw_evm_tx(&raw_tx)?;
-        self.wait_for_tx_receipt(&tx_hash)?;
-        Ok(tx_hash.to_string())
-    }
-
-    fn send_raw_evm_tx(&self, raw_tx: &[u8]) -> eyre::Result<String> {
-        let result = self.exec(&["tx", "send-raw", &hex::encode(raw_tx)])?;
-        let json: serde_json::Value = serde_json::from_str(result.trim())
-            .map_err(|e| eyre::eyre!("parse send-raw response: {}", e))?;
-        json.get("tx_hash")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| eyre::eyre!("no tx_hash in send-raw response: {}", result))
-            .map(|tx_hash| tx_hash.to_string())
-    }
-
-    fn submit_batch_acp_calls_raw(&self, calls: Vec<Vec<u8>>) -> eyre::Result<String> {
-        let nonce = self.get_evm_nonce(&self.key)?;
-        let calldata = IAcpHarness::batchCallsCall {
-            calls: calls.into_iter().map(Into::into).collect(),
-        }
-        .abi_encode();
-        let raw_tx = sign_evm_call(
-            &self.key,
-            acp_precompile_address(),
-            calldata.into(),
-            nonce,
-            self.chain_id,
-        );
-        self.send_raw_evm_tx(&raw_tx)
-    }
-
-    fn wait_for_tx_receipt(&self, tx_hash: &str) -> eyre::Result<()> {
-        for _attempt in 0..400 {
-            let body = format!(
-                r#"{{"jsonrpc":"2.0","method":"eth_getTransactionReceipt","params":["{}"],"id":1}}"#,
-                tx_hash
-            );
-            let output = Command::new("curl")
-                .args([
-                    "-s",
-                    "-X",
-                    "POST",
-                    "-H",
-                    "Content-Type: application/json",
-                    "-d",
-                    &body,
-                    &self.rpc_url,
-                ])
-                .output()
-                .map_err(|e| eyre::eyre!("curl eth_getTransactionReceipt: {}", e))?;
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
-                if json.get("result").is_some_and(|v| !v.is_null()) {
-                    return Ok(());
-                }
-            }
-            std::thread::sleep(Duration::from_millis(300));
-        }
-        eyre::bail!("receipt not available after 400 attempts for {}", tx_hash)
-    }
-
-    fn get_evm_nonce(&self, key_hex: &str) -> eyre::Result<u64> {
-        let key_bytes = hex::decode(key_hex).map_err(|e| eyre::eyre!("invalid key hex: {}", e))?;
-        let signer = PrivateKeySigner::from_slice(&key_bytes)
-            .map_err(|e| eyre::eyre!("invalid signing key: {}", e))?;
-        let address = format!("{:?}", signer.address());
-        self.get_evm_nonce_for_address(&address)
-    }
-
-    fn get_evm_nonce_for_address(&self, address: &str) -> eyre::Result<u64> {
-        let body = format!(
-            r#"{{"jsonrpc":"2.0","method":"eth_getTransactionCount","params":["{}","latest"],"id":1}}"#,
-            address
-        );
-        let output = Command::new("curl")
-            .args([
-                "-s",
-                "-X",
-                "POST",
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                &body,
-                &self.rpc_url,
-            ])
-            .output()
-            .map_err(|e| eyre::eyre!("curl eth_getTransactionCount: {}", e))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let json: serde_json::Value = serde_json::from_str(stdout.trim())
-            .map_err(|e| eyre::eyre!("parse nonce response '{}': {}", stdout.trim(), e))?;
-        let hex_nonce = json
-            .get("result")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| eyre::eyre!("no result in nonce response: {}", stdout.trim()))?;
-        let nonce = u64::from_str_radix(hex_nonce.trim_start_matches("0x"), 16)
-            .map_err(|e| eyre::eyre!("parse hex nonce '{}': {}", hex_nonce, e))?;
-        Ok(nonce)
-    }
-}
-
-fn sign_eth_transfer(
-    from_key_hex: &str,
-    to: &str,
-    value_wei: &str,
-    nonce: u64,
-    chain_id: u64,
-) -> Vec<u8> {
-    let key_bytes = hex::decode(from_key_hex).expect("valid hex key");
-    let signer = PrivateKeySigner::from_slice(&key_bytes).expect("valid signing key");
-
-    let to_addr: alloy_primitives::Address = to.parse().expect("valid to address");
-    let value = value_wei.parse::<U256>().expect("valid wei value");
-
-    let tx = TxLegacy {
-        chain_id: Some(chain_id),
-        nonce,
-        gas_price: 0,
-        gas_limit: 21_000,
-        to: TxKind::Call(to_addr),
-        value,
-        input: Default::default(),
-    };
-
-    let sig_hash = tx.signature_hash();
-    let sig = signer.sign_hash_sync(&sig_hash).expect("sign transfer");
-    let signed = tx.into_signed(sig);
-    signed.encoded_2718()
-}
-
-fn sign_evm_call(
-    from_key_hex: &str,
-    to: Address,
-    calldata: Bytes,
-    nonce: u64,
-    chain_id: u64,
-) -> Vec<u8> {
-    let key_bytes = hex::decode(from_key_hex).expect("valid hex key");
-    let signer = PrivateKeySigner::from_slice(&key_bytes).expect("valid signing key");
-
-    let tx = TxLegacy {
-        chain_id: Some(chain_id),
-        nonce,
-        gas_price: HUB_EVM_GAS_PRICE,
-        gas_limit: HUB_EVM_GAS_LIMIT,
-        to: TxKind::Call(to),
-        value: U256::ZERO,
-        input: calldata,
-    };
-
-    let sig_hash = tx.signature_hash();
-    let sig = signer.sign_hash_sync(&sig_hash).expect("sign evm call");
-    let signed = tx.into_signed(sig);
-    signed.encoded_2718()
-}
-
-fn acp_precompile_address() -> Address {
-    ACP_PRECOMPILE_ADDRESS
-        .parse()
-        .expect("valid ACP precompile address")
-}
-
-fn parse_policy_id_bytes32(policy_id: &str) -> eyre::Result<FixedBytes<32>> {
-    let hex_policy_id = policy_id.strip_prefix("0x").unwrap_or(policy_id);
-    let bytes = hex::decode(hex_policy_id)
-        .map_err(|e| eyre::eyre!("decode policy id '{}': {}", policy_id, e))?;
-    if bytes.len() != 32 {
-        eyre::bail!(
-            "policy id '{}' should be 32 bytes, got {}",
-            policy_id,
-            bytes.len()
-        );
-    }
-    Ok(FixedBytes::<32>::from_slice(&bytes))
-}
-
-fn evm_address_from_private_key(key_hex: &str) -> String {
-    let key_bytes = hex::decode(key_hex).expect("valid hex key");
-    let signer = PrivateKeySigner::from_slice(&key_bytes).expect("valid signing key");
-    format!("{:#x}", signer.address())
-}
-
-fn secp256k1_did_from_compressed_pubkey_hex(pubkey_hex: &str) -> String {
-    let pubkey_bytes = hex::decode(pubkey_hex).expect("decode pubkey hex");
-    assert_eq!(
-        pubkey_bytes.len(),
-        33,
-        "expected 33-byte compressed secp256k1 pubkey"
-    );
-    let mut codec_bytes = Vec::with_capacity(2 + 33);
-    codec_bytes.extend_from_slice(&[0xe7, 0x01]);
-    codec_bytes.extend_from_slice(&pubkey_bytes);
-    let encoded = bs58::encode(&codec_bytes).into_string();
-    format!("did:key:z{}", encoded)
-}
-
-async fn wait_for_dkg_post(
-    hub_cli: &HubdCli,
-    namespace: &str,
-    timeout: Duration,
-) -> eyre::Result<(String, Vec<u8>)> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if let Ok(output) = hub_cli.list_posts(namespace) {
-            if let Ok(posts) = serde_json::from_str::<serde_json::Value>(&output) {
-                if let Some(arr) = posts.as_array() {
-                    for post in arr {
-                        let payload_bytes = match post.get("payload") {
-                            // Byte array: [123, 34, ...]
-                            Some(serde_json::Value::Array(byte_arr)) => {
-                                let bytes: Vec<u8> = byte_arr
-                                    .iter()
-                                    .filter_map(|v| v.as_u64().map(|n| n as u8))
-                                    .collect();
-                                if bytes.is_empty() {
-                                    continue;
-                                }
-                                bytes
-                            }
-                            // Hex string
-                            Some(serde_json::Value::String(s)) if !s.is_empty() => {
-                                hex::decode(s).unwrap_or_else(|_| s.as_bytes().to_vec())
-                            }
-                            _ => continue,
-                        };
-
-                        let post_id = post
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-
-                        return Ok((post_id, payload_bytes));
-                    }
-                }
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            // One last attempt with full debug output
-            if let Ok(output) = hub_cli.list_posts(namespace) {
-                eprintln!("[backbone]   FINAL list-posts output: {}", output);
-            }
-            return Err(eyre::eyre!(
-                "timeout waiting for DKG post in namespace '{}'",
-                namespace
-            ));
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-}
-
-fn bls_did_key(public_key_bytes: &[u8]) -> String {
-    let mut buf = vec![0xea, 0x01];
-    buf.extend_from_slice(public_key_bytes);
-    let encoded = bs58::encode(&buf).into_string();
-    format!("did:key:z{}", encoded)
-}
-
-fn bls_did_key_from_hex(public_key_hex: &str) -> String {
-    let bytes =
-        hex::decode(public_key_hex).unwrap_or_else(|e| panic!("invalid BLS public key hex: {}", e));
-    bls_did_key(&bytes)
-}
-
-/// Wait for ACP state to propagate from hub.rs to DefraDB's light client.
-///
-/// 1. Wait for the chain to advance `n` blocks (ensures the tx is finalized).
-/// 2. Add a brief delay for websocket delivery + cache invalidation.
-///
-/// The chain advancing doesn't guarantee DefraDB has received the header
-/// via websocket yet. Actual propagation depends on:
-/// - Websocket delivery latency (hub.rs → DefraDB subscriber)
-/// - Cache invalidation processing time
-/// - Module state root comparison + proof refetch
-/// Wait for the chain to advance 2 blocks (ensures ACP tx is finalized).
-/// Used before Orbis writes where the signing nodes check ACP directly.
-async fn wait_for_block_finality(hub_state: &hub_harness::observe::ClusterState, label: &str) {
-    let current = hub_state.node(0).effective_height();
-    let target = current + 2;
-    let t = Instant::now();
-    hub_state
-        .wait_for_height(target, Duration::from_secs(30))
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "{}: chain didn't advance 2 blocks (current={}, target={}): {}",
-                label, current, target, e
-            )
-        });
-    eprintln!(
-        "[backbone]   {} block finality: {:.2}s (height {}→{})",
-        label,
-        t.elapsed().as_secs_f64(),
-        current,
-        target
-    );
-}
-
-fn p2p_addr(client: &DefraClient, label: &str) -> String {
-    client
-        .p2p_info()
-        .unwrap_or_else(|e| panic!("{}: fetch p2p info: {}", label, e))
-        .as_array()
-        .and_then(|arr| arr.first())
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| panic!("{}: node has no P2P address", label))
-        .to_string()
-}
-
-async fn wait_for_active_peer_count(client: &DefraClient, expected: usize, label: &str) {
-    let t = Instant::now();
-    let timeout = Duration::from_secs(15);
-    loop {
-        let count = client
-            .p2p_active_peers()
-            .ok()
-            .and_then(|v| v.as_array().map(|arr| arr.len()))
-            .unwrap_or(0);
-        if count >= expected {
-            eprintln!(
-                "[backbone]   {} active peers ready in {:.2}s ({} peers)",
-                label,
-                t.elapsed().as_secs_f64(),
-                count
-            );
-            return;
-        }
-        if t.elapsed() > timeout {
-            panic!(
-                "{}: expected at least {} active peers within {}s",
-                label,
-                expected,
-                timeout.as_secs()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
-async fn configure_replication_link(
-    source: &DefraClient,
-    dest: &DefraClient,
-    collections: &[&str],
-    label: &str,
-) {
-    let dest_addr = p2p_addr(dest, label);
-    source
-        .p2p_connect(&[&dest_addr])
-        .unwrap_or_else(|e| panic!("{}: p2p connect: {}", label, e));
-    wait_for_active_peer_count(source, 1, label).await;
-    source
-        .p2p_collection_add(collections)
-        .unwrap_or_else(|e| panic!("{}: source p2p collection add: {}", label, e));
-    dest.p2p_collection_add(collections)
-        .unwrap_or_else(|e| panic!("{}: destination p2p collection add: {}", label, e));
-    source
-        .p2p_replicator_set(collections, &dest_addr)
-        .unwrap_or_else(|e| panic!("{}: set replicator: {}", label, e));
-}
-
-fn graphql_string_literal(value: &str) -> String {
-    serde_json::to_string(value).expect("serialize GraphQL string literal")
-}
-
-fn extract_doc_ids(body: &serde_json::Value, pointer: &str, label: &str) -> Vec<String> {
-    body.pointer(pointer)
-        .and_then(|value| value.as_array())
-        .unwrap_or_else(|| panic!("{}: expected array at {}", label, pointer))
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            value
-                .get("_docID")
-                .and_then(|doc_id| doc_id.as_str())
-                .unwrap_or_else(|| panic!("{}: missing _docID at {}[{}]", label, pointer, index))
-                .to_string()
-        })
-        .collect()
-}
-
-fn submit_acp_relationship_txs(
-    hub_cli: &HubdCli,
-    txs: &[AcpRelationshipTx<'_>],
-) -> eyre::Result<String> {
-    let calls = txs
-        .iter()
-        .map(|tx| match tx.kind {
-            AcpRelationshipTxKind::Set => Ok(IAcpHarness::setRelationshipCall {
-                policyId: parse_policy_id_bytes32(tx.policy_id)?,
-                resource: tx.resource.to_string(),
-                objectId: tx.object_id.to_string(),
-                relation: tx.relation.to_string(),
-                actor: tx.actor.to_string(),
-            }
-            .abi_encode()),
-            AcpRelationshipTxKind::Delete => Ok(IAcpHarness::deleteRelationshipCall {
-                policyId: parse_policy_id_bytes32(tx.policy_id)?,
-                resource: tx.resource.to_string(),
-                objectId: tx.object_id.to_string(),
-                relation: tx.relation.to_string(),
-                actor: tx.actor.to_string(),
-            }
-            .abi_encode()),
-        })
-        .collect::<eyre::Result<Vec<_>>>()?;
-    hub_cli.submit_batch_acp_calls_raw(calls)
-}
-
-fn wait_for_tx_receipt(hub_cli: &HubdCli, tx_hash: &str, label: &str) -> eyre::Result<()> {
-    let t = Instant::now();
-    hub_cli.wait_for_tx_receipt(tx_hash)?;
-    eprintln!(
-        "[backbone]   {} receipt confirmed in {:.2}s",
-        label,
-        t.elapsed().as_secs_f64()
-    );
-    Ok(())
-}
-
-/// Poll a DefraDB query until the array at `pointer` has `expected` elements.
-/// This tests the real end-to-end ACP propagation path: hub.rs → websocket →
-/// DefraDB light client cache invalidation → proof re-fetch → query succeeds.
-async fn poll_query_count(
-    client: &DefraHttpClient,
-    query: &str,
-    identity: &str,
-    pointer: &str,
-    expected: usize,
-    label: &str,
-) -> serde_json::Value {
-    let t = Instant::now();
-    let timeout = Duration::from_secs(30);
-    loop {
-        if let Ok(body) = client.graphql(query, Some(identity)).await {
-            let count = body
-                .pointer(pointer)
-                .and_then(|v| v.as_array())
-                .map_or(0, |a| a.len());
-            if count == expected {
-                eprintln!(
-                    "[backbone]   {} ACP synced in {:.2}s ({} docs)",
-                    label,
-                    t.elapsed().as_secs_f64(),
-                    count
-                );
-                return body;
-            }
-        }
-        if t.elapsed() > timeout {
-            panic!(
-                "{}: expected {} docs at {} but didn't get them within {}s",
-                label,
-                expected,
-                pointer,
-                timeout.as_secs()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
-
-/// Poll a DefraDB query until it returns ACP denial.
-/// Used after revoking access to confirm DefraDB's light client has synced the revocation.
-async fn poll_query_denied(
-    client: &DefraHttpClient,
-    query: &str,
-    identity: &str,
-    data_path: &str,
-    label: &str,
-) {
-    let t = Instant::now();
-    let timeout = Duration::from_secs(30);
-    loop {
-        let result = client.graphql(query, Some(identity)).await;
-        if is_acp_denied(&result, data_path) {
-            eprintln!(
-                "[backbone]   {} ACP revocation synced in {:.2}s",
-                label,
-                t.elapsed().as_secs_f64()
-            );
-            return;
-        }
-        if t.elapsed() > timeout {
-            panic!(
-                "{}: ACP revocation didn't propagate within {}s",
-                label,
-                timeout.as_secs()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
-
-/// Poll a DefraDB mutation until it returns write ACP denial.
-async fn poll_write_denied(
-    client: &DefraHttpClient,
-    mutation: &str,
-    identity: &str,
-    data_path: &str,
-    label: &str,
-) {
-    let t = Instant::now();
-    let timeout = Duration::from_secs(30);
-    loop {
-        let result = client.graphql(mutation, Some(identity)).await;
-        if is_write_acp_denied(&result, data_path) {
-            eprintln!(
-                "[backbone]   {} write revocation synced in {:.2}s",
-                label,
-                t.elapsed().as_secs_f64()
-            );
-            return;
-        }
-        if t.elapsed() > timeout {
-            panic!(
-                "{}: write ACP revocation didn't propagate within {}s",
-                label,
-                timeout.as_secs()
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
-
-fn is_acp_denied(result: &Result<serde_json::Value, eyre::Report>, data_path: &str) -> bool {
-    let body = result
-        .as_ref()
-        .expect("GraphQL request failed (network error, not ACP denial)");
-    body.get("errors").is_some()
-        || body
-            .pointer(data_path)
-            .and_then(|v| v.as_array())
-            .is_none_or(|a| a.is_empty())
-}
-
-fn is_write_acp_denied(
-    result: &Result<serde_json::Value, eyre::Report>,
-    create_path: &str,
-) -> bool {
-    let body = result
-        .as_ref()
-        .expect("GraphQL request failed (network error, not ACP denial)");
-    if body.get("errors").is_some() {
-        return true;
-    }
-    match body.pointer(create_path) {
-        None => true,
-        Some(v) => v.as_array().is_some_and(|a| a.is_empty()),
-    }
-}
-
 #[tokio::test]
 #[ignore = "spec test: requires hubd, defra-iroh, and orbis-node on PATH"]
 async fn secure_training_data_compartments() {
@@ -897,102 +165,93 @@ async fn secure_training_data_compartments() {
         .await
         .expect("hub.rs node should start");
 
-    hub_cluster
-        .wait_ready(Duration::from_secs(30))
-        .await
-        .expect("hub.rs node should become healthy");
-
-    let hub_state = hub_cluster.observe(Duration::from_millis(200));
-    hub_state
-        .wait_for_height(3, Duration::from_secs(30))
-        .await
-        .expect("hub.rs should reach height 3");
-    eprintln!(
-        "[backbone] Hub.rs node ready in {:.2}s",
-        t.elapsed().as_secs_f64()
-    );
-
-    let hub_cli = HubdCli::new(
-        hubd_binary,
-        &hub_cluster.node(0).rpc_url(),
-        hub_chain_id,
-        HARDHAT_KEY_0,
-    );
+    let hub_rpc_url = hub_cluster.node(0).rpc_url();
+    let hub_ws_url = hub_cluster.node(0).ws_url();
+    let hub_cli = HubdCli::new(hubd_binary, &hub_rpc_url, hub_chain_id, HARDHAT_KEY_0);
 
     // Step 2. Start Orbis ring (T=2, N=3) with hub.rs for bulletin + ACP
-    let t = Instant::now();
+    let ring_spawn_start = Instant::now();
     eprintln!("[backbone] Step 2: Starting Orbis ring (3 nodes, threshold 2)...");
-    let ring = OrbisRing::builder()
-        .nodes(3)
-        .threshold(2)
-        .log_level("info")
-        .base_dir(run_dir.path())
-        .identity_keys(orbis_operator_keys.clone())
-        .hub_rs_config(HubRsNodeConfig {
-            rpc_url: hub_cluster.node(0).rpc_url(),
-            ws_url: hub_cluster.node(0).ws_url(),
-            chain_id: hub_chain_id,
-        })
-        .build()
+    let hub_ready = async {
+        hub_cluster
+            .wait_ready(Duration::from_secs(30))
+            .await
+            .expect("hub.rs node should become healthy");
+
+        let hub_state = hub_cluster.observe(Duration::from_millis(200));
+        hub_state
+            .wait_for_height(3, Duration::from_secs(30))
+            .await
+            .expect("hub.rs should reach height 3");
+        t.elapsed().as_secs_f64()
+    };
+    let ring_start = async {
+        let ring = OrbisRing::builder()
+            .nodes(3)
+            .threshold(2)
+            .log_level("info")
+            .base_dir(run_dir.path())
+            .identity_keys(orbis_operator_keys.clone())
+            .hub_rs_config(HubRsNodeConfig {
+                rpc_url: hub_rpc_url.clone(),
+                ws_url: hub_ws_url.clone(),
+                chain_id: hub_chain_id,
+            })
+            .build()
+            .await;
+        (ring_spawn_start.elapsed().as_secs_f64(), ring)
+    };
+    let (hub_ready_secs, (ring_spawn_secs, ring)) = tokio::join!(hub_ready, ring_start);
+    let ring = ring.expect("ring should start");
+    eprintln!("[backbone] Hub.rs node ready in {:.2}s", hub_ready_secs);
+    eprintln!(
+        "[backbone]   Orbis ring processes spawned in {:.2}s",
+        ring_spawn_secs
+    );
+    let hub_state = hub_cluster.observe(Duration::from_millis(200));
+
+    let ring_health_task = tokio::spawn(wait_for_orbis_health(
+        ring.grpc_addrs(),
+        Duration::from_secs(60),
+    ));
+    let node_identities = wait_for_orbis_node_identities(&ring, Duration::from_secs(15))
         .await
-        .expect("ring should start");
+        .expect("orbis nodes should write EVM addresses + signer pubkeys");
 
     // Step 2a. Fund orbis nodes on hub.rs
     let mut evm_addresses = Vec::with_capacity(ring.node_count());
     let mut node_signer_dids = Vec::with_capacity(ring.node_count());
-    for i in 0..ring.node_count() {
-        let data_dir = ring.node(i).data_dir().join("data");
-        let pk_path = data_dir.join("public_key.txt");
-        let signer_pk_path = data_dir.join("signer_pubkey.txt");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        let (address, signer_did) = loop {
-            let addr_ok = std::fs::read_to_string(&pk_path)
-                .ok()
-                .filter(|s| !s.trim().is_empty() && s.trim().starts_with("0x"));
-            let pubkey_ok = std::fs::read_to_string(&signer_pk_path)
-                .ok()
-                .filter(|s| !s.trim().is_empty());
-            if let (Some(addr), Some(pubkey_hex)) = (addr_ok, pubkey_ok) {
-                let did = secp256k1_did_from_compressed_pubkey_hex(pubkey_hex.trim());
-                break (addr.trim().to_string(), did);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                panic!(
-                    "node{} did not write public_key.txt + signer_pubkey.txt within 15s",
-                    i
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        };
+    for (i, identity) in node_identities.iter().enumerate() {
         eprintln!(
             "[backbone]   Funding orbis node{} on hub.rs: {} (DID: {}...)",
             i,
-            address,
-            &signer_did[..40.min(signer_did.len())]
+            identity.address,
+            &identity.signer_did[..40.min(identity.signer_did.len())]
         );
         hub_cli
-            .fund_evm_address(&address, "1000000000000000000")
+            .fund_evm_address(&identity.address, "1000000000000000000")
             .unwrap_or_else(|e| panic!("fund node{} on hub.rs: {}", i, e));
-        evm_addresses.push(address);
-        node_signer_dids.push(signer_did);
+        evm_addresses.push(identity.address.clone());
+        node_signer_dids.push(identity.signer_did.clone());
     }
 
-    // Step 2b. Wait for ring to be ready
-    ring.wait_ready(Duration::from_secs(60))
+    // Step 2b. Wait for basic node health that can overlap funding.
+    ring_health_task
         .await
-        .expect("all nodes should be healthy");
+        .expect("orbis ring health task should join")
+        .expect("all nodes should become healthy");
 
-    let orbis_cli = OrbisCliClient::new().expect("resolve cli-tool binary");
+    let node_infos = wait_for_orbis_node_infos(ring.grpc_addrs(), Duration::from_secs(60))
+        .await
+        .expect("all nodes should report info");
 
-    let mut node_infos = Vec::with_capacity(ring.node_count());
-    for i in 0..ring.node_count() {
-        let info = orbis_cli
-            .query_node_info(&ring.node(i).grpc_addr())
-            .unwrap_or_else(|e| panic!("query node{} info: {}", i, e));
-        node_infos.push(info);
-    }
+    eprintln!(
+        "[backbone]   Orbis nodes funded + healthy in {:.2}s",
+        ring_spawn_start.elapsed().as_secs_f64()
+    );
 
     // Step 3. Register bulletin namespace + add collaborators
+    let orbis_cli = OrbisCliClient::new().expect("resolve cli-tool binary");
     eprintln!("[backbone] Step 3: Registering bulletin namespace on hub.rs...");
     hub_cli
         .register_namespace(BULLETIN_RING_NAMESPACE)

@@ -5,13 +5,13 @@
 //! tx signing, and receipt polling) and the ACP light client for proof
 //! verification.
 
-use std::process::Command;
 use std::time::Duration;
+
+mod support;
 
 use acp_light_client::AcpLightClient;
 use hub_harness::cluster::{ConsensusPreset, GenesisBuilder, TestCluster};
-
-const HARDHAT_KEY_0: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+use support::hubd::{HubdCli, HARDHAT_KEY_0};
 
 const POLICY_YAML: &str = "\
 name: light-client-test-policy
@@ -29,95 +29,6 @@ resources:
         expr: writer + reader
       - name: write
         expr: writer";
-
-// ============================================================================
-// CLI helper
-// ============================================================================
-
-struct HubdCli {
-    binary: std::path::PathBuf,
-    rpc_url: String,
-    chain_id: u64,
-    key: String,
-}
-
-impl HubdCli {
-    fn new(binary: std::path::PathBuf, rpc_url: &str, chain_id: u64, key: &str) -> Self {
-        Self {
-            binary,
-            rpc_url: rpc_url.to_string(),
-            chain_id,
-            key: key.to_string(),
-        }
-    }
-
-    fn cmd(&self) -> Command {
-        let mut cmd = Command::new(&self.binary);
-        cmd.args([
-            "client",
-            "--url",
-            &self.rpc_url,
-            "--key",
-            &self.key,
-            "--client-chain-id",
-            &self.chain_id.to_string(),
-            "--compact",
-        ]);
-        cmd
-    }
-
-    fn exec(&self, args: &[&str]) -> eyre::Result<String> {
-        let output = self.cmd().args(args).output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(eyre::eyre!(
-                "hubd client {} failed ({}): stderr={}, stdout={}",
-                args.join(" "),
-                output.status,
-                stderr.trim(),
-                stdout.trim()
-            ));
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    }
-
-    fn create_policy(&self, yaml: &str) -> eyre::Result<String> {
-        self.exec(&["acp", "create-policy", yaml])
-    }
-
-    fn list_policies(&self) -> eyre::Result<String> {
-        self.exec(&["acp", "list-policies"])
-    }
-
-    fn register_object(
-        &self,
-        policy_id: &str,
-        resource: &str,
-        object_id: &str,
-    ) -> eyre::Result<String> {
-        self.exec(&["acp", "register-object", policy_id, resource, object_id])
-    }
-
-    fn set_relationship(
-        &self,
-        policy_id: &str,
-        resource: &str,
-        object_id: &str,
-        relation: &str,
-        actor: &str,
-    ) -> eyre::Result<String> {
-        self.exec(&[
-            "acp",
-            "set-relationship",
-            policy_id,
-            resource,
-            object_id,
-            relation,
-            actor,
-        ])
-    }
-}
 
 // ============================================================================
 // The test
