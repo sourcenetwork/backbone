@@ -17,6 +17,7 @@ use alloy_signer_local::PrivateKeySigner;
 
 use defra_harness::node::RustNode;
 use defra_harness::sse::{open_acp_events_sse, wait_for_acp_invalidation};
+use defra_harness::{DefraClient, NodeKind};
 use orbis_harness::cli::signer_did_for_pk;
 use orbis_harness::cli::types::RingPayload;
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
@@ -501,6 +502,68 @@ async fn wait_for_block_finality(hub_state: &hub_harness::observe::ClusterState,
     );
 }
 
+fn p2p_addr(client: &DefraClient, label: &str) -> String {
+    client
+        .p2p_info()
+        .unwrap_or_else(|e| panic!("{}: fetch p2p info: {}", label, e))
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("{}: node has no P2P address", label))
+        .to_string()
+}
+
+async fn wait_for_active_peer_count(client: &DefraClient, expected: usize, label: &str) {
+    let t = Instant::now();
+    let timeout = Duration::from_secs(15);
+    loop {
+        let count = client
+            .p2p_active_peers()
+            .ok()
+            .and_then(|v| v.as_array().map(|arr| arr.len()))
+            .unwrap_or(0);
+        if count >= expected {
+            eprintln!(
+                "[backbone]   {} active peers ready in {:.2}s ({} peers)",
+                label,
+                t.elapsed().as_secs_f64(),
+                count
+            );
+            return;
+        }
+        if t.elapsed() > timeout {
+            panic!(
+                "{}: expected at least {} active peers within {}s",
+                label,
+                expected,
+                timeout.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn configure_replication_link(
+    source: &DefraClient,
+    dest: &DefraClient,
+    collections: &[&str],
+    label: &str,
+) {
+    let dest_addr = p2p_addr(dest, label);
+    source
+        .p2p_connect(&[&dest_addr])
+        .unwrap_or_else(|e| panic!("{}: p2p connect: {}", label, e));
+    wait_for_active_peer_count(source, 1, label).await;
+    source
+        .p2p_collection_add(collections)
+        .unwrap_or_else(|e| panic!("{}: source p2p collection add: {}", label, e));
+    dest.p2p_collection_add(collections)
+        .unwrap_or_else(|e| panic!("{}: destination p2p collection add: {}", label, e));
+    source
+        .p2p_replicator_set(collections, &dest_addr)
+        .unwrap_or_else(|e| panic!("{}: set replicator: {}", label, e));
+}
+
 /// Poll a DefraDB query until the array at `pointer` has `expected` elements.
 /// This tests the real end-to-end ACP propagation path: hub.rs → websocket →
 /// DefraDB light client cache invalidation → proof re-fetch → query succeeds.
@@ -873,14 +936,17 @@ async fn secure_training_data_compartments() {
     let globex_svc = ServiceIdentity::new_file_keyring("globex-svc", run_dir.path());
     let acme_defra_svc = ServiceIdentity::new_file_keyring("acme-defra-svc", run_dir.path());
     let globex_defra_svc = ServiceIdentity::new_file_keyring("globex-defra-svc", run_dir.path());
+    let platform_defra_svc =
+        ServiceIdentity::new_file_keyring("platform-defra-svc", run_dir.path());
     eprintln!(
-        "[backbone] Step 9: Service identities created: {}, {}, {}, {}, {}, {}",
+        "[backbone] Step 9: Service identities created: {}, {}, {}, {}, {}, {}, {}",
         training_svc.label,
         inference_svc.label,
         audit_svc.label,
         globex_svc.label,
         acme_defra_svc.label,
         globex_defra_svc.label,
+        platform_defra_svc.label,
     );
 
     // Step 10. Authorize DefraDB service accounts as ring signers
@@ -905,6 +971,17 @@ async fn secure_training_data_compartments() {
             &globex_defra_signer_did,
         )
         .expect("grant globex_defra_svc signer on ring");
+
+    let platform_defra_signer_did = signer_did_for_pk(&platform_defra_svc.private_key_hex);
+    hub_cli
+        .set_relationship(
+            &ring_policy_id,
+            "ring",
+            &ring_id,
+            "signer",
+            &platform_defra_signer_did,
+        )
+        .expect("grant platform_defra_svc signer on ring");
     eprintln!(
         "[backbone] Steps 4-10: Policy + identities setup in {:.2}s",
         t.elapsed().as_secs_f64()
@@ -938,9 +1015,11 @@ async fn secure_training_data_compartments() {
     // Step 13. Fund DefraDB service accounts on hub.rs
     let acme_defra_evm_addr = evm_address_from_private_key(&acme_defra_svc.private_key_hex);
     let globex_defra_evm_addr = evm_address_from_private_key(&globex_defra_svc.private_key_hex);
+    let platform_defra_evm_addr = evm_address_from_private_key(&platform_defra_svc.private_key_hex);
     for (label, addr) in &[
         ("acme-defra", &acme_defra_evm_addr),
         ("globex-defra", &globex_defra_evm_addr),
+        ("platform-defra", &platform_defra_evm_addr),
     ] {
         hub_cli
             .fund_evm_address(addr, "1000000000000000000")
@@ -989,9 +1068,61 @@ async fn secure_training_data_compartments() {
         acme_defra.api_url
     );
 
-    // Step 15. Deploy Transcript schema with @policy
+    // Step 14a. Start PlatformCo DefraDB with Orbis signer (derivation="platform")
+    let platform_defra_ports = test_infra::allocate_ports(2).expect("platform defra ports");
+    let platform_defra_dir = run_dir
+        .node_dir("defra-platform")
+        .expect("platform defra dir");
+    let platform_defra_log_dir = platform_defra_dir.join("logs");
+    let platform_defra_root = platform_defra_dir.join("data");
+    let platform_keyring_path = platform_defra_root.join("keys");
+
+    let platform_defra_node = RustNode::from_binary(&defra_binary.path);
+    let mut platform_defra_config = NodeConfig::new(
+        "defra-platform",
+        platform_defra_root,
+        platform_defra_log_dir,
+        format!("127.0.0.1:{}", platform_defra_ports[0]),
+    );
+    platform_defra_config.p2p_enabled = true;
+    platform_defra_config.p2p_addr =
+        Some(format!("/ip4/127.0.0.1/tcp/{}", platform_defra_ports[1]));
+    platform_defra_config.hub_rs_address = Some(hub_cluster.node(0).rpc_url());
+    platform_defra_config.acp_document_type = Some("hub-rs".to_string());
+    platform_defra_config.identity = Some(platform_defra_svc.private_key_hex.clone());
+    platform_defra_config.keyring = KeyringBackend::File {
+        path: platform_keyring_path,
+        secret: "e2e-test-password".to_string(),
+    };
+    platform_defra_config.orbis_signer = Some(OrbisSignerConfig {
+        endpoint: ring.node(0).grpc_addr(),
+        ring_id: ring_id.clone(),
+        derivation: "platform".to_string(),
+    });
+
+    let platform_defra = start_node(
+        &platform_defra_node,
+        platform_defra_config,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("platform defra should start");
+    eprintln!(
+        "[backbone] Step 14a: PlatformCo DefraDB ready: {}",
+        platform_defra.api_url
+    );
+
+    // Step 15. Deploy Transcript schema with @policy on Acme + PlatformCo
     let acme_client = DefraHttpClient::new(&acme_defra.api_url);
+    let platform_client = DefraHttpClient::new(&platform_defra.api_url);
     let (_acme_acp_sse, acme_acp_events) = open_acp_events_sse(&acme_defra.api_url).await;
+    let acme_defra_cli =
+        DefraClient::new(&defra_binary.path, &acme_defra.http_addr, NodeKind::Rust);
+    let platform_defra_cli = DefraClient::new(
+        &defra_binary.path,
+        &platform_defra.http_addr,
+        NodeKind::Rust,
+    );
 
     let transcript_schema = format!(
         r#"type Transcript @policy(id: "{}", resource: "transcript") {{ call_id: String  content: String  customer: String }}"#,
@@ -1001,6 +1132,18 @@ async fn secure_training_data_compartments() {
         .schema_add(&transcript_schema)
         .await
         .expect("add transcript schema");
+    platform_client
+        .schema_add(&transcript_schema)
+        .await
+        .expect("add transcript schema on platform");
+    configure_replication_link(
+        &acme_defra_cli,
+        &platform_defra_cli,
+        &["Transcript"],
+        "acme -> platform transcript replication",
+    )
+    .await;
+    eprintln!("[backbone] Step 15a: PlatformCo subscribed to Acme Transcript replication");
     eprintln!(
         "[backbone] Steps 11-15: ACP policies + DefraDB setup in {:.2}s",
         t.elapsed().as_secs_f64()
@@ -1056,6 +1199,23 @@ async fn secure_training_data_compartments() {
         "[backbone] Step 16: TRAINING_SVC wrote {} transcripts in {:.2}s",
         acme_doc_ids.len(),
         batch_start.elapsed().as_secs_f64()
+    );
+    let replicated_transcripts = poll_query_count(
+        &platform_client,
+        r#"query { Transcript { _docID call_id content customer } }"#,
+        &training_svc.private_key_hex,
+        "/data/Transcript",
+        3,
+        "Step 16a",
+    )
+    .await;
+    let replicated_transcript_docs = replicated_transcripts
+        .pointer("/data/Transcript")
+        .and_then(|v| v.as_array())
+        .expect("PlatformCo Transcript array");
+    eprintln!(
+        "[backbone] Step 16a: PlatformCo replicated {} acme transcripts",
+        replicated_transcript_docs.len()
     );
 
     // Step 16b. INFERENCE_SVC reads BEFORE being granted reader — denied.
@@ -1211,7 +1371,9 @@ async fn secure_training_data_compartments() {
         globex_defra.api_url
     );
 
-    // Step 21. Deploy SupportTicket schema with @policy
+    // Step 21. Deploy SupportTicket schema with @policy on Globex + PlatformCo
+    let globex_defra_cli =
+        DefraClient::new(&defra_binary.path, &globex_defra.http_addr, NodeKind::Rust);
     let globex_client = DefraHttpClient::new(&globex_defra.api_url);
     let (_globex_acp_sse, globex_acp_events) = open_acp_events_sse(&globex_defra.api_url).await;
 
@@ -1223,7 +1385,18 @@ async fn secure_training_data_compartments() {
         .schema_add(&ticket_schema)
         .await
         .expect("add ticket schema");
-    eprintln!("[backbone] Step 21: Schema added: SupportTicket @policy");
+    platform_client
+        .schema_add(&ticket_schema)
+        .await
+        .expect("add ticket schema on platform");
+    configure_replication_link(
+        &globex_defra_cli,
+        &platform_defra_cli,
+        &["SupportTicket"],
+        "globex -> platform support ticket replication",
+    )
+    .await;
+    eprintln!("[backbone] Step 21: Schema added: SupportTicket @policy, PlatformCo subscribed");
 
     // Step 22. GLOBEX_SVC writes + reads tickets
     let tickets = vec![
@@ -1292,6 +1465,23 @@ async fn secure_training_data_compartments() {
         tickets.len(),
         batch_start.elapsed().as_secs_f64(),
         ticket_docs.len()
+    );
+    let replicated_tickets = poll_query_count(
+        &platform_client,
+        ticket_query,
+        &globex_svc.private_key_hex,
+        "/data/SupportTicket",
+        2,
+        "Step 22a",
+    )
+    .await;
+    let replicated_ticket_docs = replicated_tickets
+        .pointer("/data/SupportTicket")
+        .and_then(|v| v.as_array())
+        .expect("PlatformCo SupportTicket array");
+    eprintln!(
+        "[backbone] Step 22a: PlatformCo replicated {} globex tickets",
+        replicated_ticket_docs.len()
     );
 
     // Step 23. Cross-compartment isolation: globex -> acme (denied)
@@ -1769,6 +1959,7 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Hub.rs cluster health: no unexpected errors");
 
     drop(hub_cluster);
+    drop(platform_defra);
     drop(globex_defra);
     drop(acme_defra);
 
