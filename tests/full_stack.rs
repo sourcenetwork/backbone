@@ -135,6 +135,8 @@ const HUB_EVM_GAS_LIMIT: u64 = 5_000_000;
 
 sol! {
     interface IAcpHarness {
+        function batchCalls(bytes[] calls) external returns (bytes[] results);
+
         function setRelationship(
             bytes32 policyId,
             string resource,
@@ -324,48 +326,10 @@ impl HubdCli {
             .map(|tx_hash| tx_hash.to_string())
     }
 
-    fn submit_set_relationship_raw_with_nonce(
-        &self,
-        policy_id: &str,
-        resource: &str,
-        object_id: &str,
-        relation: &str,
-        actor: &str,
-        nonce: u64,
-    ) -> eyre::Result<String> {
-        let calldata = IAcpHarness::setRelationshipCall {
-            policyId: parse_policy_id_bytes32(policy_id)?,
-            resource: resource.to_string(),
-            objectId: object_id.to_string(),
-            relation: relation.to_string(),
-            actor: actor.to_string(),
-        }
-        .abi_encode();
-        let raw_tx = sign_evm_call(
-            &self.key,
-            acp_precompile_address(),
-            calldata.into(),
-            nonce,
-            self.chain_id,
-        );
-        self.send_raw_evm_tx(&raw_tx)
-    }
-
-    fn submit_delete_relationship_raw_with_nonce(
-        &self,
-        policy_id: &str,
-        resource: &str,
-        object_id: &str,
-        relation: &str,
-        actor: &str,
-        nonce: u64,
-    ) -> eyre::Result<String> {
-        let calldata = IAcpHarness::deleteRelationshipCall {
-            policyId: parse_policy_id_bytes32(policy_id)?,
-            resource: resource.to_string(),
-            objectId: object_id.to_string(),
-            relation: relation.to_string(),
-            actor: actor.to_string(),
+    fn submit_batch_acp_calls_raw(&self, calls: Vec<Vec<u8>>) -> eyre::Result<String> {
+        let nonce = self.get_evm_nonce(&self.key)?;
+        let calldata = IAcpHarness::batchCallsCall {
+            calls: calls.into_iter().map(Into::into).collect(),
         }
         .abi_encode();
         let raw_tx = sign_evm_call(
@@ -731,44 +695,38 @@ fn extract_doc_ids(body: &serde_json::Value, pointer: &str, label: &str) -> Vec<
 fn submit_acp_relationship_txs(
     hub_cli: &HubdCli,
     txs: &[AcpRelationshipTx<'_>],
-) -> eyre::Result<Vec<String>> {
-    let mut nonce = hub_cli.get_evm_nonce(&hub_cli.key)?;
-    let mut tx_hashes = Vec::with_capacity(txs.len());
-    for tx in txs {
-        let tx_hash = match tx.kind {
-            AcpRelationshipTxKind::Set => hub_cli.submit_set_relationship_raw_with_nonce(
-                tx.policy_id,
-                tx.resource,
-                tx.object_id,
-                tx.relation,
-                tx.actor,
-                nonce,
-            )?,
-            AcpRelationshipTxKind::Delete => hub_cli.submit_delete_relationship_raw_with_nonce(
-                tx.policy_id,
-                tx.resource,
-                tx.object_id,
-                tx.relation,
-                tx.actor,
-                nonce,
-            )?,
-        };
-        tx_hashes.push(tx_hash);
-        nonce += 1;
-    }
-    Ok(tx_hashes)
+) -> eyre::Result<String> {
+    let calls = txs
+        .iter()
+        .map(|tx| match tx.kind {
+            AcpRelationshipTxKind::Set => Ok(IAcpHarness::setRelationshipCall {
+                policyId: parse_policy_id_bytes32(tx.policy_id)?,
+                resource: tx.resource.to_string(),
+                objectId: tx.object_id.to_string(),
+                relation: tx.relation.to_string(),
+                actor: tx.actor.to_string(),
+            }
+            .abi_encode()),
+            AcpRelationshipTxKind::Delete => Ok(IAcpHarness::deleteRelationshipCall {
+                policyId: parse_policy_id_bytes32(tx.policy_id)?,
+                resource: tx.resource.to_string(),
+                objectId: tx.object_id.to_string(),
+                relation: tx.relation.to_string(),
+                actor: tx.actor.to_string(),
+            }
+            .abi_encode()),
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+    hub_cli.submit_batch_acp_calls_raw(calls)
 }
 
-fn wait_for_tx_receipts(hub_cli: &HubdCli, tx_hashes: &[String], label: &str) -> eyre::Result<()> {
+fn wait_for_tx_receipt(hub_cli: &HubdCli, tx_hash: &str, label: &str) -> eyre::Result<()> {
     let t = Instant::now();
-    for tx_hash in tx_hashes {
-        hub_cli.wait_for_tx_receipt(tx_hash)?;
-    }
+    hub_cli.wait_for_tx_receipt(tx_hash)?;
     eprintln!(
-        "[backbone]   {} receipts confirmed in {:.2}s ({} txs)",
+        "[backbone]   {} receipt confirmed in {:.2}s",
         label,
-        t.elapsed().as_secs_f64(),
-        tx_hashes.len()
+        t.elapsed().as_secs_f64()
     );
     Ok(())
 }
@@ -1476,18 +1434,19 @@ async fn secure_training_data_compartments() {
         })
         .collect::<Vec<_>>();
     let submit_start = Instant::now();
-    let grant_tx_hashes = submit_acp_relationship_txs(&hub_cli, &grant_txs)
+    let grant_tx_hash = submit_acp_relationship_txs(&hub_cli, &grant_txs)
         .unwrap_or_else(|e| panic!("submit Step 16c grant tx batch: {}", e));
     eprintln!(
-        "[backbone]   Step 16c submitted {} grant txs in {:.2}s",
-        grant_tx_hashes.len(),
+        "[backbone]   Step 16c submitted {} grant ops in one tx in {:.2}s",
+        grant_txs.len(),
         submit_start.elapsed().as_secs_f64()
     );
-    for (doc_id, tx_hash) in acme_doc_ids.iter().zip(grant_tx_hashes.iter()) {
-        eprintln!("[backbone]   grant reader on {} tx={}", doc_id, tx_hash);
+    eprintln!("[backbone]   Step 16c batch tx={}", grant_tx_hash);
+    for doc_id in &acme_doc_ids {
+        eprintln!("[backbone]   grant reader on {}", doc_id);
     }
-    wait_for_tx_receipts(&hub_cli, &grant_tx_hashes, "Step 16c")
-        .unwrap_or_else(|e| panic!("wait for Step 16c grant receipts: {}", e));
+    wait_for_tx_receipt(&hub_cli, &grant_tx_hash, "Step 16c")
+        .unwrap_or_else(|e| panic!("wait for Step 16c grant receipt: {}", e));
     eprintln!(
         "[backbone] Step 16c: INFERENCE_SVC granted reader on {} documents in {:.2}s",
         acme_doc_ids.len(),
@@ -1795,15 +1754,16 @@ async fn secure_training_data_compartments() {
         actor: &audit_svc.did_key,
     }));
     let submit_start = Instant::now();
-    let audit_grant_hashes = submit_acp_relationship_txs(&hub_cli, &audit_grant_txs)
+    let audit_grant_hash = submit_acp_relationship_txs(&hub_cli, &audit_grant_txs)
         .unwrap_or_else(|e| panic!("submit Step 25 audit grant tx batch: {}", e));
     eprintln!(
-        "[backbone]   Step 25 submitted {} audit grant txs in {:.2}s",
-        audit_grant_hashes.len(),
+        "[backbone]   Step 25 submitted {} audit grant ops in one tx in {:.2}s",
+        audit_grant_txs.len(),
         submit_start.elapsed().as_secs_f64()
     );
-    wait_for_tx_receipts(&hub_cli, &audit_grant_hashes, "Step 25")
-        .unwrap_or_else(|e| panic!("wait for Step 25 audit grant receipts: {}", e));
+    eprintln!("[backbone]   Step 25 batch tx={}", audit_grant_hash);
+    wait_for_tx_receipt(&hub_cli, &audit_grant_hash, "Step 25")
+        .unwrap_or_else(|e| panic!("wait for Step 25 audit grant receipt: {}", e));
     eprintln!(
         "[backbone] Step 25: AUDIT_SVC granted reader on {} acme docs + {} globex docs in {:.2}s",
         acme_doc_ids.len(),
@@ -1916,15 +1876,16 @@ async fn secure_training_data_compartments() {
         })
         .collect::<Vec<_>>();
     let submit_start = Instant::now();
-    let revoke_tx_hashes = submit_acp_relationship_txs(&hub_cli, &revoke_txs)
+    let revoke_tx_hash = submit_acp_relationship_txs(&hub_cli, &revoke_txs)
         .unwrap_or_else(|e| panic!("submit Step 29 revoke tx batch: {}", e));
     eprintln!(
-        "[backbone]   Step 29 submitted {} revoke txs in {:.2}s",
-        revoke_tx_hashes.len(),
+        "[backbone]   Step 29 submitted {} revoke ops in one tx in {:.2}s",
+        revoke_txs.len(),
         submit_start.elapsed().as_secs_f64()
     );
-    wait_for_tx_receipts(&hub_cli, &revoke_tx_hashes, "Step 29")
-        .unwrap_or_else(|e| panic!("wait for Step 29 revoke receipts: {}", e));
+    eprintln!("[backbone]   Step 29 batch tx={}", revoke_tx_hash);
+    wait_for_tx_receipt(&hub_cli, &revoke_tx_hash, "Step 29")
+        .unwrap_or_else(|e| panic!("wait for Step 29 revoke receipt: {}", e));
     eprintln!(
         "[backbone]   Step 29 revocation txs: {:.2}s",
         t.elapsed().as_secs_f64()
