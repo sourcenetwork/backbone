@@ -169,6 +169,31 @@ impl DefraHttpClient {
             .map_err(|e| eyre!("failed to parse acp status response: {}", e))
     }
 
+    /// Trigger targeted P2P document sync for specific document IDs.
+    pub async fn p2p_document_sync(&self, collection_name: &str, doc_ids: &[String]) -> Result<()> {
+        let url = format!("{}/api/v0/p2p/documents/sync", self.base_url);
+        let body = serde_json::json!({
+            "collectionName": collection_name,
+            "docIDs": doc_ids,
+        });
+
+        let resp = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| eyre!("p2p document sync request failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(eyre!("p2p document sync HTTP {}: {}", status, body));
+        }
+
+        Ok(())
+    }
+
     pub fn base_url(&self) -> &str {
         &self.base_url
     }

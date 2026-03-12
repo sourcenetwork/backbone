@@ -262,8 +262,6 @@ pub fn assert_doc_ids_match(
 
 pub async fn poll_replicated_doc_ids(
     client: &DefraHttpClient,
-    source_client: &DefraClient,
-    dest_client: &DefraClient,
     collection_name: &str,
     identity: &str,
     pointer: &str,
@@ -324,16 +322,21 @@ pub async fn poll_replicated_doc_ids(
                     .unwrap_or_else(|| t.elapsed() >= Duration::from_secs(3));
 
             if should_sync {
-                let dest_addr = p2p_addr(dest_client, label);
-                source_client
-                    .p2p_replicator_set(&[collection_name], &dest_addr)
+                let sync_start = Instant::now();
+                client
+                    .p2p_document_sync(collection_name, &missing)
+                    .await
                     .unwrap_or_else(|error| {
-                        panic!("{}: refresh replicator push: {}", label, error)
+                        panic!(
+                            "{}: p2p document sync for missing docs {:?}: {}",
+                            label, missing, error
+                        )
                     });
                 eprintln!(
-                    "[backbone]   {} refreshed replicator push for {} missing docs",
+                    "[backbone]   {} targeted doc sync for {} missing docs in {:.2}s",
                     label,
-                    missing.len()
+                    missing.len(),
+                    sync_start.elapsed().as_secs_f64()
                 );
                 last_sync_attempt = Some(Instant::now());
             }
