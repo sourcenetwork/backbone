@@ -7,6 +7,7 @@
 
 mod support;
 
+use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -130,6 +131,66 @@ impl ServiceIdentity {
 }
 
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
+const FAILURE_LOG_TAIL_LINES: usize = 120;
+
+struct FailureLogDumper {
+    run_dir: PathBuf,
+}
+
+impl FailureLogDumper {
+    fn new(run_dir: PathBuf) -> Self {
+        Self { run_dir }
+    }
+
+    fn dump_node_log(&self, node_name: &str, file_name: &str) {
+        let path = self.run_dir.join(node_name).join("logs").join(file_name);
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let content = String::from_utf8_lossy(&bytes);
+                let lines: Vec<&str> = content.lines().collect();
+                let start = lines.len().saturating_sub(FAILURE_LOG_TAIL_LINES);
+                eprintln!(
+                    "[backbone] ===== {} {} (last {} lines) =====",
+                    node_name,
+                    file_name,
+                    lines.len().saturating_sub(start)
+                );
+                if lines.is_empty() {
+                    eprintln!("[backbone] <empty>");
+                } else {
+                    for line in &lines[start..] {
+                        eprintln!("[backbone] {}", line);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "[backbone] ===== {} {} unavailable: {} =====",
+                    node_name, file_name, err
+                );
+            }
+        }
+    }
+
+    fn dump_on_panic(&self) {
+        eprintln!(
+            "[backbone] ===== full_stack failure log dump from {} =====",
+            self.run_dir.display()
+        );
+        for node_name in ["defra-acme", "defra-platform", "defra-globex"] {
+            self.dump_node_log(node_name, "stdout.log");
+            self.dump_node_log(node_name, "stderr.log");
+        }
+    }
+}
+
+impl Drop for FailureLogDumper {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.dump_on_panic();
+        }
+    }
+}
 
 #[tokio::test]
 #[ignore = "spec test: requires hubd, defra-iroh, and orbis-node on PATH"]
@@ -146,6 +207,7 @@ async fn secure_training_data_compartments() {
         .join("full-stack");
     let run_dir =
         test_infra::TestRunDir::new(&base_dir, "BACKBONE_E2E_KEEP").expect("create run dir");
+    let _failure_log_dumper = FailureLogDumper::new(run_dir.path().to_path_buf());
 
     let test_start = Instant::now();
     let orbis_operator_keys = generate_identity_keys(&run_id, 3);
