@@ -11,6 +11,8 @@ set -euo pipefail
 # cargo build --release.
 #
 # Required env vars (set in ci.yml):
+#   DEFRA_REF    — git ref for defradb.rs  (e.g. "main" or a commit SHA)
+#   HUBD_REF     — git ref for hub.rs      (e.g. "main" or a commit SHA)
 #   ORBIS_REF    — git ref for orbis-rs    (e.g. "jack/integration-testing")
 #
 # Optional:
@@ -36,7 +38,20 @@ repo_url() {
 
 resolve_commit() {
     local repo=$1 ref=$2
-    git ls-remote "$(repo_url "$repo")" "$ref" | head -1 | cut -f1
+    local commit
+    commit=$(git ls-remote "$(repo_url "$repo")" "$ref" | head -1 | cut -f1)
+    if [[ -n "$commit" ]]; then
+        echo "$commit"
+        return 0
+    fi
+
+    if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+        echo "$ref"
+        return 0
+    fi
+
+    echo "ERROR: could not resolve $repo ref '$ref'" >&2
+    return 1
 }
 
 ensure_clone() {
@@ -141,19 +156,31 @@ prune_old_versions() {
     fi
 }
 
-echo "=== Ensuring binary dependencies ==="
+ensure_prebuilt_binary() {
+    local repo=$1 ref=$2 binary=$3 output=${4:-$3}
+    local commit cache_path
 
-# defra and hub.rs: binaries built by their own CI, just verify symlinks exist
-echo "--- defra/hub.rs (pre-built by their CI) ---"
-for bin in defra-iroh hubd; do
-    if [[ -x "$CACHE_DIR/$bin" ]]; then
-        echo "  $bin: $(readlink "$CACHE_DIR/$bin")"
-    else
-        echo "  ERROR: $bin not found in $CACHE_DIR" >&2
-        echo "  defra and hub.rs CI must run first to populate the binary cache." >&2
+    commit=$(resolve_commit "$repo" "$ref")
+    cache_path="$CACHE_DIR/$repo/$commit/$output"
+
+    echo "$repo: $ref → ${commit:0:12}"
+    if [[ ! -x "$cache_path" ]]; then
+        echo "  ERROR: cached binary missing at $cache_path" >&2
+        echo "  $repo CI must build and cache commit $commit first." >&2
         exit 1
     fi
-done
+
+    ln -sf "$cache_path" "$CACHE_DIR/$binary"
+    echo "  $binary: $(readlink "$CACHE_DIR/$binary")"
+}
+
+echo "=== Ensuring binary dependencies ==="
+
+# defra and hub.rs: binaries built by their own CI, relink to the exact
+# commit requested by this workflow so runners do not drift.
+echo "--- defra/hub.rs (pre-built by their CI) ---"
+ensure_prebuilt_binary "defradb.rs" "$DEFRA_REF" "defra-iroh"
+ensure_prebuilt_binary "hub.rs" "$HUBD_REF" "hubd"
 
 # orbis-rs: no CI on studios, build here
 echo "--- orbis-rs (built by ensure-binaries) ---"
