@@ -8,9 +8,6 @@ on:
   workflow_dispatch:
 
 env:
-  DEFRA_REF: main
-  HUBD_REF: main
-  ORBIS_REF: jack/integration-testing
   CARGO_TERM_COLOR: always
   PROTOC: /opt/homebrew/bin/protoc
 
