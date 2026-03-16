@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build and cache cross-repo binary dependencies for integration tests.
+# Download pre-built binary dependencies for integration tests.
 #
-# defra and hub.rs binaries are built by their own CI and cached on the
-# studios. This script just verifies they exist (via symlinks).
+# defra and hub.rs binaries are downloaded as GitHub Actions artifacts
+# from their CI workflows. The exact commit for each ref must have a
+# successful CI run with uploaded artifacts, or this script fails.
 #
-# orbis-rs has no CI on the studios, so this script resolves the commit,
-# clones/fetches into a persistent local checkout, and does an incremental
-# cargo build --release.
+# orbis-rs has no CI artifact pipeline, so this script resolves the
+# commit, clones/fetches into a persistent local checkout, and does
+# an incremental cargo build --release.
 #
 # Required env vars (set in ci.yml):
 #   DEFRA_REF    — git ref for defradb.rs  (e.g. "main" or a commit SHA)
@@ -16,7 +17,7 @@ set -euo pipefail
 #   ORBIS_REF    — git ref for orbis-rs    (e.g. "jack/integration-testing")
 #
 # Optional:
-#   PRIVATE_REPO_PAT — PAT for private repo access (used in git URLs)
+#   PRIVATE_REPO_PAT — PAT for private repo access (used for gh CLI and git URLs)
 #   CACHE_DIR        — override binary cache root (default: ~/.sourcenetwork/bin)
 #   SRC_DIR          — override source clone root (default: ~/.sourcenetwork/src)
 #   MAX_VERSIONS     — versions to keep per component (default: 3)
@@ -26,6 +27,9 @@ SRC_DIR="${SRC_DIR:-$HOME/.sourcenetwork/src}"
 MAX_VERSIONS="${MAX_VERSIONS:-3}"
 
 mkdir -p "$CACHE_DIR" "$SRC_DIR"
+
+# gh CLI auth via PAT
+export GH_TOKEN="${PRIVATE_REPO_PAT:-}"
 
 repo_url() {
     local repo=$1
@@ -53,6 +57,50 @@ resolve_commit() {
     echo "ERROR: could not resolve $repo ref '$ref'" >&2
     return 1
 }
+
+# Download a binary artifact from a GitHub Actions workflow run.
+# Finds the successful CI run for the exact commit, then downloads
+# the named artifact.
+download_artifact() {
+    local repo=$1 ref=$2 artifact_name=$3 binary_name=$4
+    local commit
+    commit=$(resolve_commit "$repo" "$ref")
+    echo "$repo: $ref → ${commit:0:12}"
+
+    # Find successful CI run for this exact commit
+    local run_id
+    run_id=$(gh run list -R "sourcenetwork/$repo" \
+        --commit "$commit" --status success --workflow ci.yml \
+        --limit 1 --json databaseId -q '.[0].databaseId')
+
+    if [[ -z "$run_id" ]]; then
+        echo "  ERROR: no successful CI run found for $repo@${commit:0:12}" >&2
+        echo "  The CI for $repo must complete successfully before backbone CI can run." >&2
+        exit 1
+    fi
+
+    echo "  Downloading $artifact_name from run $run_id..."
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    gh run download "$run_id" -R "sourcenetwork/$repo" \
+        --name "$artifact_name" --dir "$tmp_dir"
+
+    # Find the binary in the extracted artifact (may be nested or flat)
+    local found
+    found=$(find "$tmp_dir" -type f | head -1)
+    if [[ -z "$found" ]]; then
+        echo "  ERROR: artifact $artifact_name was empty" >&2
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
+    cp "$found" "$CACHE_DIR/$binary_name"
+    chmod +x "$CACHE_DIR/$binary_name"
+    rm -rf "$tmp_dir"
+    echo "  $binary_name: ready"
+}
+
+# --- orbis-rs helper functions (source build, no CI artifacts) ---
 
 ensure_clone() {
     local repo=$1 ref=$2 commit=$3
@@ -156,34 +204,15 @@ prune_old_versions() {
     fi
 }
 
-ensure_prebuilt_binary() {
-    local repo=$1 ref=$2 binary=$3 output=${4:-$3}
-    local commit cache_path
-
-    commit=$(resolve_commit "$repo" "$ref")
-    cache_path="$CACHE_DIR/$repo/$commit/$output"
-
-    echo "$repo: $ref → ${commit:0:12}"
-    if [[ ! -x "$cache_path" ]]; then
-        echo "  ERROR: cached binary missing at $cache_path" >&2
-        echo "  $repo CI must build and cache commit $commit first." >&2
-        exit 1
-    fi
-
-    ln -sf "$cache_path" "$CACHE_DIR/$binary"
-    echo "  $binary: $(readlink "$CACHE_DIR/$binary")"
-}
-
 echo "=== Ensuring binary dependencies ==="
 
-# defra and hub.rs: binaries built by their own CI, relink to the exact
-# commit requested by this workflow so runners do not drift.
-echo "--- defra/hub.rs (pre-built by their CI) ---"
-ensure_prebuilt_binary "defradb.rs" "$DEFRA_REF" "defra-iroh"
-ensure_prebuilt_binary "hub.rs" "$HUBD_REF" "hubd"
+# defra and hub.rs: download release artifacts from their CI
+echo "--- defra/hub.rs (GitHub Actions artifacts) ---"
+download_artifact "defradb.rs" "$DEFRA_REF" "defra-iroh-aarch64-apple-darwin" "defra-iroh"
+download_artifact "hub.rs" "$HUBD_REF" "hubd-aarch64-apple-darwin" "hubd"
 
-# orbis-rs: no CI on studios, build here
-echo "--- orbis-rs (built by ensure-binaries) ---"
+# orbis-rs: no CI artifact pipeline, build from source
+echo "--- orbis-rs (built from source) ---"
 ORBIS_COMMIT=$(resolve_commit "orbis-rs" "$ORBIS_REF")
 echo "orbis-rs: $ORBIS_REF → ${ORBIS_COMMIT:0:12}"
 
@@ -195,10 +224,10 @@ prune_old_versions "orbis-rs"
 
 # Final verification
 echo ""
-echo "=== Binary versions ==="
+echo "=== Binary verification ==="
 for bin in defra-iroh hubd orbis-node cli-tool; do
     if [[ -x "$CACHE_DIR/$bin" ]]; then
-        echo "  $bin: $(readlink "$CACHE_DIR/$bin")"
+        echo "  $bin: OK"
     else
         echo "  ERROR: $bin not found in $CACHE_DIR" >&2
         exit 1
