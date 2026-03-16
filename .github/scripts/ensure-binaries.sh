@@ -46,11 +46,11 @@ fi
 manifest_get() {
     local component=$1 field=$2
     # Match the section, then find the field within it (before the next section)
-    awk -v section="\\[components\\.$component\\]" -v key="$field" '
-        $0 ~ section { found=1; next }
+    awk -v section="components.$component" -v key="$field" '
+        $0 ~ "\\[" section "\\]" { found=1; next }
         found && /^\[/ { found=0 }
-        found && $0 ~ "^"key"\\s*=" {
-            gsub(/.*=\s*"/, ""); gsub(/".*/, ""); print; exit
+        found && $0 ~ "^" key " *= *\"" {
+            gsub(/.*= *"/, ""); gsub(/".*/, ""); print; exit
         }
     ' "$MANIFEST"
 }
