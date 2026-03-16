@@ -3,6 +3,10 @@ set -euo pipefail
 
 # Download pre-built binary dependencies for integration tests.
 #
+# Reads pinned refs from backbone.toml (the single source of truth for
+# dependency versions). Each component entry declares a repo and git ref
+# (branch, tag, or commit SHA).
+#
 # defra and hub.rs binaries are downloaded as GitHub Actions artifacts
 # from their CI workflows. The exact commit for each ref must have a
 # successful CI run with uploaded artifacts, or this script fails.
@@ -11,13 +15,11 @@ set -euo pipefail
 # commit, clones/fetches into a persistent local checkout, and does
 # an incremental cargo build --release.
 #
-# Required env vars (set in ci.yml):
-#   DEFRA_REF    — git ref for defradb.rs  (e.g. "main" or a commit SHA)
-#   HUBD_REF     — git ref for hub.rs      (e.g. "main" or a commit SHA)
-#   ORBIS_REF    — git ref for orbis-rs    (e.g. "jack/integration-testing")
+# Required:
+#   backbone.toml    — in the repo root (or any ancestor directory)
 #
-# Optional:
-#   PRIVATE_REPO_PAT — PAT for private repo access (used for gh CLI and git URLs)
+# Optional env vars:
+#   PRIVATE_REPO_PAT — PAT for private repo access (gh CLI and git URLs)
 #   CACHE_DIR        — override binary cache root (default: ~/.sourcenetwork/bin)
 #   SRC_DIR          — override source clone root (default: ~/.sourcenetwork/src)
 #   MAX_VERSIONS     — versions to keep per component (default: 3)
@@ -25,11 +27,33 @@ set -euo pipefail
 CACHE_DIR="${CACHE_DIR:-$HOME/.sourcenetwork/bin}"
 SRC_DIR="${SRC_DIR:-$HOME/.sourcenetwork/src}"
 MAX_VERSIONS="${MAX_VERSIONS:-3}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+MANIFEST="$REPO_ROOT/backbone.toml"
 
 mkdir -p "$CACHE_DIR" "$SRC_DIR"
 
 # gh CLI auth via PAT
 export GH_TOKEN="${PRIVATE_REPO_PAT:-}"
+
+if [[ ! -f "$MANIFEST" ]]; then
+    echo "ERROR: backbone.toml not found at $MANIFEST" >&2
+    exit 1
+fi
+
+# Parse a field from a [components.<name>] section in backbone.toml.
+# Usage: manifest_get <component> <field>
+manifest_get() {
+    local component=$1 field=$2
+    # Match the section, then find the field within it (before the next section)
+    awk -v section="\\[components\\.$component\\]" -v key="$field" '
+        $0 ~ section { found=1; next }
+        found && /^\[/ { found=0 }
+        found && $0 ~ "^"key"\\s*=" {
+            gsub(/.*=\s*"/, ""); gsub(/".*/, ""); print; exit
+        }
+    ' "$MANIFEST"
+}
 
 repo_url() {
     local repo=$1
@@ -38,6 +62,13 @@ repo_url() {
     else
         echo "https://github.com/sourcenetwork/${repo}.git"
     fi
+}
+
+# Extract the short repo name from a full URL.
+# "https://github.com/sourcenetwork/defradb.rs" → "defradb.rs"
+repo_name() {
+    local url=$1
+    basename "$url" .git
 }
 
 resolve_commit() {
@@ -59,15 +90,12 @@ resolve_commit() {
 }
 
 # Download a binary artifact from a GitHub Actions workflow run.
-# Finds the successful CI run for the exact commit, then downloads
-# the named artifact.
 download_artifact() {
     local repo=$1 ref=$2 artifact_name=$3 binary_name=$4
     local commit
     commit=$(resolve_commit "$repo" "$ref")
     echo "$repo: $ref → ${commit:0:12}"
 
-    # Find successful CI run for this exact commit
     local run_id
     run_id=$(gh run list -R "sourcenetwork/$repo" \
         --commit "$commit" --status success --workflow ci.yml \
@@ -85,7 +113,6 @@ download_artifact() {
     gh run download "$run_id" -R "sourcenetwork/$repo" \
         --name "$artifact_name" --dir "$tmp_dir"
 
-    # Find the binary in the extracted artifact (may be nested or flat)
     local found
     found=$(find "$tmp_dir" -type f | head -1)
     if [[ -z "$found" ]]; then
@@ -124,7 +151,6 @@ build_if_missing() {
     local cache_path="$CACHE_DIR/$repo/$commit"
     local src="$SRC_DIR/$repo"
 
-    # Build a features fingerprint from all specs
     local features_fingerprint=""
     for spec in "$@"; do
         IFS=: read -r _pkg _binary _output features <<< "$spec"
@@ -141,7 +167,6 @@ build_if_missing() {
         fi
     done
 
-    # Check features match (rebuild if features changed)
     if $all_present && [[ -f "$cache_path/.features" ]]; then
         local cached_features
         cached_features=$(cat "$cache_path/.features")
@@ -151,7 +176,6 @@ build_if_missing() {
             rm -rf "$cache_path"
         fi
     elif $all_present && [[ ! -f "$cache_path/.features" ]]; then
-        # Old cache without features file — rebuild
         echo "No features record for $repo@${commit:0:12}, rebuilding..."
         all_present=false
         rm -rf "$cache_path"
@@ -204,23 +228,41 @@ prune_old_versions() {
     fi
 }
 
-echo "=== Ensuring binary dependencies ==="
+echo "=== Reading dependency pins from backbone.toml ==="
+
+# Read refs from backbone.toml
+DEFRA_REPO=$(repo_name "$(manifest_get defra repo)")
+DEFRA_REF=$(manifest_get defra ref)
+HUBD_REPO=$(repo_name "$(manifest_get hubd repo)")
+HUBD_REF=$(manifest_get hubd ref)
+ORBIS_REPO=$(repo_name "$(manifest_get orbis-node repo)")
+ORBIS_REF=$(manifest_get orbis-node ref)
+
+for var in DEFRA_REPO DEFRA_REF HUBD_REPO HUBD_REF ORBIS_REPO ORBIS_REF; do
+    if [[ -z "${!var}" ]]; then
+        echo "ERROR: could not read $var from backbone.toml" >&2
+        exit 1
+    fi
+    echo "  $var=${!var}"
+done
 
 # defra and hub.rs: download release artifacts from their CI
+echo ""
 echo "--- defra/hub.rs (GitHub Actions artifacts) ---"
-download_artifact "defradb.rs" "$DEFRA_REF" "defra-iroh-aarch64-apple-darwin" "defra-iroh"
-download_artifact "hub.rs" "$HUBD_REF" "hubd-aarch64-apple-darwin" "hubd"
+download_artifact "$DEFRA_REPO" "$DEFRA_REF" "defra-iroh-aarch64-apple-darwin" "defra-iroh"
+download_artifact "$HUBD_REPO" "$HUBD_REF" "hubd-aarch64-apple-darwin" "hubd"
 
 # orbis-rs: no CI artifact pipeline, build from source
+echo ""
 echo "--- orbis-rs (built from source) ---"
-ORBIS_COMMIT=$(resolve_commit "orbis-rs" "$ORBIS_REF")
+ORBIS_COMMIT=$(resolve_commit "$ORBIS_REPO" "$ORBIS_REF")
 echo "orbis-rs: $ORBIS_REF → ${ORBIS_COMMIT:0:12}"
 
-build_if_missing "orbis-rs" "$ORBIS_REF" "$ORBIS_COMMIT" \
+build_if_missing "$ORBIS_REPO" "$ORBIS_REF" "$ORBIS_COMMIT" \
     "orbis-node:orbis-node::bls12-381,redb,bulletin-hubrs,iroh,authz-sourcehub" \
     "cli-tool:cli-tool"
 
-prune_old_versions "orbis-rs"
+prune_old_versions "$ORBIS_REPO"
 
 # Final verification
 echo ""
