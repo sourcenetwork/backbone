@@ -870,7 +870,7 @@ impl DefraClient {
         let out = if divergences::encrypted_index_uses_positional_args(self.kind) {
             self.exec_with_identity(
                 hex_key,
-                &["client", "encrypted-index", "add", collection, field],
+                &["client", "encrypted-index", "new", collection, field],
             )?
         } else {
             self.exec_with_identity(
@@ -878,7 +878,7 @@ impl DefraClient {
                 &[
                     "client",
                     "encrypted-index",
-                    "add",
+                    "new",
                     "--collection",
                     collection,
                     "--field",
