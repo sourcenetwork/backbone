@@ -157,16 +157,18 @@ mod tests {
 
     #[test]
     fn release_frees_ports_for_rebinding() {
-        let mut ports = allocate_transport_ports(1).expect("allocate");
-        let p = ports.pop().unwrap();
-        let http = p.http;
-        let tcp = p.tcp;
-        let ws = p.ws;
-        let quic = p.quic;
-        let mut p = p;
+        let mut p = allocate_transport_ports(1)
+            .expect("allocate")
+            .pop()
+            .unwrap();
+        let (http, tcp, ws, quic) = (p.http, p.tcp, p.ws, p.quic);
         p.release();
 
-        // After release, each port should be rebind-able.
+        // Tiny TOCTOU window: between release() and the binds below, another
+        // process on the host could grab one of these ephemeral ports.
+        // In practice the window is microseconds and the test asserts the
+        // *behavior* of release() (the OS actually freeing the fds) which
+        // can only be verified by rebinding.
         TcpListener::bind(("127.0.0.1", http)).expect("rebind http");
         TcpListener::bind(("127.0.0.1", tcp)).expect("rebind tcp");
         TcpListener::bind(("127.0.0.1", ws)).expect("rebind ws");
