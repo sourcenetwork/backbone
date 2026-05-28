@@ -16,6 +16,24 @@ use super::runtime::TestCluster;
 static RUST_BUILD_DONE: OnceLock<()> = OnceLock::new();
 static IROH_BUILD_DONE: OnceLock<()> = OnceLock::new();
 
+/// Returns true if `DEFRA_MULTIPLIERS` is set and contains `signed-docs`.
+///
+/// `DEFRA_MULTIPLIERS` is a comma-separated list of test multipliers.
+/// Only `signed-docs` is honored today; unknown entries are ignored
+/// (forward-compatible with future multipliers).
+#[allow(dead_code)]
+fn signed_docs_multiplier_active() -> bool {
+    signed_docs_in(std::env::var("DEFRA_MULTIPLIERS").ok().as_deref())
+}
+
+/// Pure form of `signed_docs_multiplier_active` for testability —
+/// no env access, just parses the value.
+fn signed_docs_in(value: Option<&str>) -> bool {
+    value
+        .map(|v| v.split(',').any(|s| s.trim() == "signed-docs"))
+        .unwrap_or(false)
+}
+
 pub struct TestClusterBuilder {
     rust_nodes: usize,
     go_nodes: usize,
@@ -468,5 +486,36 @@ impl TestClusterBuilder {
             effective_identities,
             source_hub,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_docs_in_handles_all_cases() {
+        assert!(!signed_docs_in(None), "unset → false");
+        assert!(!signed_docs_in(Some("")), "empty → false");
+        assert!(signed_docs_in(Some("signed-docs")), "exact → true");
+        assert!(signed_docs_in(Some(" signed-docs ")), "padded → true");
+        assert!(
+            signed_docs_in(Some("signed-docs,foo")),
+            "first of list → true"
+        );
+        assert!(
+            signed_docs_in(Some("foo,signed-docs")),
+            "second of list → true"
+        );
+        assert!(
+            signed_docs_in(Some("foo, signed-docs ,bar")),
+            "padded middle → true"
+        );
+        assert!(!signed_docs_in(Some("foo")), "other only → false");
+        assert!(!signed_docs_in(Some("foo,bar")), "no match → false");
+        assert!(
+            !signed_docs_in(Some("SIGNED-DOCS")),
+            "case-sensitive → false"
+        );
     }
 }
