@@ -16,18 +16,22 @@ use super::runtime::TestCluster;
 static RUST_BUILD_DONE: OnceLock<()> = OnceLock::new();
 static IROH_BUILD_DONE: OnceLock<()> = OnceLock::new();
 
-/// Returns true if `DEFRA_MULTIPLIERS` is set and contains `signed-docs`.
-///
-/// `DEFRA_MULTIPLIERS` is a comma-separated list of test multipliers.
-/// Only `signed-docs` is honored today; unknown entries are ignored
-/// (forward-compatible with future multipliers).
+/// Reads the `DEFRA_MULTIPLIERS` env var and returns true if `signed-docs`
+/// is present in its comma-separated value.
+// `#[allow(dead_code)]` is removed in Task 3 when build() consumes this.
 #[allow(dead_code)]
 fn signed_docs_multiplier_active() -> bool {
     signed_docs_in(std::env::var("DEFRA_MULTIPLIERS").ok().as_deref())
 }
 
-/// Pure form of `signed_docs_multiplier_active` for testability —
-/// no env access, just parses the value.
+/// Returns true if `value` is a comma-separated multiplier list that
+/// contains `signed-docs` (case-sensitive, whitespace-trimmed per entry).
+///
+/// `DEFRA_MULTIPLIERS` is forward-compatible — unknown entries are
+/// ignored, so e.g. `"signed-docs,foo"` matches.
+///
+/// Pulled out from `signed_docs_multiplier_active` so the parsing logic
+/// can be unit-tested without mutating process env vars.
 fn signed_docs_in(value: Option<&str>) -> bool {
     value
         .map(|v| v.split(',').any(|s| s.trim() == "signed-docs"))
