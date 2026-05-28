@@ -18,8 +18,6 @@ static IROH_BUILD_DONE: OnceLock<()> = OnceLock::new();
 
 /// Reads the `DEFRA_MULTIPLIERS` env var and returns true if `signed-docs`
 /// is present in its comma-separated value.
-// `#[allow(dead_code)]` is removed in Task 3 when build() consumes this.
-#[allow(dead_code)]
 fn signed_docs_multiplier_active() -> bool {
     signed_docs_in(std::env::var("DEFRA_MULTIPLIERS").ok().as_deref())
 }
@@ -62,6 +60,7 @@ pub struct TestClusterBuilder {
     acp_circuit_breaker_reset_timeout: Option<u64>,
     acp_request_timeout: Option<u64>,
     acp_receipt_timeout: Option<u64>,
+    signing_multiplier_opt_out: bool,
 }
 
 impl Default for TestClusterBuilder {
@@ -96,6 +95,7 @@ impl TestClusterBuilder {
             acp_circuit_breaker_reset_timeout: None,
             acp_request_timeout: None,
             acp_receipt_timeout: None,
+            signing_multiplier_opt_out: false,
         }
     }
 
@@ -168,6 +168,16 @@ impl TestClusterBuilder {
 
     pub fn with_signing(mut self) -> Self {
         self.signing_enabled = true;
+        self
+    }
+
+    /// Opt this cluster out of the `signed-docs` test multiplier.
+    ///
+    /// When `DEFRA_MULTIPLIERS` contains `signed-docs`, `build()` would
+    /// normally force `signing_enabled = true`. Call this on tests that
+    /// are known to be incompatible with signing.
+    pub fn no_signing_multiplier(mut self) -> Self {
+        self.signing_multiplier_opt_out = true;
         self
     }
 
@@ -310,6 +320,12 @@ impl TestClusterBuilder {
             let id = crate::identity::generate_identity(&binary)
                 .wrap_err("auto-generating identity for NAC/SourceHub")?;
             self.node_identity = Some(id.private_key_hex);
+        }
+
+        // Apply DEFRA_MULTIPLIERS=signed-docs unless this builder opted out.
+        // Idempotent: no-op if signing_enabled is already true.
+        if signed_docs_multiplier_active() && !self.signing_multiplier_opt_out {
+            self.signing_enabled = true;
         }
 
         // Allocate ports for all nodes
@@ -496,6 +512,11 @@ impl TestClusterBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate DEFRA_MULTIPLIERS since std::env::set_var
+    // is process-global. cargo test runs tests in this mod on a shared pool.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn signed_docs_in_handles_all_cases() {
@@ -521,5 +542,49 @@ mod tests {
             !signed_docs_in(Some("SIGNED-DOCS")),
             "case-sensitive → false"
         );
+    }
+
+    #[test]
+    fn no_signing_multiplier_sets_opt_out_flag() {
+        let b = TestClusterBuilder::new();
+        assert!(!b.signing_multiplier_opt_out, "default is opt-in");
+
+        let b = TestClusterBuilder::new().no_signing_multiplier();
+        assert!(b.signing_multiplier_opt_out, "after call, opt-out is true");
+    }
+
+    #[test]
+    fn signed_docs_multiplier_active_reads_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("DEFRA_MULTIPLIERS").ok();
+
+        // Safety: tests in this module hold ENV_LOCK; nothing else in
+        // this crate touches DEFRA_MULTIPLIERS.
+        unsafe {
+            std::env::remove_var("DEFRA_MULTIPLIERS");
+        }
+        assert!(!signed_docs_multiplier_active(), "unset → false");
+
+        unsafe {
+            std::env::set_var("DEFRA_MULTIPLIERS", "signed-docs");
+        }
+        assert!(signed_docs_multiplier_active(), "exact → true");
+
+        unsafe {
+            std::env::set_var("DEFRA_MULTIPLIERS", "foo,signed-docs,bar");
+        }
+        assert!(signed_docs_multiplier_active(), "in list → true");
+
+        unsafe {
+            std::env::set_var("DEFRA_MULTIPLIERS", "foo");
+        }
+        assert!(!signed_docs_multiplier_active(), "other only → false");
+
+        // Restore the prior env so we don't leak to sibling tests on
+        // platforms where the test runner spawns subprocesses.
+        match prev {
+            Some(v) => unsafe { std::env::set_var("DEFRA_MULTIPLIERS", v) },
+            None => unsafe { std::env::remove_var("DEFRA_MULTIPLIERS") },
+        }
     }
 }
