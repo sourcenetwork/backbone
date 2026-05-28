@@ -555,11 +555,25 @@ mod tests {
 
     #[test]
     fn signed_docs_multiplier_active_reads_env() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var("DEFRA_MULTIPLIERS").ok();
+        // Drop-on-scope-exit guard: restores DEFRA_MULTIPLIERS to its
+        // prior value even if a later assertion panics. Without this,
+        // a failing assertion would leak the mutated env into sibling
+        // tests on the same binary.
+        struct RestoreEnv(Option<String>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => unsafe { std::env::set_var("DEFRA_MULTIPLIERS", v) },
+                    None => unsafe { std::env::remove_var("DEFRA_MULTIPLIERS") },
+                }
+            }
+        }
 
-        // Safety: tests in this module hold ENV_LOCK; nothing else in
-        // this crate touches DEFRA_MULTIPLIERS.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _restore = RestoreEnv(std::env::var("DEFRA_MULTIPLIERS").ok());
+
+        // Safety: ENV_LOCK serializes all env mutations within this test
+        // binary; no other crate in the workspace touches DEFRA_MULTIPLIERS.
         unsafe {
             std::env::remove_var("DEFRA_MULTIPLIERS");
         }
@@ -579,12 +593,5 @@ mod tests {
             std::env::set_var("DEFRA_MULTIPLIERS", "foo");
         }
         assert!(!signed_docs_multiplier_active(), "other only → false");
-
-        // Restore the prior env so we don't leak to sibling tests on
-        // platforms where the test runner spawns subprocesses.
-        match prev {
-            Some(v) => unsafe { std::env::set_var("DEFRA_MULTIPLIERS", v) },
-            None => unsafe { std::env::remove_var("DEFRA_MULTIPLIERS") },
-        }
     }
 }
