@@ -16,6 +16,26 @@ use super::runtime::TestCluster;
 static RUST_BUILD_DONE: OnceLock<()> = OnceLock::new();
 static IROH_BUILD_DONE: OnceLock<()> = OnceLock::new();
 
+/// Reads the `DEFRA_MULTIPLIERS` env var and returns true if `signed-docs`
+/// is present in its comma-separated value.
+fn signed_docs_multiplier_active() -> bool {
+    signed_docs_in(std::env::var("DEFRA_MULTIPLIERS").ok().as_deref())
+}
+
+/// Returns true if `value` is a comma-separated multiplier list that
+/// contains `signed-docs` (case-sensitive, whitespace-trimmed per entry).
+///
+/// `DEFRA_MULTIPLIERS` is forward-compatible — unknown entries are
+/// ignored, so e.g. `"signed-docs,foo"` matches.
+///
+/// Pulled out from `signed_docs_multiplier_active` so the parsing logic
+/// can be unit-tested without mutating process env vars.
+fn signed_docs_in(value: Option<&str>) -> bool {
+    value
+        .map(|v| v.split(',').any(|s| s.trim() == "signed-docs"))
+        .unwrap_or(false)
+}
+
 pub struct TestClusterBuilder {
     rust_nodes: usize,
     go_nodes: usize,
@@ -40,6 +60,7 @@ pub struct TestClusterBuilder {
     acp_circuit_breaker_reset_timeout: Option<u64>,
     acp_request_timeout: Option<u64>,
     acp_receipt_timeout: Option<u64>,
+    signing_multiplier_opt_out: bool,
 }
 
 impl Default for TestClusterBuilder {
@@ -74,6 +95,7 @@ impl TestClusterBuilder {
             acp_circuit_breaker_reset_timeout: None,
             acp_request_timeout: None,
             acp_receipt_timeout: None,
+            signing_multiplier_opt_out: false,
         }
     }
 
@@ -146,6 +168,16 @@ impl TestClusterBuilder {
 
     pub fn with_signing(mut self) -> Self {
         self.signing_enabled = true;
+        self
+    }
+
+    /// Opt this cluster out of the `signed-docs` test multiplier.
+    ///
+    /// When `DEFRA_MULTIPLIERS` contains `signed-docs`, `build()` would
+    /// normally force `signing_enabled = true`. Call this on tests that
+    /// are known to be incompatible with signing.
+    pub fn no_signing_multiplier(mut self) -> Self {
+        self.signing_multiplier_opt_out = true;
         self
     }
 
@@ -288,6 +320,12 @@ impl TestClusterBuilder {
             let id = crate::identity::generate_identity(&binary)
                 .wrap_err("auto-generating identity for NAC/SourceHub")?;
             self.node_identity = Some(id.private_key_hex);
+        }
+
+        // Apply DEFRA_MULTIPLIERS=signed-docs unless this builder opted out.
+        // Idempotent: no-op if signing_enabled is already true.
+        if signed_docs_multiplier_active() && !self.signing_multiplier_opt_out {
+            self.signing_enabled = true;
         }
 
         // Allocate ports for all nodes
@@ -468,5 +506,92 @@ impl TestClusterBuilder {
             effective_identities,
             source_hub,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate DEFRA_MULTIPLIERS since std::env::set_var
+    // is process-global. cargo test runs tests in this mod on a shared pool.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn signed_docs_in_handles_all_cases() {
+        assert!(!signed_docs_in(None), "unset → false");
+        assert!(!signed_docs_in(Some("")), "empty → false");
+        assert!(signed_docs_in(Some("signed-docs")), "exact → true");
+        assert!(signed_docs_in(Some(" signed-docs ")), "padded → true");
+        assert!(
+            signed_docs_in(Some("signed-docs,foo")),
+            "first of list → true"
+        );
+        assert!(
+            signed_docs_in(Some("foo,signed-docs")),
+            "second of list → true"
+        );
+        assert!(
+            signed_docs_in(Some("foo, signed-docs ,bar")),
+            "padded middle → true"
+        );
+        assert!(!signed_docs_in(Some("foo")), "other only → false");
+        assert!(!signed_docs_in(Some("foo,bar")), "no match → false");
+        assert!(
+            !signed_docs_in(Some("SIGNED-DOCS")),
+            "case-sensitive → false"
+        );
+    }
+
+    #[test]
+    fn no_signing_multiplier_sets_opt_out_flag() {
+        let b = TestClusterBuilder::new();
+        assert!(!b.signing_multiplier_opt_out, "default is opt-in");
+
+        let b = TestClusterBuilder::new().no_signing_multiplier();
+        assert!(b.signing_multiplier_opt_out, "after call, opt-out is true");
+    }
+
+    #[test]
+    fn signed_docs_multiplier_active_reads_env() {
+        // Drop-on-scope-exit guard: restores DEFRA_MULTIPLIERS to its
+        // prior value even if a later assertion panics. Without this,
+        // a failing assertion would leak the mutated env into sibling
+        // tests on the same binary.
+        struct RestoreEnv(Option<String>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(v) => unsafe { std::env::set_var("DEFRA_MULTIPLIERS", v) },
+                    None => unsafe { std::env::remove_var("DEFRA_MULTIPLIERS") },
+                }
+            }
+        }
+
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _restore = RestoreEnv(std::env::var("DEFRA_MULTIPLIERS").ok());
+
+        // Safety: ENV_LOCK serializes all env mutations within this test
+        // binary; no other crate in the workspace touches DEFRA_MULTIPLIERS.
+        unsafe {
+            std::env::remove_var("DEFRA_MULTIPLIERS");
+        }
+        assert!(!signed_docs_multiplier_active(), "unset → false");
+
+        unsafe {
+            std::env::set_var("DEFRA_MULTIPLIERS", "signed-docs");
+        }
+        assert!(signed_docs_multiplier_active(), "exact → true");
+
+        unsafe {
+            std::env::set_var("DEFRA_MULTIPLIERS", "foo,signed-docs,bar");
+        }
+        assert!(signed_docs_multiplier_active(), "in list → true");
+
+        unsafe {
+            std::env::set_var("DEFRA_MULTIPLIERS", "foo");
+        }
+        assert!(!signed_docs_multiplier_active(), "other only → false");
     }
 }
