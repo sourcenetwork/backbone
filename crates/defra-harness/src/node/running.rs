@@ -30,6 +30,11 @@ pub async fn start_node(
     std::fs::create_dir_all(&config.rootdir)?;
     std::fs::create_dir_all(&config.log_dir)?;
 
+    // Seed a cluster-shared searchable-encryption key into the keyring before
+    // start so the node's getOrCreate (Go + Rust) finds the same key.
+    super::seed_searchable_encryption_key(node.binary_path(), node.kind(), &config)
+        .wrap_err_with(|| format!("{}: failed to seed searchable-encryption key", config.name))?;
+
     let api_url = format!("http://{}", config.http_addr);
     let named_patterns: Vec<NamedPattern> = if config.p2p_transport.as_deref() == Some("iroh") {
         patterns::iroh_patterns()
