@@ -144,7 +144,11 @@ impl TestCluster {
         };
 
         let node: Box<dyn DefraNode> = match kind {
-            NodeKind::Rust => Box::new(RustNode::from_workspace()),
+            // Respawn from the node's configured binary (e.g. a release artifact
+            // or a downloaded version), not the default debug workspace path —
+            // otherwise restart breaks whenever the node was not built via
+            // `from_workspace()`.
+            NodeKind::Rust => Box::new(RustNode::from_binary(binary_path.clone())),
             NodeKind::Go => Box::new(crate::node::GoNode::from_path()),
         };
 
