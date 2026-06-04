@@ -46,6 +46,7 @@ pub struct TestClusterBuilder {
     acp_document_type: Option<String>,
     node_identity: Option<String>,
     node_identities: Vec<Option<String>>,
+    node_stores: Vec<Option<String>>,
     encryption_enabled: bool,
     signing_enabled: bool,
     nac_enabled: bool,
@@ -81,6 +82,7 @@ impl TestClusterBuilder {
             acp_document_type: None,
             node_identity: None,
             node_identities: Vec::new(),
+            node_stores: Vec::new(),
             encryption_enabled: false,
             signing_enabled: false,
             nac_enabled: false,
@@ -158,6 +160,18 @@ impl TestClusterBuilder {
             self.node_identities.push(None);
         }
         self.node_identities[index] = Some(key.into());
+        self
+    }
+
+    /// Override the store backend for a single node (by cluster index). Falls
+    /// back to the cluster-wide `with_store`. Lets a mixed Go/Rust cluster give
+    /// each node its implementation's native disk store — e.g. Rust `redb`, Go
+    /// `badger` — so state survives a restart on either side.
+    pub fn with_node_store(mut self, index: usize, store: impl Into<String>) -> Self {
+        while self.node_stores.len() <= index {
+            self.node_stores.push(None);
+        }
+        self.node_stores[index] = Some(store.into());
         self
     }
 
@@ -405,7 +419,12 @@ impl TestClusterBuilder {
                 orbis_signer: None,
                 keyring: self.keyring.clone(),
                 development: self.development,
-                store: self.store.clone(),
+                store: self
+                    .node_stores
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| self.store.clone()),
                 query_timeout: self.query_timeout,
                 p2p_transport: self.p2p_transport.clone(),
                 acp_cache_ttl: self.acp_cache_ttl,
@@ -463,7 +482,12 @@ impl TestClusterBuilder {
                 orbis_signer: None,
                 keyring: KeyringBackend::None,
                 development: self.development,
-                store: self.store.clone(),
+                store: self
+                    .node_stores
+                    .get(go_index)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| self.store.clone()),
                 query_timeout: self.query_timeout,
                 p2p_transport: None,
                 acp_cache_ttl: self.acp_cache_ttl,
