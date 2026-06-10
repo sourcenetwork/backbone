@@ -53,6 +53,7 @@ pub struct TestClusterBuilder {
     development: bool,
     store: Option<String>,
     query_timeout: Option<u64>,
+    transaction_idle_timeout: Option<u64>,
     p2p_transport: Option<String>,
     keyring: KeyringBackend,
     shared_se_key: Option<[u8; 32]>,
@@ -89,6 +90,7 @@ impl TestClusterBuilder {
             development: false,
             store: None,
             query_timeout: None,
+            transaction_idle_timeout: None,
             p2p_transport: None,
             keyring: KeyringBackend::None,
             shared_se_key: None,
@@ -206,6 +208,14 @@ impl TestClusterBuilder {
 
     pub fn with_query_timeout(mut self, secs: u64) -> Self {
         self.query_timeout = Some(secs);
+        self
+    }
+
+    /// Set the spawned node's HTTP-transaction idle timeout (seconds). Pass `0`
+    /// to disable the per-node stale-transaction cleanup sweeper entirely (the
+    /// node's `start` gates the sweeper on `transaction_idle_timeout > 0`).
+    pub fn with_transaction_idle_timeout(mut self, secs: u64) -> Self {
+        self.transaction_idle_timeout = Some(secs);
         self
     }
 
@@ -435,6 +445,7 @@ impl TestClusterBuilder {
                 development: self.development,
                 store: self.store.clone(),
                 query_timeout: self.query_timeout,
+                transaction_idle_timeout: self.transaction_idle_timeout,
                 p2p_transport: self.p2p_transport.clone(),
                 shared_se_key: self.shared_se_key,
                 acp_cache_ttl: self.acp_cache_ttl,
@@ -505,6 +516,7 @@ impl TestClusterBuilder {
                 development: self.development,
                 store: self.store.clone(),
                 query_timeout: self.query_timeout,
+                transaction_idle_timeout: self.transaction_idle_timeout,
                 p2p_transport: None,
                 shared_se_key: self.shared_se_key,
                 acp_cache_ttl: self.acp_cache_ttl,

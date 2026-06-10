@@ -198,6 +198,13 @@ impl DefraNode for RustNode {
             args.push(timeout.to_string());
         }
 
+        // `--transaction-idle-timeout 0` disables the node's per-node stale-txn
+        // cleanup sweeper (gated on `> 0` in the node's start path).
+        if let Some(timeout) = config.transaction_idle_timeout {
+            args.push("--transaction-idle-timeout".to_string());
+            args.push(timeout.to_string());
+        }
+
         if let Some(ttl) = config.acp_cache_ttl {
             args.push("--acp-cache-ttl".to_string());
             args.push(ttl.to_string());

@@ -205,6 +205,11 @@ pub struct NodeConfig {
     pub development: bool,
     pub store: Option<String>,
     pub query_timeout: Option<u64>,
+    /// Max idle age (seconds) for explicit HTTP transactions before the node's
+    /// background sweeper reaps them. `Some(0)` disables the sweeper entirely
+    /// (no per-node stale-transaction cleanup task is spawned). `None` leaves
+    /// the node's own default (600s) in place.
+    pub transaction_idle_timeout: Option<u64>,
     pub p2p_transport: Option<String>,
     /// A cluster-shared searchable-encryption key (32-byte AES-256) to seed
     /// into this node's keyring before start. When `Some`, `start_node` runs
@@ -246,6 +251,7 @@ impl NodeConfig {
             development: false,
             store: None,
             query_timeout: None,
+            transaction_idle_timeout: None,
             p2p_transport: None,
             shared_se_key: None,
             acp_cache_ttl: None,
