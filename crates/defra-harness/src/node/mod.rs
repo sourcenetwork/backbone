@@ -206,6 +206,12 @@ pub struct NodeConfig {
     pub store: Option<String>,
     pub query_timeout: Option<u64>,
     pub p2p_transport: Option<String>,
+    /// A cluster-shared searchable-encryption key (32-byte AES-256) to seed
+    /// into this node's keyring before start. When `Some`, `start_node` runs
+    /// `<binary> keyring add searchable-encryption-key <hex>` against the same
+    /// keyring backend the node uses, so the node's `getOrCreate` finds it.
+    /// Both Go and Rust read it -- the keyring JWE format is cross-compatible.
+    pub shared_se_key: Option<[u8; 32]>,
     pub acp_cache_ttl: Option<u64>,
     pub acp_circuit_breaker_threshold: Option<u32>,
     pub acp_circuit_breaker_reset_timeout: Option<u64>,
@@ -241,6 +247,7 @@ impl NodeConfig {
             store: None,
             query_timeout: None,
             p2p_transport: None,
+            shared_se_key: None,
             acp_cache_ttl: None,
             acp_circuit_breaker_threshold: None,
             acp_circuit_breaker_reset_timeout: None,
@@ -248,6 +255,75 @@ impl NodeConfig {
             acp_receipt_timeout: None,
         }
     }
+}
+
+/// The keyring entry name DefraDB (Go + Rust) loads the cluster-shared
+/// searchable-encryption key from. Mirrors Go's
+/// `cli/start.go:getOrCreateSearchableEncryptionKey` ("searchable-encryption-key").
+pub const SEARCHABLE_ENCRYPTION_KEY_NAME: &str = "searchable-encryption-key";
+
+/// Seed a 32-byte searchable-encryption key into `config`'s keyring before the
+/// node starts, by invoking `<binary> keyring add searchable-encryption-key
+/// <hex>` against the same backend/path/secret the node will use on start.
+///
+/// The keyring JWE format is cross-compatible between Go and Rust, so one
+/// shared key written here is read by both runtimes' `getOrCreate` at start.
+///
+/// Requires a `File` keyring backend (the only backend with a deterministic,
+/// process-isolated on-disk location both runtimes can share in tests).
+pub fn seed_searchable_encryption_key(
+    binary: &Path,
+    kind: NodeKind,
+    config: &NodeConfig,
+) -> eyre::Result<()> {
+    let key = match config.shared_se_key {
+        Some(k) => k,
+        None => return Ok(()),
+    };
+    let (path, secret) = match &config.keyring {
+        KeyringBackend::File { path, secret } => (path.clone(), secret.clone()),
+        other => eyre::bail!(
+            "seeding a shared searchable-encryption key requires a File keyring backend, got {:?}",
+            other
+        ),
+    };
+
+    let hex_key: String = key.iter().map(|b| format!("{:02x}", b)).collect();
+
+    // Global keyring flags come before the `keyring` subcommand for both CLIs.
+    let mut args: Vec<String> = vec![
+        "--rootdir".into(),
+        config.rootdir.display().to_string(),
+        "--keyring-backend".into(),
+        "file".into(),
+        "--keyring-path".into(),
+        path.display().to_string(),
+    ];
+    // The Rust CLI gates `keyring add` behind --development; Go does not.
+    if kind == NodeKind::Rust {
+        args.push("--development".into());
+    }
+    args.extend([
+        "keyring".into(),
+        "add".into(),
+        SEARCHABLE_ENCRYPTION_KEY_NAME.into(),
+        hex_key,
+    ]);
+
+    std::fs::create_dir_all(&config.rootdir)?;
+    let output = Command::new(binary)
+        .args(&args)
+        .env("DEFRA_KEYRING_SECRET", &secret)
+        .output()
+        .wrap_err("failed to run keyring add for searchable-encryption-key")?;
+
+    eyre::ensure!(
+        output.status.success(),
+        "keyring add searchable-encryption-key failed ({:?}): {}",
+        kind,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
 }
 
 /// Trait for building a DefraDB command from config.

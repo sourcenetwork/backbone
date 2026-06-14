@@ -56,6 +56,7 @@ pub struct TestClusterBuilder {
     query_timeout: Option<u64>,
     p2p_transport: Option<String>,
     keyring: KeyringBackend,
+    shared_se_key: Option<[u8; 32]>,
     acp_cache_ttl: Option<u64>,
     acp_circuit_breaker_threshold: Option<u32>,
     acp_circuit_breaker_reset_timeout: Option<u64>,
@@ -92,6 +93,7 @@ impl TestClusterBuilder {
             query_timeout: None,
             p2p_transport: None,
             keyring: KeyringBackend::None,
+            shared_se_key: None,
             acp_cache_ttl: None,
             acp_circuit_breaker_threshold: None,
             acp_circuit_breaker_reset_timeout: None,
@@ -259,6 +261,21 @@ impl TestClusterBuilder {
         self
     }
 
+    /// Seed the same 32-byte searchable-encryption key into every node's
+    /// keyring (Go and Rust) before start, mirroring how operators provision
+    /// the cluster-shared SE secret per node. Forces a `File` keyring backend
+    /// for all nodes so both runtimes read the same Go-compatible JWE entry,
+    /// and each node's `getOrCreateSearchableEncryptionKey` finds the key
+    /// instead of generating a fresh one.
+    ///
+    /// SE artifacts are HMAC search tags over field values keyed by this
+    /// secret; cross-node SE queries only match when both nodes hold the same
+    /// key. Implies a keyring (overrides `--no-keyring`).
+    pub fn with_shared_searchable_encryption_key(mut self, key: [u8; 32]) -> Self {
+        self.shared_se_key = Some(key);
+        self
+    }
+
     pub async fn build(mut self) -> Result<TestCluster> {
         let total = self.rust_nodes + self.go_nodes;
         eyre::ensure!(total > 0, "must have at least one node");
@@ -401,6 +418,17 @@ impl TestClusterBuilder {
                 None
             };
 
+            // A cluster-shared SE key needs a File keyring both runtimes can
+            // share; override `--no-keyring`/Env with a per-node File backend.
+            let keyring = if self.shared_se_key.is_some() {
+                KeyringBackend::File {
+                    path: rootdir.join("keys"),
+                    secret: "integration-test-secret".to_string(),
+                }
+            } else {
+                self.keyring.clone()
+            };
+
             let config = NodeConfig {
                 name: name.clone(),
                 rootdir,
@@ -417,7 +445,7 @@ impl TestClusterBuilder {
                 source_hub: sh_config.clone(),
                 hub_rs_address: None,
                 orbis_signer: None,
-                keyring: self.keyring.clone(),
+                keyring,
                 development: self.development,
                 store: self
                     .node_stores
@@ -427,6 +455,7 @@ impl TestClusterBuilder {
                     .or_else(|| self.store.clone()),
                 query_timeout: self.query_timeout,
                 p2p_transport: self.p2p_transport.clone(),
+                shared_se_key: self.shared_se_key,
                 acp_cache_ttl: self.acp_cache_ttl,
                 acp_circuit_breaker_threshold: self.acp_circuit_breaker_threshold,
                 acp_circuit_breaker_reset_timeout: self.acp_circuit_breaker_reset_timeout,
@@ -464,6 +493,17 @@ impl TestClusterBuilder {
                 None
             };
 
+            // A cluster-shared SE key needs a File keyring; otherwise Go runs
+            // with its usual `--no-keyring`.
+            let keyring = if self.shared_se_key.is_some() {
+                KeyringBackend::File {
+                    path: rootdir.join("keys"),
+                    secret: "integration-test-secret".to_string(),
+                }
+            } else {
+                KeyringBackend::None
+            };
+
             let config = NodeConfig {
                 name: name.clone(),
                 rootdir,
@@ -480,7 +520,7 @@ impl TestClusterBuilder {
                 source_hub: sh_config.clone(),
                 hub_rs_address: None,
                 orbis_signer: None,
-                keyring: KeyringBackend::None,
+                keyring,
                 development: self.development,
                 store: self
                     .node_stores
@@ -490,6 +530,7 @@ impl TestClusterBuilder {
                     .or_else(|| self.store.clone()),
                 query_timeout: self.query_timeout,
                 p2p_transport: None,
+                shared_se_key: self.shared_se_key,
                 acp_cache_ttl: self.acp_cache_ttl,
                 acp_circuit_breaker_threshold: self.acp_circuit_breaker_threshold,
                 acp_circuit_breaker_reset_timeout: self.acp_circuit_breaker_reset_timeout,

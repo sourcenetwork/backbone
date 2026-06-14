@@ -3,7 +3,7 @@ use std::process::Command;
 
 use eyre::{Result, WrapErr};
 
-use super::{DefraNode, NodeConfig};
+use super::{DefraNode, KeyringBackend, NodeConfig};
 use crate::divergences::{self, NodeKind};
 
 /// A Go DefraDB node backed by the `defradb` binary.
@@ -86,12 +86,31 @@ impl DefraNode for GoNode {
             "--no-log-color".to_string(),
             "--log-output".to_string(),
             "stdout".to_string(),
-            "--no-keyring".to_string(),
+        ];
+
+        let mut envs: Vec<(String, String)> = Vec::new();
+        match &config.keyring {
+            KeyringBackend::None => args.push("--no-keyring".to_string()),
+            KeyringBackend::Env { secret } => {
+                envs.push(("DEFRA_KEYRING_SECRET".to_string(), secret.clone()));
+            }
+            KeyringBackend::File { path, secret } => {
+                args.extend([
+                    "--keyring-backend".into(),
+                    "file".into(),
+                    "--keyring-path".into(),
+                    path.display().to_string(),
+                ]);
+                envs.push(("DEFRA_KEYRING_SECRET".to_string(), secret.clone()));
+            }
+        }
+
+        args.extend([
             "start".to_string(),
             "--store".to_string(),
             config.store.as_deref().unwrap_or("memory").to_string(),
             "--no-telemetry".to_string(),
-        ];
+        ]);
 
         if !config.encryption_enabled {
             args.push("--no-encryption".to_string());
@@ -142,7 +161,7 @@ impl DefraNode for GoNode {
             args.push(timeout.to_string());
         }
 
-        (self.binary_path.clone(), args, Vec::new())
+        (self.binary_path.clone(), args, envs)
     }
 
     fn binary_path(&self) -> &Path {
