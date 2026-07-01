@@ -81,21 +81,22 @@ impl DefraNode for GoNode {
         let mut args = vec![
             "--rootdir".to_string(),
             config.rootdir.display().to_string(),
-            "--url".to_string(),
-            config.http_addr.clone(),
             "--no-log-color".to_string(),
             "--log-output".to_string(),
             "stdout".to_string(),
         ];
 
+        // DefraDB v1.0.0: `--url` and the keyring flags are `start` subcommand
+        // flags, not root persistent flags, so they must be passed AFTER `start`.
         let mut envs: Vec<(String, String)> = Vec::new();
+        let mut start_flags: Vec<String> = vec!["--url".to_string(), config.http_addr.clone()];
         match &config.keyring {
-            KeyringBackend::None => args.push("--no-keyring".to_string()),
+            KeyringBackend::None => start_flags.push("--no-keyring".to_string()),
             KeyringBackend::Env { secret } => {
                 envs.push(("DEFRA_KEYRING_SECRET".to_string(), secret.clone()));
             }
             KeyringBackend::File { path, secret } => {
-                args.extend([
+                start_flags.extend([
                     "--keyring-backend".into(),
                     "file".into(),
                     "--keyring-path".into(),
@@ -105,8 +106,9 @@ impl DefraNode for GoNode {
             }
         }
 
+        args.push("start".to_string());
+        args.extend(start_flags);
         args.extend([
-            "start".to_string(),
             "--store".to_string(),
             config.store.as_deref().unwrap_or("memory").to_string(),
             "--no-telemetry".to_string(),
