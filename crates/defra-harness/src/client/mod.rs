@@ -170,7 +170,13 @@ impl DefraClient {
 
     /// Truncate a collection via `client collection truncate --name <n>`.
     pub fn collection_truncate(&self, name: &str) -> Result<String> {
-        self.exec(&["client", "collection", "truncate", "--collection-name", name])
+        self.exec(&[
+            "client",
+            "collection",
+            "truncate",
+            "--collection-name",
+            name,
+        ])
     }
 
     /// Update a document via `client document update --collection-name <n> --docID <id> --updater '<json>'`.
@@ -190,7 +196,13 @@ impl DefraClient {
 
     /// Describe a collection via `client collection describe --name <n>`.
     pub fn collection_describe(&self, name: &str) -> Result<Value> {
-        let out = self.exec(&["client", "collection", "describe", "--collection-name", name])?;
+        let out = self.exec(&[
+            "client",
+            "collection",
+            "describe",
+            "--collection-name",
+            name,
+        ])?;
         serde_json::from_str(&out).wrap_err("failed to parse collection_describe output")
     }
 
@@ -768,11 +780,23 @@ impl DefraClient {
                     }
                 }
                 // Fall back to CLI
-                let out = self.exec(&["client", "collection", "describe", "--collection-name", name])?;
+                let out = self.exec(&[
+                    "client",
+                    "collection",
+                    "describe",
+                    "--collection-name",
+                    name,
+                ])?;
                 serde_json::from_str(&out).wrap_err("failed to parse collection describe output")
             }
             NodeKind::Go => {
-                let out = self.exec(&["client", "collection", "describe", "--collection-name", name])?;
+                let out = self.exec(&[
+                    "client",
+                    "collection",
+                    "describe",
+                    "--collection-name",
+                    name,
+                ])?;
                 serde_json::from_str(&out).wrap_err("failed to parse collection describe output")
             }
         }
@@ -786,7 +810,13 @@ impl DefraClient {
     ) -> Result<Value> {
         let out = self.exec_with_identity(
             hex_key,
-            &["client", "collection", "describe", "--collection-name", name],
+            &[
+                "client",
+                "collection",
+                "describe",
+                "--collection-name",
+                name,
+            ],
         )?;
         let val: Value =
             serde_json::from_str(&out).wrap_err("failed to parse collection describe output")?;
@@ -974,7 +1004,10 @@ impl DefraClient {
 
     pub fn view_refresh_with_identity(&self, name: Option<&str>, hex_key: &str) -> Result<Value> {
         let out = if let Some(n) = name {
-            self.exec_with_identity(hex_key, &["client", "view", "refresh", "--collection-name", n])?
+            self.exec_with_identity(
+                hex_key,
+                &["client", "view", "refresh", "--collection-name", n],
+            )?
         } else {
             self.exec_with_identity(hex_key, &["client", "view", "refresh"])?
         };
@@ -1033,7 +1066,13 @@ impl DefraClient {
     pub fn collection_describe_with_identity(&self, name: &str, hex_key: &str) -> Result<Value> {
         let out = self.exec_with_identity(
             hex_key,
-            &["client", "collection", "describe", "--collection-name", name],
+            &[
+                "client",
+                "collection",
+                "describe",
+                "--collection-name",
+                name,
+            ],
         )?;
         serde_json::from_str(&out).wrap_err("failed to parse collection_describe output")
     }
@@ -1101,7 +1140,13 @@ impl DefraClient {
     pub fn collection_truncate_with_identity(&self, name: &str, hex_key: &str) -> Result<String> {
         self.exec_with_identity(
             hex_key,
-            &["client", "collection", "truncate", "--collection-name", name],
+            &[
+                "client",
+                "collection",
+                "truncate",
+                "--collection-name",
+                name,
+            ],
         )
     }
 

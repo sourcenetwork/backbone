@@ -8,6 +8,20 @@ use crate::divergences::NodeKind;
 use crate::observe::patterns::{self, NamedPattern};
 use crate::observe::LogTracker;
 
+/// Marker context attached to a `start_node` error when the child exited
+/// because a listen address was already taken — the guard-release →
+/// child-bind TOCTOU window in [`crate::ports`]. Callers can
+/// `downcast_ref::<PortConflict>()` on the report and retry the node with
+/// freshly allocated ports.
+#[derive(Debug)]
+pub struct PortConflict;
+
+impl std::fmt::Display for PortConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("node failed to bind an allocated port (address already in use)")
+    }
+}
+
 /// A running DefraDB node with its process handle and log tracker.
 pub struct RunningNode {
     pub name: String,
@@ -52,13 +66,10 @@ pub async fn start_node(
     let stdout_path = config.log_dir.join("stdout.log");
     let log_tracker = LogTracker::start(stdout_path, patterns::DEFRA_READY_PATTERN, named_patterns);
 
-    let process =
+    let mut process =
         test_infra::ManagedProcess::spawn(&config.name, &program, &args, &envs, &config.log_dir)?;
 
-    log_tracker
-        .wait_for_ready(ready_timeout)
-        .await
-        .wrap_err_with(|| format!("{}: did not become ready", config.name))?;
+    wait_ready_or_exit(&log_tracker, &mut process, &config, ready_timeout).await?;
 
     Ok(RunningNode {
         name: config.name.clone(),
@@ -71,4 +82,190 @@ pub async fn start_node(
         config,
         kind: node.kind(),
     })
+}
+
+/// Wait for the ready pattern, failing fast if the child exits first.
+///
+/// A stolen port kills the child within milliseconds of spawn; without exit
+/// detection the caller would burn the full `ready_timeout` before learning
+/// anything, and the logs explaining why would never surface in the error.
+async fn wait_ready_or_exit(
+    log_tracker: &LogTracker,
+    process: &mut test_infra::ManagedProcess,
+    config: &NodeConfig,
+    ready_timeout: Duration,
+) -> Result<()> {
+    let ready = log_tracker.wait_for_ready(ready_timeout);
+    tokio::pin!(ready);
+    loop {
+        tokio::select! {
+            r = &mut ready => {
+                return r.wrap_err_with(|| format!("{}: did not become ready", config.name));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                if process.is_running() {
+                    continue;
+                }
+                // The tail loop polls the log file every 10ms, so the ready
+                // line may be written but not yet delivered. Grace-wait
+                // before declaring the start failed.
+                if let Ok(Ok(())) =
+                    tokio::time::timeout(Duration::from_millis(300), &mut ready).await
+                {
+                    return Ok(());
+                }
+                let tail = log_tail(config);
+                let err = eyre::eyre!(
+                    "{}: process exited before becoming ready\n{}",
+                    config.name,
+                    tail
+                );
+                if tail_indicates_port_conflict(&tail) {
+                    return Err(err.wrap_err(PortConflict));
+                }
+                return Err(err);
+            }
+        }
+    }
+}
+
+/// Last lines of the node's stderr/stdout logs, for exit diagnostics.
+fn log_tail(config: &NodeConfig) -> String {
+    const TAIL_LINES: usize = 15;
+    let mut out = String::new();
+    for file in ["stderr.log", "stdout.log"] {
+        let Ok(content) = std::fs::read_to_string(config.log_dir.join(file)) else {
+            continue;
+        };
+        let mut tail: Vec<&str> = content.lines().rev().take(TAIL_LINES).collect();
+        tail.reverse();
+        if !tail.is_empty() {
+            out.push_str(&format!(
+                "--- {} (last {} lines) ---\n{}\n",
+                file,
+                tail.len(),
+                tail.join("\n")
+            ));
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(no log output captured)");
+    }
+    out
+}
+
+/// Rust bind errors read "Address already in use"; Go's read
+/// "bind: address already in use"; tokio/libp2p variants surface
+/// `AddrInUse`. All collapse under a lowercase substring check.
+fn tail_indicates_port_conflict(tail: &str) -> bool {
+    let lower = tail.to_lowercase();
+    lower.contains("address already in use") || lower.contains("addrinuse")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    struct StubNode {
+        script: String,
+        binary: PathBuf,
+    }
+
+    impl StubNode {
+        fn new(script: &str) -> Self {
+            Self {
+                script: script.to_string(),
+                binary: PathBuf::from("/bin/sh"),
+            }
+        }
+    }
+
+    impl DefraNode for StubNode {
+        fn kind(&self) -> NodeKind {
+            NodeKind::Rust
+        }
+
+        fn command_parts(
+            &self,
+            _config: &NodeConfig,
+        ) -> (PathBuf, Vec<String>, Vec<(String, String)>) {
+            (
+                self.binary.clone(),
+                vec!["-c".to_string(), self.script.clone()],
+                vec![],
+            )
+        }
+
+        fn binary_path(&self) -> &Path {
+            &self.binary
+        }
+    }
+
+    fn test_config(label: &str) -> NodeConfig {
+        let dir = std::env::temp_dir().join(format!(
+            "defra-harness-running-test-{}-{}",
+            label,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        NodeConfig::new(
+            format!("stub-{}", label),
+            dir.join("data"),
+            dir.join("logs"),
+            "127.0.0.1:0",
+        )
+    }
+
+    #[tokio::test]
+    async fn port_conflict_exit_fails_fast_and_is_classified() {
+        let node = StubNode::new(
+            "echo 'Error: failed to listen: Address already in use (os error 48)' >&2; exit 1",
+        );
+        let config = test_config("addrinuse");
+        let started = std::time::Instant::now();
+        let err = match start_node(&node, config, Duration::from_secs(30)).await {
+            Ok(_) => panic!("bind-conflict exit must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "must fail fast on child exit, not wait out the ready timeout (took {:?})",
+            started.elapsed()
+        );
+        assert!(
+            err.downcast_ref::<PortConflict>().is_some(),
+            "error must carry the PortConflict marker: {err:?}"
+        );
+        assert!(
+            format!("{err:?}").contains("Address already in use"),
+            "error must include the child's log tail: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unrelated_exit_fails_fast_without_port_conflict_marker() {
+        let node = StubNode::new("echo 'panic: something unrelated' >&2; exit 2");
+        let config = test_config("unrelated");
+        let started = std::time::Instant::now();
+        let err = match start_node(&node, config, Duration::from_secs(30)).await {
+            Ok(_) => panic!("non-zero exit must fail"),
+            Err(e) => e,
+        };
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(
+            err.downcast_ref::<PortConflict>().is_none(),
+            "unrelated failures must not be classified as port conflicts: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_line_before_exit_still_counts_as_started() {
+        let node = StubNode::new("echo 'Providing HTTP API at 127.0.0.1:0'; sleep 30");
+        let config = test_config("ready");
+        let running = start_node(&node, config, Duration::from_secs(10))
+            .await
+            .expect("ready node must start");
+        drop(running);
+    }
 }

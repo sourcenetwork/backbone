@@ -3,7 +3,7 @@ mod running;
 mod rust_node;
 
 pub use go_node::GoNode;
-pub use running::{start_node, RunningNode};
+pub use running::{start_node, PortConflict, RunningNode};
 pub use rust_node::RustNode;
 
 use std::path::{Path, PathBuf};

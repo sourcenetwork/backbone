@@ -6,12 +6,19 @@ use eyre::{Result, WrapErr};
 use reqwest::Client;
 
 use crate::divergences::NodeKind;
-use crate::node::{start_node, BinarySource, GoNode, KeyringBackend, NodeConfig, RustNode};
+use crate::node::{
+    start_node, BinarySource, GoNode, KeyringBackend, NodeConfig, PortConflict, RustNode,
+};
 use crate::ports::allocate_node_ports;
 use sourcehub_harness::{allocate_source_hub_ports, SourceHubConfig, SourceHubNode};
 
 use super::health::health_check_all;
 use super::runtime::TestCluster;
+
+/// Attempts per node when startup fails on the guard-release → child-bind
+/// TOCTOU window (another host process stealing the freed port). Each retry
+/// re-allocates fresh ports, so consecutive collisions are vanishingly rare.
+const PORT_CONFLICT_ATTEMPTS: usize = 3;
 
 static RUST_BUILD_DONE: OnceLock<()> = OnceLock::new();
 static IROH_BUILD_DONE: OnceLock<()> = OnceLock::new();
@@ -412,12 +419,6 @@ impl TestClusterBuilder {
             let log_dir = node_dir.join("logs");
             let rootdir = node_dir.join("data");
 
-            let p2p_addr = if self.p2p_enabled && !is_iroh {
-                Some(format!("/ip4/127.0.0.1/tcp/{}", ports.p2p))
-            } else {
-                None
-            };
-
             // A cluster-shared SE key needs a File keyring both runtimes can
             // share; override `--no-keyring`/Env with a per-node File backend.
             let keyring = if self.shared_se_key.is_some() {
@@ -429,13 +430,15 @@ impl TestClusterBuilder {
                 self.keyring.clone()
             };
 
-            let config = NodeConfig {
+            // Addr fields are patched per attempt: a port-conflict retry
+            // re-allocates this node's ports.
+            let config_template = NodeConfig {
                 name: name.clone(),
                 rootdir,
                 log_dir,
-                http_addr: format!("127.0.0.1:{}", ports.http),
+                http_addr: String::new(),
                 p2p_enabled: self.p2p_enabled,
-                p2p_addr,
+                p2p_addr: None,
                 peers: vec![],
                 identity,
                 acp_document_type: self.acp_document_type.clone(),
@@ -463,11 +466,39 @@ impl TestClusterBuilder {
                 acp_receipt_timeout: self.acp_receipt_timeout,
             };
 
-            // Release port guards right before spawn so the child process can bind
-            ports.release();
-            let running = start_node(&node, config, self.health_timeout)
-                .await
-                .wrap_err_with(|| format!("failed to start {}", name))?;
+            let mut attempt = 1;
+            let running = loop {
+                let mut config = config_template.clone();
+                config.http_addr = format!("127.0.0.1:{}", ports.http);
+                config.p2p_addr = if self.p2p_enabled && !is_iroh {
+                    Some(format!("/ip4/127.0.0.1/tcp/{}", ports.p2p))
+                } else {
+                    None
+                };
+                // Release port guards right before spawn so the child can bind
+                ports.release();
+                match start_node(&node, config, self.health_timeout).await {
+                    Ok(r) => break r,
+                    Err(e)
+                        if attempt < PORT_CONFLICT_ATTEMPTS
+                            && e.downcast_ref::<PortConflict>().is_some() =>
+                    {
+                        attempt += 1;
+                        tracing::warn!(
+                            "{}: port stolen in guard-release window; retrying with fresh ports \
+                             (attempt {}/{})",
+                            name,
+                            attempt,
+                            PORT_CONFLICT_ATTEMPTS
+                        );
+                        let _ = std::fs::remove_dir_all(&config_template.rootdir);
+                        *ports = allocate_node_ports(1)?
+                            .pop()
+                            .expect("allocate_node_ports(1) returns one entry");
+                    }
+                    Err(e) => return Err(e).wrap_err_with(|| format!("failed to start {}", name)),
+                }
+            };
             nodes.push(running);
         }
 
@@ -487,12 +518,6 @@ impl TestClusterBuilder {
             let log_dir = node_dir.join("logs");
             let rootdir = node_dir.join("data");
 
-            let p2p_addr = if self.p2p_enabled {
-                Some(format!("/ip4/127.0.0.1/tcp/{}", ports.p2p))
-            } else {
-                None
-            };
-
             // A cluster-shared SE key needs a File keyring; otherwise Go runs
             // with its usual `--no-keyring`.
             let keyring = if self.shared_se_key.is_some() {
@@ -504,13 +529,15 @@ impl TestClusterBuilder {
                 KeyringBackend::None
             };
 
-            let config = NodeConfig {
+            // Addr fields are patched per attempt: a port-conflict retry
+            // re-allocates this node's ports.
+            let config_template = NodeConfig {
                 name: name.clone(),
                 rootdir,
                 log_dir,
-                http_addr: format!("127.0.0.1:{}", ports.http),
+                http_addr: String::new(),
                 p2p_enabled: self.p2p_enabled,
-                p2p_addr,
+                p2p_addr: None,
                 peers: vec![],
                 identity,
                 acp_document_type: self.acp_document_type.clone(),
@@ -538,11 +565,39 @@ impl TestClusterBuilder {
                 acp_receipt_timeout: self.acp_receipt_timeout,
             };
 
-            // Release port guards right before spawn so the child process can bind
-            ports.release();
-            let running = start_node(&node, config, self.health_timeout)
-                .await
-                .wrap_err_with(|| format!("failed to start {}", name))?;
+            let mut attempt = 1;
+            let running = loop {
+                let mut config = config_template.clone();
+                config.http_addr = format!("127.0.0.1:{}", ports.http);
+                config.p2p_addr = if self.p2p_enabled {
+                    Some(format!("/ip4/127.0.0.1/tcp/{}", ports.p2p))
+                } else {
+                    None
+                };
+                // Release port guards right before spawn so the child can bind
+                ports.release();
+                match start_node(&node, config, self.health_timeout).await {
+                    Ok(r) => break r,
+                    Err(e)
+                        if attempt < PORT_CONFLICT_ATTEMPTS
+                            && e.downcast_ref::<PortConflict>().is_some() =>
+                    {
+                        attempt += 1;
+                        tracing::warn!(
+                            "{}: port stolen in guard-release window; retrying with fresh ports \
+                             (attempt {}/{})",
+                            name,
+                            attempt,
+                            PORT_CONFLICT_ATTEMPTS
+                        );
+                        let _ = std::fs::remove_dir_all(&config_template.rootdir);
+                        *ports = allocate_node_ports(1)?
+                            .pop()
+                            .expect("allocate_node_ports(1) returns one entry");
+                    }
+                    Err(e) => return Err(e).wrap_err_with(|| format!("failed to start {}", name)),
+                }
+            };
             nodes.push(running);
         }
 
