@@ -132,6 +132,77 @@ pub fn allocate_transport_ports(n: usize) -> Result<Vec<TransportNodePorts>> {
     Ok(result)
 }
 
+/// Guards bound to a set of ports whose numbers are already fixed.
+///
+/// [`allocate_node_ports`] asks the OS for *any* free port; this reserves
+/// *specific* ones. A node that is restarting cannot move to fresh ports —
+/// its peers hold its multiaddr and its clients hold its API URL — so the
+/// gap between killing it and re-binding must be covered by holding the very
+/// same numbers, or a concurrent `allocate_*_ports` can be handed them.
+pub struct ReservedPorts {
+    tcp: Vec<TcpListener>,
+    udp: Vec<UdpSocket>,
+}
+
+impl ReservedPorts {
+    /// Release the guards. Call immediately before spawning the process that
+    /// takes ownership of these ports.
+    pub fn release(&mut self) {
+        self.tcp.clear();
+        self.udp.clear();
+    }
+}
+
+/// Bind guard sockets on exactly `tcp_ports` and `udp_ports`.
+///
+/// All-or-nothing: on failure every guard bound so far is dropped, so a caller
+/// that retries never holds a partial reservation. Failure means someone still
+/// owns one of the ports — possibly the previous owner mid-shutdown, which is
+/// why callers retry rather than give up on the first error.
+pub fn reserve_ports(tcp_ports: &[u16], udp_ports: &[u16]) -> Result<ReservedPorts> {
+    let mut reserved = ReservedPorts {
+        tcp: Vec::with_capacity(tcp_ports.len()),
+        udp: Vec::with_capacity(udp_ports.len()),
+    };
+    for port in tcp_ports {
+        reserved.tcp.push(
+            TcpListener::bind(("127.0.0.1", *port))
+                .wrap_err_with(|| format!("failed to reserve tcp port {}", port))?,
+        );
+    }
+    for port in udp_ports {
+        reserved.udp.push(
+            UdpSocket::bind(("127.0.0.1", *port))
+                .wrap_err_with(|| format!("failed to reserve udp port {}", port))?,
+        );
+    }
+    Ok(reserved)
+}
+
+/// Extract the `(tcp, udp)` ports named by a comma-separated multiaddr list
+/// such as `/ip4/127.0.0.1/tcp/4001,/ip4/127.0.0.1/udp/4002/quic-v1`.
+///
+/// Unparseable or portless components are skipped: the caller uses this to
+/// decide what to guard, and guarding nothing is the pre-existing behavior.
+pub fn multiaddr_ports(addr: &str) -> (Vec<u16>, Vec<u16>) {
+    let mut tcp = Vec::new();
+    let mut udp = Vec::new();
+    for entry in addr.split(',') {
+        let parts: Vec<&str> = entry.split('/').collect();
+        for pair in parts.windows(2) {
+            let Ok(port) = pair[1].parse::<u16>() else {
+                continue;
+            };
+            match pair[0] {
+                "tcp" => tcp.push(port),
+                "udp" => udp.push(port),
+                _ => {}
+            }
+        }
+    }
+    (tcp, udp)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +244,71 @@ mod tests {
         TcpListener::bind(("127.0.0.1", tcp)).expect("rebind tcp");
         TcpListener::bind(("127.0.0.1", ws)).expect("rebind ws");
         UdpSocket::bind(("127.0.0.1", quic)).expect("rebind quic");
+    }
+
+    #[test]
+    fn reserved_ports_lock_out_a_competing_binder_until_released() {
+        let mut allocated = allocate_transport_ports(1)
+            .expect("allocate")
+            .pop()
+            .unwrap();
+        let (http, quic) = (allocated.http, allocated.quic);
+        allocated.release();
+
+        let mut reserved = reserve_ports(&[http], &[quic]).expect("reserve just-freed ports");
+
+        assert!(
+            TcpListener::bind(("127.0.0.1", http)).is_err(),
+            "a competitor must not be able to take reserved tcp port {}",
+            http
+        );
+        assert!(
+            UdpSocket::bind(("127.0.0.1", quic)).is_err(),
+            "a competitor must not be able to take reserved udp port {}",
+            quic
+        );
+
+        reserved.release();
+
+        TcpListener::bind(("127.0.0.1", http)).expect("tcp rebind after release");
+        UdpSocket::bind(("127.0.0.1", quic)).expect("udp rebind after release");
+    }
+
+    #[test]
+    fn failed_reservation_holds_no_ports() {
+        let taken = TcpListener::bind("127.0.0.1:0").expect("bind competitor");
+        let taken_port = taken.local_addr().unwrap().port();
+
+        let mut allocated = allocate_transport_ports(1)
+            .expect("allocate")
+            .pop()
+            .unwrap();
+        let free_port = allocated.http;
+        allocated.release();
+
+        assert!(
+            reserve_ports(&[free_port, taken_port], &[]).is_err(),
+            "reserving a port owned by someone else must fail"
+        );
+
+        TcpListener::bind(("127.0.0.1", free_port))
+            .expect("a failed reservation must not keep holding the ports it did get");
+    }
+
+    #[test]
+    fn multiaddr_ports_reads_tcp_and_udp_components() {
+        let (tcp, udp) = multiaddr_ports(
+            "/ip4/127.0.0.1/tcp/4001,/ip4/127.0.0.1/udp/4002/quic-v1,/ip4/127.0.0.1/tcp/4003/ws",
+        );
+        assert_eq!(tcp, vec![4001, 4003]);
+        assert_eq!(udp, vec![4002]);
+
+        let (tcp, udp) = multiaddr_ports("/ip4/127.0.0.1/tcp/0");
+        assert_eq!(tcp, vec![0]);
+        assert!(udp.is_empty());
+
+        let (tcp, udp) = multiaddr_ports("/dns4/example.com/tcp/notaport");
+        assert!(tcp.is_empty() && udp.is_empty());
     }
 
     #[test]
