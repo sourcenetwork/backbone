@@ -217,6 +217,11 @@ pub struct NodeConfig {
     pub acp_circuit_breaker_reset_timeout: Option<u64>,
     pub acp_request_timeout: Option<u64>,
     pub acp_receipt_timeout: Option<u64>,
+    /// Raw CLI flags appended after every managed flag, so they win under
+    /// clap's last-one-wins parsing. The escape hatch for options the builder
+    /// has no typed method for -- notably enforcement tests, which must set an
+    /// arbitrary option and prove it changes observable behavior.
+    pub extra_args: Vec<String>,
 }
 
 impl NodeConfig {
@@ -253,6 +258,7 @@ impl NodeConfig {
             acp_circuit_breaker_reset_timeout: None,
             acp_request_timeout: None,
             acp_receipt_timeout: None,
+            extra_args: Vec::new(),
         }
     }
 }

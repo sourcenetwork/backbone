@@ -70,6 +70,7 @@ pub struct TestClusterBuilder {
     acp_request_timeout: Option<u64>,
     acp_receipt_timeout: Option<u64>,
     signing_multiplier_opt_out: bool,
+    extra_rust_args: Vec<String>,
 }
 
 impl Default for TestClusterBuilder {
@@ -107,7 +108,29 @@ impl TestClusterBuilder {
             acp_request_timeout: None,
             acp_receipt_timeout: None,
             signing_multiplier_opt_out: false,
+            extra_rust_args: Vec::new(),
         }
+    }
+
+    /// Append raw CLI flags to every Rust node's `start` invocation.
+    ///
+    /// The escape hatch for options with no typed builder method. Flags land
+    /// after all managed ones, so they win under clap's last-one-wins parsing.
+    ///
+    /// Intended for enforcement tests -- set an option to a value that must
+    /// change observable behavior, then assert the behavior changed. Prefer a
+    /// typed `with_*` method for anything a test suite sets repeatedly.
+    ///
+    /// Rust-scoped on purpose: several options under test have no Go
+    /// counterpart, and silently passing them to a Go node would abort startup.
+    pub fn with_extra_rust_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.extra_rust_args
+            .extend(args.into_iter().map(Into::into));
+        self
     }
 
     pub fn rust_nodes(mut self, n: usize) -> Self {
@@ -464,6 +487,7 @@ impl TestClusterBuilder {
                 acp_circuit_breaker_reset_timeout: self.acp_circuit_breaker_reset_timeout,
                 acp_request_timeout: self.acp_request_timeout,
                 acp_receipt_timeout: self.acp_receipt_timeout,
+                extra_args: self.extra_rust_args.clone(),
             };
 
             let mut attempt = 1;
@@ -563,6 +587,7 @@ impl TestClusterBuilder {
                 acp_circuit_breaker_reset_timeout: self.acp_circuit_breaker_reset_timeout,
                 acp_request_timeout: self.acp_request_timeout,
                 acp_receipt_timeout: self.acp_receipt_timeout,
+                extra_args: Vec::new(),
             };
 
             let mut attempt = 1;

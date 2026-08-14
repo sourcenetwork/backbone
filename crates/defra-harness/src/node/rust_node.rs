@@ -219,10 +219,49 @@ impl DefraNode for RustNode {
             args.push(timeout.to_string());
         }
 
+        args.extend(config.extra_args.iter().cloned());
+
         (self.binary_path.clone(), args, envs)
     }
 
     fn binary_path(&self) -> &Path {
         &self.binary_path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> NodeConfig {
+        NodeConfig::new(
+            "n0",
+            PathBuf::from("/tmp/defra-test-root"),
+            PathBuf::from("/tmp/defra-test-log"),
+            "127.0.0.1:9181",
+        )
+    }
+
+    #[test]
+    fn extra_args_are_appended_after_managed_flags() {
+        let node = RustNode::from_binary("/nonexistent/defra");
+        let mut config = test_config();
+        config.extra_args = vec!["--max-schema-size".to_string(), "2048".to_string()];
+
+        let (_binary, args, _envs) = node.command_parts(&config);
+
+        assert_eq!(
+            &args[args.len() - 2..],
+            &["--max-schema-size".to_string(), "2048".to_string()],
+            "extra args must land last so they override managed flags"
+        );
+    }
+
+    #[test]
+    fn extra_args_default_to_none() {
+        let node = RustNode::from_binary("/nonexistent/defra");
+        let (_binary, args, _envs) = node.command_parts(&test_config());
+
+        assert!(!args.iter().any(|a| a == "--max-schema-size"));
     }
 }
