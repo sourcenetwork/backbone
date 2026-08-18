@@ -163,6 +163,8 @@ impl DefraNode for GoNode {
             args.push(timeout.to_string());
         }
 
+        args.extend(config.extra_args.iter().cloned());
+
         (self.binary_path.clone(), args, envs)
     }
 
