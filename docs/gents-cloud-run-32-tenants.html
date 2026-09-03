@@ -1,0 +1,679 @@
+<title>32-Tenant Vera Run</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+  :root {
+    --ground: #f6f7f9;
+    --surface: #ffffff;
+    --surface-sunk: #eef1f4;
+    --line: #d8dee5;
+    --line-strong: #b9c3ce;
+    --ink: #131920;
+    --ink-soft: #4d5a68;
+    --ink-faint: #74818f;
+    --accent: #1d6b5a;
+    --accent-soft: #d3e7e1;
+    --warn: #96601b;
+    --warn-soft: #f2e4cd;
+    --alert: #9c3030;
+    --alert-soft: #f3d9d9;
+    --chain: #2f6f8f;
+
+    --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --body: "Source Serif 4", Georgia, "Times New Roman", serif;
+    --mono: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0d1218;
+      --surface: #151c24;
+      --surface-sunk: #1b242e;
+      --line: #2a3540;
+      --line-strong: #3d4c5a;
+      --ink: #e7ecf1;
+      --ink-soft: #a9b6c3;
+      --ink-faint: #7f8d9b;
+      --accent: #63bda7;
+      --accent-soft: #1c3b36;
+      --warn: #d5a463;
+      --warn-soft: #3a2e19;
+      --alert: #e08383;
+      --alert-soft: #3b1f1f;
+      --chain: #79b6d3;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0d1218;
+    --surface: #151c24;
+    --surface-sunk: #1b242e;
+    --line: #2a3540;
+    --line-strong: #3d4c5a;
+    --ink: #e7ecf1;
+    --ink-soft: #a9b6c3;
+    --ink-faint: #7f8d9b;
+    --accent: #63bda7;
+    --accent-soft: #1c3b36;
+    --warn: #d5a463;
+    --warn-soft: #3a2e19;
+    --alert: #e08383;
+    --alert-soft: #3b1f1f;
+    --chain: #79b6d3;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0 20px 96px;
+  }
+
+  .wrap { max-width: 1060px; margin: 0 auto; }
+
+  a { color: var(--accent); }
+  a:focus-visible,
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---- masthead ---- */
+  header.masthead {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px 40px;
+    align-items: flex-end;
+    justify-content: space-between;
+    padding: 44px 0 20px;
+    border-bottom: 2px solid var(--line-strong);
+  }
+  .masthead h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(30px, 4.4vw, 46px);
+    letter-spacing: -0.02em;
+    line-height: 1.05;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .masthead p {
+    margin: 10px 0 0;
+    color: var(--ink-soft);
+    max-width: 62ch;
+  }
+  .stamp {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--ink-faint);
+    text-align: right;
+    white-space: nowrap;
+  }
+  .stamp b { color: var(--ink); font-weight: 600; }
+  .verdict {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 2px;
+    padding: 5px 10px;
+  }
+
+  /* ---- headline figures ---- */
+  .figures {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    margin: 28px 0 0;
+  }
+  .figure { background: var(--surface); padding: 16px 18px 18px; }
+  .figure dt {
+    font-family: var(--display);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 6px;
+  }
+  .figure dd {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 25px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    margin: 0;
+  }
+  .figure dd small {
+    font-size: 13px;
+    color: var(--ink-faint);
+    letter-spacing: 0;
+    margin-left: 3px;
+  }
+
+  /* ---- sections ---- */
+  section { margin-top: 56px; }
+  h2 {
+    font-family: var(--display);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 4px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  h3 {
+    font-family: var(--display);
+    font-size: 21px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 18px 0 6px;
+    text-wrap: balance;
+  }
+  .lede { max-width: 66ch; color: var(--ink-soft); margin: 10px 0 20px; }
+
+  /* ---- tables ---- */
+  .scroll { overflow-x: auto; border: 1px solid var(--line); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  caption {
+    caption-side: bottom;
+    text-align: left;
+    font-size: 13px;
+    color: var(--ink-faint);
+    padding: 10px 14px 0;
+    max-width: 78ch;
+  }
+  th, td {
+    text-align: left;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  thead th {
+    font-family: var(--display);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: var(--surface-sunk);
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.code, code { font-family: var(--mono); font-size: 13px; }
+  code { background: var(--surface-sunk); padding: 1px 5px; border-radius: 2px; }
+  tbody tr.total td { font-weight: 600; background: var(--surface-sunk); }
+  td.wrap-note { color: var(--ink-soft); font-size: 13px; }
+
+  /* ---- charts ---- */
+  .chart { background: var(--surface); border: 1px solid var(--line); padding: 18px 18px 10px; }
+  .chart svg { width: 100%; height: auto; display: block; }
+  .chart-note { font-size: 13px; color: var(--ink-faint); margin: 6px 2px 4px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 12px 2px 2px; font-size: 13px; color: var(--ink-soft); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+
+  .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; align-items: start; }
+
+  /* ---- findings ---- */
+  .finding {
+    border-left: 3px solid var(--line-strong);
+    padding: 2px 0 2px 18px;
+    margin: 22px 0;
+    max-width: 74ch;
+  }
+  .finding.critical { border-left-color: var(--alert); }
+  .finding.open { border-left-color: var(--warn); }
+  .finding.clear { border-left-color: var(--accent); }
+  .finding h3 { margin-top: 0; }
+  .finding p { margin: 6px 0 0; color: var(--ink-soft); }
+  .chip {
+    font-family: var(--display);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    border-radius: 2px;
+  }
+  .chip.critical { background: var(--alert-soft); color: var(--alert); }
+  .chip.open { background: var(--warn-soft); color: var(--warn); }
+  .chip.clear { background: var(--accent-soft); color: var(--accent); }
+
+  .pass { color: var(--accent); font-weight: 600; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    font-size: 13px;
+    color: var(--ink-faint);
+    max-width: 74ch;
+  }
+</style>
+
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div>
+      <h1>32-Tenant Vera Run</h1>
+      <p>The gents-cloud architecture exercised end to end on Go Vera: one <code>verad</code> devnet, a 3-node Orbis ring at threshold 2, and DefraDB cells enforcing document access control against the chain.</p>
+    </div>
+    <div class="stamp">
+      <span class="verdict">13 of 13 passed</span><br>
+      <b>2026-09-03</b> 20:39 UTC<br>
+      backbone <code>tests/gents_cloud</code><br>
+      36 cores, 188 GiB host
+    </div>
+  </header>
+
+  <dl class="figures">
+    <div class="figure"><dt>Wall time</dt><dd>376.5<small>s</small></dd></div>
+    <div class="figure"><dt>Tenants</dt><dd>32</dd></div>
+    <div class="figure"><dt>Cells at peak</dt><dd>35</dd></div>
+    <div class="figure"><dt>Chain height</dt><dd>352</dd></div>
+    <div class="figure"><dt>Transactions</dt><dd>223<small>0 failed</small></dd></div>
+    <div class="figure"><dt>Cell memory</dt><dd>71<small>MiB p50</small></dd></div>
+  </dl>
+
+  <section>
+    <h2>What changed since the first run</h2>
+    <p class="lede">The first 32-tenant run took 1212.5 seconds and spent almost all of it waiting for blocks. CometBFT ships <code>timeout_commit = "5s"</code>, and the harness had never touched it, so every chain step in the provisioning path cost a five-second block. The devnet now sets the four consensus timeouts explicitly. Nothing else about the stack changed, and the same scenarios assert the same things.</p>
+    <div class="split">
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Setting</th><th class="num">Before</th><th class="num">After</th></tr></thead>
+          <tbody>
+            <tr><td class="code">timeout_propose</td><td class="num">3s</td><td class="num">500ms</td></tr>
+            <tr><td class="code">timeout_prevote</td><td class="num">1s</td><td class="num">500ms</td></tr>
+            <tr><td class="code">timeout_precommit</td><td class="num">1s</td><td class="num">500ms</td></tr>
+            <tr><td class="code">timeout_commit</td><td class="num">5s</td><td class="num">1s</td></tr>
+          </tbody>
+        </table>
+        <caption>Set in <code>crates/sourcehub-harness/src/genesis.rs</code>. A key absent from the shipped config is an error rather than a silent skip, so a missed setting cannot read as a slow chain.</caption>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Measure</th><th class="num">Before</th><th class="num">After</th><th class="num">Change</th></tr></thead>
+          <tbody>
+            <tr><td>Block interval (s)</td><td class="num">5.03</td><td class="num">1.06</td><td class="num">4.7x</td></tr>
+            <tr><td>Provision one tenant (ms)</td><td class="num">25167</td><td class="num">6058</td><td class="num">4.2x</td></tr>
+            <tr><td>Suite wall time (s)</td><td class="num">1212.5</td><td class="num">376.5</td><td class="num">3.2x</td></tr>
+            <tr><td>Signed write, p50 (ms)</td><td class="num">4909</td><td class="num">1483</td><td class="num">3.3x</td></tr>
+            <tr><td>Stack bring-up (s)</td><td class="num">83.5</td><td class="num">22.4</td><td class="num">3.7x</td></tr>
+            <tr><td>Chain share of provisioning</td><td class="num">80%</td><td class="num">70%</td><td class="num">-10pt</td></tr>
+          </tbody>
+        </table>
+        <caption>The block interval is measured from height and wall clock across the run, not read from the configuration.</caption>
+      </div>
+    </div>
+    <p class="lede">Faster blocks changed one measurement qualitatively rather than proportionally: cell resident memory fell from 108 MiB to 71 MiB at p50, because a cell that finishes provisioning in six seconds holds less transient state at the moment it is sampled. The projection to 100,000 tenants moves with it, and both numbers are in this report.</p>
+  </section>
+
+  <section>
+    <h2>Scenarios</h2>
+    <p class="lede">Each scenario is named for the invariant, hardening move, spike, or readiness finding it discharges, and asserts what the running stack does rather than what the plan says it should.</p>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>Scenario</th><th>Discharges</th><th class="num">Seconds</th><th>Result</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="code">h1_node_identity_no_privileged_read</td><td class="wrap-note">H1, I-2, spike S6, readiness C4</td><td class="num">8.3</td><td class="pass">pass</td></tr>
+          <tr><td class="code">i26_absence_denial_indistinguishable</td><td class="wrap-note">I-26, Phase 2 gate</td><td class="num">0.0</td><td class="pass">pass</td></tr>
+          <tr><td class="code">grant_asymmetry</td><td class="wrap-note">Grant granularity, revocation cost</td><td class="num">8.7</td><td class="pass">pass</td></tr>
+          <tr><td class="code">h5_two_clocks</td><td class="wrap-note">H5 two clocks, spike S5, I-16</td><td class="num">15.6</td><td class="pass">pass</td></tr>
+          <tr><td class="code">h12_pre_on_vera</td><td class="wrap-note">H12 recoverable custody</td><td class="num">3.3</td><td class="pass">pass</td></tr>
+          <tr><td class="code">h3_ring_gate_mechanism</td><td class="wrap-note">H3 signing gate, spike S7</td><td class="num">0.9</td><td class="pass">pass</td></tr>
+          <tr><td class="code">l8_ring_below_threshold</td><td class="wrap-note">Degradation rung L8, decision 43</td><td class="num">34.8</td><td class="pass">pass</td></tr>
+          <tr><td class="code">s7_signed_write_cost</td><td class="wrap-note">Ring round trip cost, spike S7</td><td class="num">18.3</td><td class="pass">pass</td></tr>
+          <tr><td class="code">dry_account</td><td class="wrap-note">Unfunded cell, unregistered means public</td><td class="num">3.3</td><td class="pass">pass</td></tr>
+          <tr><td class="code">s8_topic_collision_c1</td><td class="wrap-note">Decisions A-1 and A-2, spike S8, C1</td><td class="num">46.9</td><td class="pass">pass</td></tr>
+          <tr><td class="code">i7_kill9_identity</td><td class="wrap-note">I-7 identity persisted before use</td><td class="num">3.1</td><td class="pass">pass</td></tr>
+          <tr><td class="code">afterburner_sealed_packages</td><td class="wrap-note">Spike S4, sealed guest packaging</td><td class="num">0.2</td><td class="pass">pass</td></tr>
+          <tr><td class="code">scale_per_tenant_cost</td><td class="wrap-note">Density, the workspace as shard key, growth stages</td><td class="num">210.7</td><td class="pass">pass</td></tr>
+        </tbody>
+      </table>
+      <caption>The last scenario provisions the 32 tenants; the twelve before it run on the three-cell base stack.</caption>
+    </div>
+  </section>
+
+  <section>
+    <h2>Scale</h2>
+    <div class="split">
+      <div>
+        <h3>Memory grows with tenants, latency does not</h3>
+        <p class="lede">Every checkpoint measures the resident set of every live cell and the read latency of a sample of tenants. Total memory tracks the tenant count; a tenant's read stays at 6 ms whether it is one of eight or one of thirty-two. Per-cell memory falls between the first two checkpoints and the last two because a cell sheds transient provisioning state once it settles.</p>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr><th class="num">Tenants</th><th class="num">Cell p50 (MiB)</th><th class="num">All cells (MiB)</th><th class="num">Read p50 (ms)</th><th class="num">Ignition p50 (ms)</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="num">8</td><td class="num">100</td><td class="num">750</td><td class="num">6</td><td class="num">311</td></tr>
+              <tr><td class="num">16</td><td class="num">100</td><td class="num">1505</td><td class="num">7</td><td class="num">303</td></tr>
+              <tr><td class="num">24</td><td class="num">70</td><td class="num">1855</td><td class="num">6</td><td class="num">303</td></tr>
+              <tr><td class="num">32</td><td class="num">71</td><td class="num">2572</td><td class="num">6</td><td class="num">300</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="chart">
+        <svg viewBox="0 0 640 268" role="img" aria-label="Total resident memory of all cells rising from 750 MiB at 8 tenants to 2572 MiB at 32 tenants">
+          <g stroke="var(--line)" stroke-width="1">
+            <line x1="56" y1="224" x2="624" y2="224"></line>
+            <line x1="56" y1="154.7" x2="624" y2="154.7"></line>
+            <line x1="56" y1="85.3" x2="624" y2="85.3"></line>
+            <line x1="56" y1="16" x2="624" y2="16"></line>
+          </g>
+          <g fill="var(--ink-faint)" font-family="IBM Plex Mono, monospace" font-size="11" text-anchor="end">
+            <text x="48" y="228">0</text>
+            <text x="48" y="158.7">900</text>
+            <text x="48" y="89.3">1800</text>
+            <text x="48" y="20">2700</text>
+          </g>
+          <g fill="var(--ink-faint)" font-family="IBM Plex Mono, monospace" font-size="11" text-anchor="middle">
+            <text x="189.6" y="242">8</text>
+            <text x="323.3" y="242">16</text>
+            <text x="456.9" y="242">24</text>
+            <text x="590.6" y="242">32</text>
+            <text x="340" y="260" fill="var(--ink-faint)">tenants</text>
+          </g>
+          <polyline points="189.6,166.2 323.3,108.0 456.9,81.1 590.6,26.0"
+                    fill="none" stroke="var(--accent)" stroke-width="2.5"></polyline>
+          <g fill="var(--accent)">
+            <circle cx="189.6" cy="166.2" r="4"></circle>
+            <circle cx="323.3" cy="108.0" r="4"></circle>
+            <circle cx="456.9" cy="81.1" r="4"></circle>
+            <circle cx="590.6" cy="26.0" r="5.5"></circle>
+          </g>
+          <text x="590.6" y="45" fill="var(--ink)" font-family="IBM Plex Mono, monospace" font-size="12" text-anchor="end">2572 MiB</text>
+        </svg>
+        <p class="chart-note">Resident memory, all live cells, MiB.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Where provisioning time goes</h2>
+    <p class="lede">Provisioning one tenant end to end took 6.1 seconds at p50. Almost none of that is the cell. Igniting the cell process and applying its schema together account for 319 ms; the rest is four Vera transactions and one document registration, each waiting for a block.</p>
+    <div class="chart">
+      <svg viewBox="0 0 640 108" role="img" aria-label="Stacked bar: four chain transactions and one registration take 94.7 percent of provisioning time, cell ignition and schema take 5.3 percent">
+        <g>
+          <rect x="16" y="20" width="94.4" height="34" fill="var(--chain)"></rect>
+          <rect x="110.4" y="20" width="105.0" height="34" fill="var(--chain)" opacity="0.85"></rect>
+          <rect x="215.4" y="20" width="82.0" height="34" fill="var(--chain)" opacity="0.7"></rect>
+          <rect x="297.4" y="20" width="131.9" height="34" fill="var(--chain)" opacity="0.55"></rect>
+          <rect x="429.3" y="20" width="29.1" height="34" fill="var(--warn)"></rect>
+          <rect x="458.4" y="20" width="1.8" height="34" fill="var(--alert)"></rect>
+          <rect x="460.2" y="20" width="134.2" height="34" fill="var(--chain)" opacity="0.4"></rect>
+        </g>
+        <g fill="var(--ink-faint)" font-family="IBM Plex Mono, monospace" font-size="11">
+          <text x="16" y="74">0 s</text>
+          <text x="305" y="74" text-anchor="middle">3.0 s</text>
+          <text x="594" y="74" text-anchor="end">6.0 s</text>
+        </g>
+        <text x="16" y="98" fill="var(--ink-soft)" font-family="IBM Plex Mono, monospace" font-size="11">chain-bound 5,648 ms  ·  local work 319 ms</text>
+      </svg>
+      <div class="legend">
+        <span><i class="swatch" style="background: var(--chain)"></i> fund, policy, register object, grant writer, first write</span>
+        <span><i class="swatch" style="background: var(--warn)"></i> cell ignition 300 ms</span>
+        <span><i class="swatch" style="background: var(--alert)"></i> schema 19 ms</span>
+      </div>
+    </div>
+    <div class="scroll" style="margin-top: 24px;">
+      <table>
+        <thead><tr><th>Step</th><th class="num">p50 (ms)</th><th class="num">Was (ms)</th><th>Waits on</th></tr></thead>
+        <tbody>
+          <tr><td>Fund the tenant account</td><td class="num">974</td><td class="num">5086</td><td class="wrap-note">Vera block</td></tr>
+          <tr><td>Create the policy</td><td class="num">1083</td><td class="num">5166</td><td class="wrap-note">Vera block</td></tr>
+          <tr><td>Register the collection object</td><td class="num">846</td><td class="num">4976</td><td class="wrap-note">Vera block</td></tr>
+          <tr><td>Grant writer</td><td class="num">1361</td><td class="num">5000</td><td class="wrap-note">Vera block</td></tr>
+          <tr><td>Ignite the cell</td><td class="num">300</td><td class="num">163</td><td class="wrap-note">the process starting</td></tr>
+          <tr><td>Add the schema</td><td class="num">19</td><td class="num">17</td><td class="wrap-note">local</td></tr>
+          <tr><td>First write</td><td class="num">1384</td><td class="num">5285</td><td class="wrap-note">document registration on Vera</td></tr>
+          <tr class="total"><td>Total</td><td class="num">6058</td><td class="num">25167</td><td class="wrap-note">70% is the four transactions alone</td></tr>
+        </tbody>
+      </table>
+      <caption>Each step is the median across 32 tenants, so the parts sum to 5,967 ms rather than exactly to the median total of 6,058 ms. Cell ignition rose from 163 ms to 300 ms because 32 cells now start inside a shorter window and contend for the same cores.</caption>
+    </div>
+  </section>
+
+  <section>
+    <h2>What the chain did</h2>
+    <p class="lede">Every transaction the run submitted, read back from the committed ledger. None failed.</p>
+    <div class="split">
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Message</th><th class="num">Count</th></tr></thead>
+          <tbody>
+            <tr><td class="code">/vera.acp.MsgDirectPolicyCmd</td><td class="num">73</td></tr>
+            <tr><td class="code">/vera.acp.MsgBearerPolicyCmd</td><td class="num">69</td></tr>
+            <tr><td class="code">/cosmos.bank.v1beta1.MsgSend</td><td class="num">41</td></tr>
+            <tr><td class="code">/vera.acp.MsgCreatePolicy</td><td class="num">34</td></tr>
+            <tr><td class="code">/vera.bulletin.MsgAddCollaborator</td><td class="num">3</td></tr>
+            <tr><td class="code">/vera.bulletin.MsgCreatePost</td><td class="num">2</td></tr>
+            <tr><td class="code">/vera.bulletin.MsgRegisterNamespace</td><td class="num">1</td></tr>
+            <tr class="total"><td>Total</td><td class="num">223</td></tr>
+          </tbody>
+        </table>
+        <caption>Bearer commands are DefraDB acting for a document owner; direct commands are the harness acting as the chain account that registered the object.</caption>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Chain measure</th><th class="num">Value</th></tr></thead>
+          <tbody>
+            <tr><td>Blocks produced</td><td class="num">352</td></tr>
+            <tr><td>Block interval</td><td class="num">1.06 s</td></tr>
+            <tr><td>Transactions committed</td><td class="num">223</td></tr>
+            <tr><td>Transactions failed</td><td class="num">0</td></tr>
+            <tr><td>Last block carrying a transaction</td><td class="num">337</td></tr>
+            <tr><td>Gas used</td><td class="num">25,471,721</td></tr>
+            <tr><td>Gas wanted</td><td class="num">368,516,753</td></tr>
+            <tr><td>Policies registered</td><td class="num">35</td></tr>
+            <tr><td>Chain data on disk</td><td class="num">8.8 MiB</td></tr>
+          </tbody>
+        </table>
+        <caption>Gas wanted is the harness limit of 3,000,000 per transaction, raised after a lower limit made the first namespace registration fail inside the Cosmos gas meter. Gas used is 6.9% of it.</caption>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Component footprint</h2>
+    <div class="split">
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Component</th><th class="num">Count</th><th class="num">Peak resident (MiB)</th><th class="num">Each (MiB)</th></tr></thead>
+          <tbody>
+            <tr><td>DefraDB cells</td><td class="num">35</td><td class="num">2846</td><td class="num">81</td></tr>
+            <tr><td>Vera (<code>verad</code>)</td><td class="num">1</td><td class="num">218</td><td class="num">218</td></tr>
+            <tr><td>Orbis ring</td><td class="num">3</td><td class="num">139</td><td class="num">46</td></tr>
+          </tbody>
+        </table>
+        <caption>Maxima over 33 samples taken every 15 seconds. Ring memory peaks during the distributed key generation and falls to 23 MiB per node afterwards.</caption>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Component</th><th class="num">Signed blocks</th><th class="num">Merges</th><th class="num">Peer connects</th></tr></thead>
+          <tbody>
+            <tr><td>acme cell</td><td class="num">61</td><td class="num">2</td><td class="num">8</td></tr>
+            <tr><td>globex cell</td><td class="num">10</td><td class="num">0</td><td class="num">6</td></tr>
+            <tr><td>platform replica</td><td class="num">0</td><td class="num">87</td><td class="num">6</td></tr>
+            <tr><td>each scale tenant</td><td class="num">4</td><td class="num">2</td><td class="num">0</td></tr>
+            <tr><td>Orbis node0</td><td class="num">846</td><td class="num">n/a</td><td class="num">n/a</td></tr>
+            <tr><td>Orbis node1</td><td class="num">428</td><td class="num">n/a</td><td class="num">n/a</td></tr>
+            <tr><td>Orbis node2</td><td class="num">428</td><td class="num">n/a</td><td class="num">n/a</td></tr>
+          </tbody>
+        </table>
+        <caption>Each of the 32 scale tenants now signs its writes through the ring: it signed 0 in the first run, when the writing identity was the cell's own node identity. Ring figures count signing lines in each node's log.</caption>
+      </div>
+    </div>
+    <div class="scroll" style="margin-top: 24px;">
+      <table>
+        <thead><tr><th>On disk after the run</th><th class="num">KiB</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>Vera chain data</td><td class="num">9012</td><td class="wrap-note">352 blocks, 223 transactions</td></tr>
+          <tr><td>All 32 tenant cells</td><td class="num">1280</td><td class="wrap-note">40 KiB per tenant, one document each</td></tr>
+          <tr><td>Orbis ring, 3 nodes</td><td class="num">716</td><td class="wrap-note">key shares and session state</td></tr>
+          <tr class="total"><td>Whole run directory</td><td class="num">12012</td><td class="wrap-note">includes the base stack's three cells and all logs</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Projection to 100,000 tenants</h2>
+    <p class="lede">The run covered 32 tenants. These figures are arithmetic over the measurements above, labelled as projections, not a claim that a 100,000-tenant run happened.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Projection</th><th class="num">Value</th><th>Assumption</th></tr></thead>
+        <tbody>
+          <tr><td>Cells per 64 GiB node</td><td class="num">923</td><td class="wrap-note">71 MiB per cell measured, no headroom for a supervisor or a guest</td></tr>
+          <tr><td>Nodes for 100,000 tenants</td><td class="num">109</td><td class="wrap-note">one cell per tenant, no replicas</td></tr>
+          <tr><td>Chain transactions to provision</td><td class="num">400,000</td><td class="wrap-note">four per tenant, from the ledger above</td></tr>
+          <tr><td>Serial provisioning time</td><td class="num">168 h</td><td class="wrap-note">at the measured p50, down from 705 h; a real fleet provisions in parallel, so this is a parallelism requirement rather than a throughput ceiling</td></tr>
+          <tr><td>Chain storage</td><td class="num">15 GiB</td><td class="wrap-note">at the measured 8.8 MiB of chain data for 223 transactions, scaled to 400,000</td></tr>
+        </tbody>
+      </table>
+      <caption>The node count moved from 166 to 109 only because per-cell memory was measured lower on this run. It is a measurement of a settled cell, not an optimisation.</caption>
+    </div>
+  </section>
+
+  <section>
+    <h2>Findings</h2>
+
+    <div class="finding critical">
+      <h3><span class="chip critical">Disclosure</span> A failed registration leaves a public document</h3>
+      <p>A cell whose chain account holds no funds commits the document locally and then fails the registration transaction. An unregistered document is public, so the write that appeared to fail is readable by any identity. One document was readable by an unrelated DID after the failure. Faster blocks do not change this: the failure is an unfunded account, not a timeout.</p>
+    </div>
+
+    <div class="finding open">
+      <h3><span class="chip open">Not wired</span> The ring is not a write gate today</h3>
+      <p>Given an access-control tuple the ring refuses to sign for an unauthorised DID and signs for an authorised one in 54 ms. DefraDB's Cosmos provider returns no access decision, so the request carries no tuple and the ring signs for any authenticated caller. A writer revoked on the collection object still created a document.</p>
+    </div>
+
+    <div class="finding open">
+      <h3><span class="chip open">Configuration</span> Revocation latency is the cache lifetime, not the chain</h3>
+      <p>A cell subscribed to chain transaction events denied a revoked reader 9 ms after Vera itself reported the revocation, which was 124 ms after submission. A cell without the subscription served the stale allow until its cache expired: 2.1 seconds into a 15 second lifetime on this run. The subscription is a security control, not a latency optimisation, and the gap it closes is bounded by the cache lifetime rather than by the block interval.</p>
+    </div>
+
+    <div class="finding open">
+      <h3><span class="chip open">Ambient state</span> Which key signs depends on who asks</h3>
+      <p>In the first run the scale tenants' writes were signed locally rather than by the ring, because the writing identity was the cell's own node identity, whose signing configuration lives in a process-global store. Same flags, same code, different signer. The suite now uses a separate writer identity per tenant, and each tenant's four writes are ring-signed on this run. The original behaviour is evidence for the ambient-state risk the plan tracks as I-29.</p>
+    </div>
+
+    <div class="finding open">
+      <h3><span class="chip open">Configuration</span> The block interval was the provisioning cost</h3>
+      <p>Four fifths of the time to provision a tenant was a CometBFT default the harness had never set. Setting the four consensus timeouts cut provisioning from 25.2 s to 6.1 s with no change to what the stack does. The remaining 70% is still chain-bound, so the next reduction has to come from batching the four transactions rather than from tuning consensus further.</p>
+    </div>
+
+    <div class="finding clear">
+      <h3><span class="chip clear">Holds</span> Isolation held at every tenant count</h3>
+      <p>Thirty-two ordered cross-tenant reads were denied, each tenant saw exactly its own document, and a document replicated to another tenant's cell stayed gated because its registration lives on the chain rather than in a local store. Two cells sharing a schema and a policy do derive one collection topic, so topic separation is not automatic, but no block crossed it in 45 seconds without a replicator.</p>
+    </div>
+
+    <div class="finding clear">
+      <h3><span class="chip clear">Holds</span> Identity survives a kill</h3>
+      <p>A cell killed with SIGKILL and restarted on the same data directory came back in 1.4 seconds with the same node identity, the same peer identity and address, the same documents, and a working ring signer.</p>
+    </div>
+
+    <div class="finding clear">
+      <h3><span class="chip clear">Holds</span> Guest packages are sealed</h3>
+      <p>Four afterburner packages were checked as artifacts: three policy modules and the DefraDB engine itself at 1.48 MiB, each carrying a content hash over its sealed contents. This is the packaging half of spike S4; the guest runtime is exercised in defraburner rather than here.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Every recorded measurement</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Measurement</th><th>Value</th></tr></thead>
+        <tbody>
+          <tr><td class="code">stack_bring_up_secs</td><td class="num">22.4</td></tr>
+          <tr><td class="code">ring_signed_batch_create_3_docs_ms</td><td class="num">3949</td></tr>
+          <tr><td class="code">i26_forbidden_read_ms</td><td class="num">15</td></tr>
+          <tr><td class="code">i26_absent_read_ms</td><td class="num">10</td></tr>
+          <tr><td class="code">per_document_grant_3_docs_to_vera_visible_ms</td><td class="num">3650</td></tr>
+          <tr><td class="code">grant_read_gate_eager_cell_lag_after_vera_ms</td><td class="num">0</td></tr>
+          <tr><td class="code">revocation_vera_visible_after_submit_ms</td><td class="num">124</td></tr>
+          <tr><td class="code">revocation_read_gate_eager_cell_ms</td><td class="num">9</td></tr>
+          <tr><td class="code">revocation_read_gate_ttl_cell_ms</td><td class="num">2131</td></tr>
+          <tr><td class="code">revoked_update_response</td><td class="code">{"data":{"update_Transcript":[]}}</td></tr>
+          <tr><td class="code">create_after_collection_writer_revoked</td><td class="wrap-note">accepted: no create gate under Vera</td></tr>
+          <tr><td class="code">pre_authorised_reader</td><td class="wrap-note">refused by the ring despite the Vera relation</td></tr>
+          <tr><td class="code">ring_sign_with_vera_acp_check_ms</td><td class="num">54</td></tr>
+          <tr><td class="code">ring_signs_without_acp_tuple</td><td class="wrap-note">yes</td></tr>
+          <tr><td class="code">l8_refusal_latency_ms</td><td class="num">30022</td></tr>
+          <tr><td class="code">l8_ring_recovery_to_first_signed_write_ms</td><td class="num">4731</td></tr>
+          <tr><td class="code">s7_create_p50_ring_signed_ms</td><td class="num">1483</td></tr>
+          <tr><td class="code">s7_create_p50_unsigned_ms</td><td class="num">769</td></tr>
+          <tr><td class="code">s7_ring_round_trip_p50_ms</td><td class="num">714</td></tr>
+          <tr><td class="code">dry_account_leaves_public_document</td><td class="wrap-note">yes: 1 document readable by an unrelated DID</td></tr>
+          <tr><td class="code">s8_shared_collection_topic</td><td class="code">bafyreibk625p5tcsamse3hqa7nzxuuxyf4277akdwhqdvhzzzqt4x2e4gy</td></tr>
+          <tr><td class="code">s8_block_crossed_on_shared_topic</td><td class="wrap-note">no, within 45 s</td></tr>
+          <tr><td class="code">c1_registration_is_chain_side</td><td class="wrap-note">yes</td></tr>
+          <tr><td class="code">i7_kill9_to_ready_ms</td><td class="num">1405</td></tr>
+          <tr><td class="code">afterburner_sealed_packages</td><td class="wrap-note">4 packages, all sealed; engine 1,476,654 bytes</td></tr>
+          <tr><td class="code">scale_tenants_provisioned</td><td class="num">32</td></tr>
+          <tr><td class="code">scale_policies_on_vera</td><td class="num">35</td></tr>
+          <tr><td class="code">scale_cell_rss_median_mib</td><td class="num">71</td></tr>
+          <tr><td class="code">scale_read_p50_ms_one_tenant</td><td class="num">8</td></tr>
+          <tr><td class="code">scale_read_p50_ms_all_tenants</td><td class="num">6</td></tr>
+          <tr><td class="code">scale_cross_tenant_reads_denied</td><td class="num">32</td></tr>
+          <tr><td class="code">scale_provision_p50_total_ms</td><td class="num">6058</td></tr>
+          <tr><td class="code">scale_provision_p50_fund_ms</td><td class="num">974</td></tr>
+          <tr><td class="code">scale_provision_p50_policy_ms</td><td class="num">1083</td></tr>
+          <tr><td class="code">scale_provision_p50_register_object_ms</td><td class="num">846</td></tr>
+          <tr><td class="code">scale_provision_p50_grant_writer_ms</td><td class="num">1361</td></tr>
+          <tr><td class="code">scale_provision_p50_cell_ignition_ms</td><td class="num">300</td></tr>
+          <tr><td class="code">scale_provision_p50_schema_ms</td><td class="num">19</td></tr>
+          <tr><td class="code">scale_provision_p50_first_write_ms</td><td class="num">1384</td></tr>
+          <tr><td class="code">scale_provision_p50_chain_share</td><td class="wrap-note">70% of the total</td></tr>
+          <tr><td class="code">scale_projected_cells_per_64gib_node</td><td class="num">923</td></tr>
+          <tr><td class="code">scale_projected_nodes_for_100k_tenants</td><td class="num">109</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>How to reproduce</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Component</th><th>Source</th></tr></thead>
+        <tbody>
+          <tr><td>Vera</td><td class="code">sourcenetwork/vera main @ ddcb612, binary verad</td></tr>
+          <tr><td>DefraDB</td><td class="code">defradb.rs vclq/vera-compat (PR 1681)</td></tr>
+          <tr><td>Orbis</td><td class="code">orbis-rs vclq/vera-compat (PR 264)</td></tr>
+          <tr><td>Suite</td><td class="code">backbone vclq/gents-cloud-vera (PR 30)</td></tr>
+          <tr><td>Command</td><td class="code">GENTS_CLOUD_TENANTS=32 cargo test --test gents_cloud -- --ignored --nocapture</td></tr>
+        </tbody>
+      </table>
+      <caption>Binaries resolve from the VERA_BINARY, DEFRA_BINARY, ORBIS_BINARY and ORBIS_CLI_BINARY variables, or from the pins in backbone.toml.</caption>
+    </div>
+  </section>
+
+  <footer>
+    Measurements come from the suite's own recorder, from the chain's committed ledger read through CometBFT, from process resident-set sampling every 15 seconds, and from the component logs. Projected figures are marked as such and derive only from measurements in this run. Figures labelled "before" come from the 2026-09-03 20:01 UTC run of the same suite on the shipped CometBFT timeouts.
+  </footer>
+
+</div>
