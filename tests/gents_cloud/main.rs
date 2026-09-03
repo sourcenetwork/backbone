@@ -14,6 +14,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod afterburner;
 mod fixture;
 mod identity;
 mod p2p;
@@ -61,11 +62,14 @@ async fn gents_cloud_mechanics() {
     write_path::run(&mut stack).await;
     p2p::run(&mut stack).await;
     recovery::run(&mut stack).await;
+    afterburner::run(&mut stack).await;
     scale::run(&mut stack).await;
 
-    eprintln!("[gents-cloud] === measurements ===");
+    eprintln!("[gents-cloud] === measurements (markdown) ===");
+    eprintln!("| Measurement | Value |");
+    eprintln!("|---|---|");
     for (name, value) in &stack.measurements {
-        eprintln!("[gents-cloud]   {:<48} {}", name, value);
+        eprintln!("| `{}` | {} |", name, value.replace('|', "\\|"));
     }
     eprintln!(
         "[gents-cloud] all scenarios passed in {:.1}s",
