@@ -253,18 +253,23 @@ impl SourceHubCliClient {
             "create-policy",
             tmp.to_str().ok_or_else(|| eyre!("invalid path"))?,
         ])?;
-        // Poll for the new policy ID to appear (tx needs a block to commit)
-        let mut new_id = None;
-        for _attempt in 0..15 {
-            std::thread::sleep(std::time::Duration::from_secs(2));
+        // `exec_tx` already waited for the transaction to be committed, so the
+        // policy is normally queryable at once; poll briefly for the query
+        // node to catch up rather than sleeping a fixed interval first, which
+        // would put a floor under every measurement of this call.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let new_id = loop {
             let after = self.list_policy_ids()?;
             if let Some(id) = after.into_iter().find(|id| !before.contains(id)) {
-                new_id = Some(id);
-                break;
+                break id;
             }
-        }
-        let new_id =
-            new_id.ok_or_else(|| eyre!("policy creation succeeded but no new policy ID found"))?;
+            if std::time::Instant::now() >= deadline {
+                return Err(eyre!(
+                    "policy creation succeeded but no new policy ID found"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
 
         let _ = std::fs::remove_file(&tmp);
         Ok(new_id)
