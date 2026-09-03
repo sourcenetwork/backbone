@@ -46,7 +46,7 @@ See `docs/architecture.md` for the full security architecture.
 backbone/
 ├── crates/
 │   ├── test-infra/       # Shared primitives (ManagedProcess, ports, log tracking, run dirs)
-│   ├── sourcehub-harness/ # Go sourcehubd manager (legacy, being replaced by hub-harness)
+│   ├── sourcehub-harness/ # Vera (Go verad) devnet manager: the trust plane for gents-cloud tests
 │   ├── defra-harness/    # DefraDB node manager + CLI client + test fixtures
 │   ├── hub-harness/      # Hub.rs node manager + cluster builder + observability
 │   └── orbis-harness/    # Orbis ring builder + DKG fixtures + event subscriptions
@@ -84,7 +84,7 @@ cargo fmt --all                    # Format
 ## Running the canonical test
 
 ```bash
-# Requires sourcehubd, defra, and orbis-node binaries on PATH
+# Requires hubd, defra-iroh, and orbis-node binaries on PATH (verad for tests/gents_cloud)
 cargo test --test full_stack -- --ignored --nocapture
 ```
 

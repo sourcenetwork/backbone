@@ -58,4 +58,12 @@ impl OrbisNode {
     pub fn kill(&mut self) {
         self.process.kill();
     }
+
+    /// Respawn the node with its original arguments and data directory.
+    ///
+    /// Used by fault tests that take ring members below threshold and bring
+    /// them back; the caller re-checks health with `OrbisRing::wait_ready`.
+    pub fn restart(&mut self) -> eyre::Result<()> {
+        self.process.respawn()
+    }
 }

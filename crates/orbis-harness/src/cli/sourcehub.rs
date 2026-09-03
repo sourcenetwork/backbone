@@ -1,8 +1,34 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use eyre::{eyre, Result};
 use sourcehub_harness::SourceHubNode;
+
+/// Gas limit for every harness transaction.
+///
+/// The first `register-namespace` also creates the bulletin module's ACP
+/// policy, which writes the whole policy and its relationships in one message.
+/// The Cosmos gas meter panics rather than returning an error when a write
+/// exceeds the limit, so an under-provisioned limit surfaces as an opaque
+/// `recovered from panic: {WriteFlat}` rather than "out of gas".
+const TX_GAS_LIMIT: u64 = 3_000_000;
+
+/// Fee paid per harness transaction. The devnet's validator account is funded
+/// with far more than the suite spends.
+const TX_FEE_UOPEN: u64 = 300_000;
+
+/// Default amount [`SourceHubCliClient::fund`] sends.
+const DEFAULT_FUND_UOPEN: u128 = 1_000_000;
+
+/// Outcome of broadcasting one transaction through `verad tx`.
+enum TxOutcome {
+    /// CheckTx accepted the transaction.
+    Accepted,
+    /// The signer's cached sequence was stale; retrying is worthwhile.
+    SequenceMismatch,
+    Failed(String),
+}
 
 pub struct SourceHubCliClient {
     binary_path: PathBuf,
@@ -13,9 +39,8 @@ pub struct SourceHubCliClient {
 
 impl SourceHubCliClient {
     pub fn from_node(node: &SourceHubNode) -> Result<Self> {
-        let resolved = test_infra::BinaryResolver::new("SOURCEHUBD", "sourcehubd").resolve()?;
         Ok(Self {
-            binary_path: resolved.path,
+            binary_path: sourcehub_harness::resolve_binary()?,
             home_dir: node.home_dir.clone(),
             node_url: node.comet_rpc_url.clone(),
             chain_id: node.chain_id.clone(),
@@ -52,9 +77,9 @@ impl SourceHubCliClient {
             "-o".to_string(),
             "json".to_string(),
             "--gas".to_string(),
-            "200000".to_string(),
+            TX_GAS_LIMIT.to_string(),
             "--fees".to_string(),
-            "10000uopen".to_string(),
+            format!("{}uopen", TX_FEE_UOPEN),
         ]
     }
 
@@ -88,7 +113,7 @@ impl SourceHubCliClient {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             Err(eyre!(
-                "sourcehubd failed (exit {}): stderr={}, stdout={}",
+                "verad failed (exit {}): stderr={}, stdout={}",
                 output.status,
                 stderr.trim(),
                 stdout.trim(),
@@ -96,6 +121,14 @@ impl SourceHubCliClient {
         }
     }
 
+    /// Broadcast a transaction, retrying a stale sequence, and return its
+    /// **committed** result.
+    ///
+    /// A `verad tx` broadcast reports only CheckTx: code 0 means "accepted into
+    /// the mempool", not "executed". An ACP denial, an out-of-gas, or any other
+    /// execution failure appears only once the transaction is in a block. This
+    /// waits for that and fails on a non-zero delivered code, so a caller that
+    /// gets `Ok` knows the state change actually happened.
     fn exec_tx(&self, subcommand_args: &[&str]) -> Result<serde_json::Value> {
         for attempt in 0..5 {
             let tx_args = self.tx_args();
@@ -104,46 +137,95 @@ impl SourceHubCliClient {
                 args.push(a);
             }
 
-            let stdout = match self.exec(&args) {
-                Ok(s) => s,
+            let broadcast = match self.exec(&args) {
+                Ok(stdout) => Self::parse_broadcast(&stdout),
                 Err(e) => {
-                    let msg = format!("{}", e);
-                    if msg.contains("account sequence mismatch") && attempt < 4 {
-                        tracing::warn!(attempt, "exec_tx: sequence mismatch (stderr), retrying");
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        continue;
+                    if format!("{}", e).contains("account sequence mismatch") {
+                        Err(TxOutcome::SequenceMismatch)
+                    } else {
+                        Err(TxOutcome::Failed(format!("{}", e)))
                     }
-                    return Err(e);
                 }
             };
 
-            // tx output may include non-JSON lines; find the JSON object
-            for line in stdout.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with('{') {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        let raw_log = v.get("raw_log").and_then(|rl| rl.as_str()).unwrap_or("");
-                        if raw_log.contains("account sequence mismatch") && attempt < 4 {
-                            tracing::warn!(attempt, "exec_tx: sequence mismatch, retrying");
-                            std::thread::sleep(std::time::Duration::from_secs(2));
-                            break;
-                        }
-                        return Ok(v);
-                    }
+            match broadcast {
+                Ok(tx_hash) => return self.wait_for_tx(&tx_hash),
+                Err(TxOutcome::SequenceMismatch) if attempt < 4 => {
+                    tracing::warn!(attempt, "exec_tx: sequence mismatch, retrying");
+                    std::thread::sleep(Duration::from_secs(2));
                 }
-            }
-
-            // If we didn't return or break-to-retry above, try parsing whole output
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stdout) {
-                return Ok(v);
-            }
-
-            // If nothing parsed, return an error on last attempt
-            if attempt == 4 {
-                return Err(eyre!("failed to parse tx JSON: stdout={}", stdout));
+                Err(TxOutcome::SequenceMismatch) => {
+                    return Err(eyre!(
+                        "{}: account sequence mismatch after 5 attempts",
+                        subcommand_args.join(" ")
+                    ))
+                }
+                Err(TxOutcome::Failed(err)) => {
+                    return Err(eyre!("{} failed: {}", subcommand_args.join(" "), err))
+                }
+                Err(TxOutcome::Accepted) => unreachable!("parse_broadcast returns a hash"),
             }
         }
         Err(eyre!("exec_tx: exhausted retries"))
+    }
+
+    /// Extract the transaction hash from a broadcast result, or classify why
+    /// there is none.
+    fn parse_broadcast(stdout: &str) -> std::result::Result<String, TxOutcome> {
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with('{') {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            let code = v.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+            let raw_log = v.get("raw_log").and_then(|rl| rl.as_str()).unwrap_or("");
+            if code != 0 {
+                if raw_log.contains("account sequence mismatch") {
+                    return Err(TxOutcome::SequenceMismatch);
+                }
+                return Err(TxOutcome::Failed(format!(
+                    "broadcast rejected (code {}): {}",
+                    code, raw_log
+                )));
+            }
+            return match v.get("txhash").and_then(|h| h.as_str()) {
+                Some(hash) => Ok(hash.to_string()),
+                None => Err(TxOutcome::Failed(format!(
+                    "broadcast result has no txhash: {}",
+                    trimmed
+                ))),
+            };
+        }
+        Err(TxOutcome::Failed(format!(
+            "no broadcast result in output: {}",
+            stdout.trim()
+        )))
+    }
+
+    /// Poll `query tx` until the transaction is in a block, then require a
+    /// zero delivered code.
+    fn wait_for_tx(&self, tx_hash: &str) -> Result<serde_json::Value> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Ok(result) = self.exec_query(&["query", "tx", tx_hash]) {
+                let code = result.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+                if code != 0 {
+                    let raw_log = result
+                        .get("raw_log")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(no raw_log)");
+                    return Err(eyre!("tx {} failed (code {}): {}", tx_hash, code, raw_log));
+                }
+                return Ok(result);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(eyre!("tx {} was not committed within 60s", tx_hash));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
     }
 
     fn exec_query(&self, subcommand_args: &[&str]) -> Result<serde_json::Value> {
@@ -165,26 +247,12 @@ impl SourceHubCliClient {
         // Snapshot policy IDs before
         let before = self.list_policy_ids()?;
 
-        let tx_result = self.exec_tx(&[
+        self.exec_tx(&[
             "tx",
             "acp",
             "create-policy",
             tmp.to_str().ok_or_else(|| eyre!("invalid path"))?,
         ])?;
-        // Check tx code — non-zero means the tx failed on-chain
-        let code = tx_result.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
-        if code != 0 {
-            let raw_log = tx_result
-                .get("raw_log")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no raw_log)");
-            return Err(eyre!(
-                "create-policy tx failed (code {}): {}",
-                code,
-                raw_log
-            ));
-        }
-
         // Poll for the new policy ID to appear (tx needs a block to commit)
         let mut new_id = None;
         for _attempt in 0..15 {
@@ -200,6 +268,14 @@ impl SourceHubCliClient {
 
         let _ = std::fs::remove_file(&tmp);
         Ok(new_id)
+    }
+
+    /// Number of policies registered on the chain.
+    ///
+    /// Chain state grows per tenant, so this is the per-tenant chain cost a
+    /// scale test reports.
+    pub fn list_policy_count(&self) -> Result<usize> {
+        Ok(self.list_policy_ids()?.len())
     }
 
     fn list_policy_ids(&self) -> Result<Vec<String>> {
@@ -218,7 +294,11 @@ impl SourceHubCliClient {
             .collect())
     }
 
-    pub fn register_object(&self, policy_id: &str, object_id: &str, resource: &str) -> Result<()> {
+    /// Register `object_id` under `resource` in `policy_id`.
+    ///
+    /// Argument order matches the `verad` command and the rest of this client:
+    /// policy, resource, object.
+    pub fn register_object(&self, policy_id: &str, resource: &str, object_id: &str) -> Result<()> {
         self.exec_tx(&[
             "tx",
             "acp",
@@ -273,6 +353,64 @@ impl SourceHubCliClient {
             actor_did,
         ])?;
         Ok(())
+    }
+
+    /// Ask Vera directly whether `actor_did` holds `permission` on
+    /// `resource:object_id` under `policy_id`, bypassing every client cache.
+    ///
+    /// This is the authoritative answer both DefraDB's query gate and the
+    /// Orbis signing gate converge on; tests use it as the reference clock.
+    pub fn verify_access(
+        &self,
+        policy_id: &str,
+        actor_did: &str,
+        resource: &str,
+        object_id: &str,
+        permission: &str,
+    ) -> Result<bool> {
+        let operation = format!("{}:{}#{}", resource, object_id, permission);
+        let result = self.exec_query(&[
+            "query",
+            "acp",
+            "verify-access-request",
+            policy_id,
+            actor_did,
+            &operation,
+        ])?;
+        result
+            .get("valid")
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| eyre!("verify-access-request response has no `valid`: {}", result))
+    }
+
+    /// Owner DID of a registered object, or `None` when it is unregistered.
+    pub fn object_owner(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+    ) -> Result<Option<String>> {
+        let result = self.exec_query(&[
+            "query",
+            "acp",
+            "object-owner",
+            policy_id,
+            resource,
+            object_id,
+        ])?;
+        let registered = result
+            .get("is_registered")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !registered {
+            return Ok(None);
+        }
+        // QueryObjectOwnerResponse carries the owner as the subject of the
+        // `owner` RelationshipRecord (`proto/vera/acp/record.proto`).
+        Ok(result
+            .pointer("/record/relationship/subject/actor/id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string))
     }
 
     pub fn register_namespace(&self, namespace: &str) -> Result<()> {
@@ -333,10 +471,45 @@ impl SourceHubCliClient {
             .map_err(|e| eyre!("failed to parse account sequence: {}", e))
     }
 
+    /// Spendable `uopen` balance of `address`, or 0 when the account does not
+    /// exist yet.
+    pub fn balance(&self, address: &str) -> Result<u128> {
+        let result = self.exec_query(&["query", "bank", "balances", address])?;
+        let Some(balances) = result.get("balances").and_then(|v| v.as_array()) else {
+            return Ok(0);
+        };
+        let total = balances
+            .iter()
+            .filter(|coin| coin.get("denom").and_then(|d| d.as_str()) == Some("uopen"))
+            .filter_map(|coin| coin.get("amount").and_then(|a| a.as_str()))
+            .filter_map(|amount| amount.parse::<u128>().ok())
+            .sum();
+        Ok(total)
+    }
+
+    /// Send `uopen` from the validator account to `address` and wait until the
+    /// balance is actually visible on chain.
+    ///
+    /// Waiting matters: a Cosmos client caches the account number it reads at
+    /// startup, and an account that does not exist yet reads as number 0. A
+    /// process funded after it connected keeps signing with the stale number
+    /// and every transaction fails signature verification, so callers must be
+    /// able to rely on "funded" meaning the account exists.
     pub fn fund(&self, address: &str) -> Result<()> {
-        let amount = "1000000uopen";
-        // Retry on sequence mismatch — the CLI caches the sequence and rapid
-        // sequential txs can race with pending block commits.
+        self.fund_amount(address, DEFAULT_FUND_UOPEN)
+    }
+
+    /// Send `amount_uopen` from the validator account to `address` and wait
+    /// until the balance is visible on chain.
+    ///
+    /// An Orbis node refuses to finish starting while its balance is below its
+    /// own minimum, and it pays fees out of that balance as it works, so a node
+    /// funded with exactly the minimum starves after its first transactions and
+    /// blocks on the next restart. Fund with headroom.
+    pub fn fund_amount(&self, address: &str, amount_uopen: u128) -> Result<()> {
+        let amount = format!("{}uopen", amount_uopen);
+        let amount = amount.as_str();
+        let before = self.balance(address).unwrap_or(0);
         for attempt in 0..5 {
             let args_owned = vec![
                 "tx".to_string(),
@@ -364,41 +537,80 @@ impl SourceHubCliClient {
                 "10000uopen".to_string(),
             ];
             let args: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
-            match self.exec(&args) {
-                Ok(stdout) => {
-                    for line in stdout.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.starts_with('{') {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                                let code = v.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
-                                if code == 0 {
-                                    return Ok(());
-                                }
-                                let raw_log =
-                                    v.get("raw_log").and_then(|rl| rl.as_str()).unwrap_or("");
-                                if raw_log.contains("account sequence mismatch") && attempt < 4 {
-                                    tracing::warn!(attempt, "fund: sequence mismatch, retrying");
-                                    std::thread::sleep(std::time::Duration::from_secs(2));
-                                    break;
-                                }
-                                return Err(eyre!("fund tx failed (code {}): {}", code, raw_log));
-                            }
-                        }
-                    }
-                    return Ok(());
-                }
+            let broadcast = match self.exec(&args) {
+                Ok(stdout) => Self::classify_tx_output(&stdout),
                 Err(e) => {
-                    let msg = format!("{}", e);
-                    if msg.contains("account sequence mismatch") && attempt < 4 {
-                        tracing::warn!(attempt, "fund: sequence mismatch (stderr), retrying");
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        continue;
+                    if format!("{}", e).contains("account sequence mismatch") {
+                        TxOutcome::SequenceMismatch
+                    } else {
+                        TxOutcome::Failed(format!("{}", e))
                     }
-                    return Err(e);
                 }
+            };
+
+            match broadcast {
+                TxOutcome::Accepted => {
+                    return self.wait_for_balance(address, before + amount_uopen);
+                }
+                TxOutcome::SequenceMismatch if attempt < 4 => {
+                    tracing::warn!(attempt, "fund: sequence mismatch, retrying");
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                TxOutcome::SequenceMismatch => {
+                    return Err(eyre!(
+                        "fund {}: account sequence mismatch after 5 attempts",
+                        address
+                    ))
+                }
+                TxOutcome::Failed(err) => return Err(eyre!("fund {} failed: {}", address, err)),
             }
         }
         Err(eyre!("fund: exhausted retries for {}", address))
+    }
+
+    /// Poll until `address` holds at least `target` uopen.
+    fn wait_for_balance(&self, address: &str, target: u128) -> Result<()> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let balance = self.balance(address).unwrap_or(0);
+            if balance >= target {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(eyre!(
+                    "fund {}: balance {} did not reach {} within 30s",
+                    address,
+                    balance,
+                    target
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    /// Classify a `verad tx` JSON result: CheckTx accepted, a sequence race, or
+    /// a real failure. Output that carries no JSON object is a failure, never a
+    /// silent success.
+    fn classify_tx_output(stdout: &str) -> TxOutcome {
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with('{') {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+                continue;
+            };
+            let code = v.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+            if code == 0 {
+                return TxOutcome::Accepted;
+            }
+            let raw_log = v.get("raw_log").and_then(|rl| rl.as_str()).unwrap_or("");
+            if raw_log.contains("account sequence mismatch") {
+                return TxOutcome::SequenceMismatch;
+            }
+            return TxOutcome::Failed(format!("code {}: {}", code, raw_log));
+        }
+        TxOutcome::Failed(format!("no tx result in output: {}", stdout.trim()))
     }
 
     pub fn home_dir(&self) -> &Path {

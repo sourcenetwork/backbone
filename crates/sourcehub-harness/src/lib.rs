@@ -51,11 +51,12 @@ pub fn allocate_source_hub_ports() -> eyre::Result<SourceHubPorts> {
     })
 }
 
-/// Resolve the sourcehubd binary.
+/// Resolve the `verad` binary (Vera, the Go chain formerly named SourceHub).
 ///
-/// Uses `BinaryResolver` with the `SOURCEHUB` prefix. Set `SOURCEHUB_BINARY`
-/// to an explicit path, or ensure `sourcehubd` is on PATH.
+/// Uses `BinaryResolver` with the `VERA` prefix. Set `VERA_BINARY` to an
+/// explicit path, ensure `verad` is on PATH, or let `backbone.toml` build it
+/// from source with `go build`.
 pub fn resolve_binary() -> eyre::Result<std::path::PathBuf> {
-    let resolved = test_infra::BinaryResolver::new("SOURCEHUB", "sourcehubd").resolve()?;
+    let resolved = test_infra::BinaryResolver::new("VERA", "verad").resolve()?;
     Ok(resolved.path)
 }

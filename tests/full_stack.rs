@@ -546,6 +546,7 @@ async fn secure_training_data_compartments() {
         endpoint: ring.node(0).grpc_addr(),
         ring_id: ring_id.clone(),
         derivation: "acme-corp".to_string(),
+        service_identity: None,
     });
 
     let acme_defra = start_node(&acme_defra_node, acme_defra_config, Duration::from_secs(30))
@@ -586,6 +587,7 @@ async fn secure_training_data_compartments() {
         endpoint: ring.node(0).grpc_addr(),
         ring_id: ring_id.clone(),
         derivation: "platform".to_string(),
+        service_identity: None,
     });
 
     let platform_defra = start_node(
@@ -877,6 +879,7 @@ async fn secure_training_data_compartments() {
         endpoint: ring.node(0).grpc_addr(),
         ring_id: ring_id.clone(),
         derivation: "globex-inc".to_string(),
+        service_identity: None,
     });
 
     let globex_defra = start_node(

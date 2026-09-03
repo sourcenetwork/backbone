@@ -10,7 +10,7 @@ const VALIDATOR_BALANCE: &str = "1000000000000uopen";
 const IDENTITY_BALANCE: &str = "100000000uopen";
 const FAUCET_BALANCE: &str = "100000000000uopen";
 
-/// Provision a single-node SourceHub devnet genesis.
+/// Provision a single-node Vera devnet genesis.
 ///
 /// Follows the standard Cosmos SDK pattern:
 ///   init -> keys add -> add-genesis-account (validator + funded addrs + faucet) ->
@@ -36,7 +36,7 @@ pub fn provision_genesis(
             &home_str,
         ],
     )
-    .wrap_err("sourcehubd init failed")?;
+    .wrap_err("verad init failed")?;
 
     let validator_output = run_cmd(
         binary,
@@ -52,7 +52,7 @@ pub fn provision_genesis(
             "json",
         ],
     )
-    .wrap_err("sourcehubd keys add failed")?;
+    .wrap_err("verad keys add failed")?;
 
     let addr_json: serde_json::Value =
         serde_json::from_str(&validator_output).wrap_err("failed to parse validator key output")?;
@@ -119,10 +119,10 @@ pub fn provision_genesis(
             &home_str,
         ],
     )
-    .wrap_err("sourcehubd gentx failed")?;
+    .wrap_err("verad gentx failed")?;
 
     run_cmd(binary, &["genesis", "collect-gentxs", "--home", &home_str])
-        .wrap_err("sourcehubd collect-gentxs failed")?;
+        .wrap_err("verad collect-gentxs failed")?;
 
     patch_config_toml(home_dir, ports)?;
     patch_app_toml(home_dir, ports)?;
