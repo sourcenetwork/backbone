@@ -435,14 +435,29 @@ fn checkpoint_every(tenant_count: usize) -> usize {
     (tenant_count / 4).max(1)
 }
 
-/// Resident memory of a cell's process, from `/proc/<pid>/status`.
+/// Resident memory of a cell's process, in KiB.
+///
+/// `/proc` is Linux-only, so macOS reads the same figure through `ps`, which
+/// reports RSS in KiB there as well. A cell whose memory cannot be read is
+/// left out of the curve rather than counted as zero: a zero would render as a
+/// real measurement of an idle cell.
 fn cell_rss_kib(cell: &Cell) -> Option<u64> {
     let pid = cell.node.process.id()?;
-    let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
-    status
-        .lines()
-        .find_map(|line| line.strip_prefix("VmRSS:"))
-        .and_then(|value| value.split_whitespace().next()?.parse().ok())
+    if cfg!(target_os = "linux") {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+        return status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|value| value.split_whitespace().next()?.parse().ok());
+    }
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 /// Median wall time of three reads of `collection` as `identity`.
