@@ -7,13 +7,13 @@ use crate::genesis;
 use crate::identity::source_hub_address;
 use crate::SourceHubPorts;
 
-const DEFAULT_CHAIN_ID: &str = "sourcehub-localnet";
+const DEFAULT_CHAIN_ID: &str = "vera-localnet";
 
 /// Well-known test account private key (the "abandon" mnemonic, Cosmos HD path m/44'/118'/0'/0/0).
 const TEST_ACCOUNT_HEX_KEY: &str =
     "c4a48e2fce1481cd3294b4490f6678090ea98d3d0e5cd984558ab0968741b104";
 
-/// A running SourceHub single-node devnet.
+/// A running Vera (Go `verad`) single-node devnet.
 ///
 /// Provisions genesis, starts the chain, and waits for the first block.
 /// Killed on drop via ManagedProcess.
@@ -36,10 +36,10 @@ pub struct SourceHubNode {
 }
 
 impl SourceHubNode {
-    /// Provision and start a SourceHub devnet node.
+    /// Provision and start a Vera devnet node.
     ///
     /// `identity_keys` are hex-encoded secp256k1 private keys whose derived
-    /// `source1...` addresses will be funded in genesis.
+    /// `vera1...` addresses will be funded in genesis.
     pub async fn start(
         home_dir: PathBuf,
         log_dir: PathBuf,
@@ -97,12 +97,12 @@ impl SourceHubNode {
             test_infra::LogTracker::start(stdout_path, "committed state", sourcehub_patterns());
 
         let process = test_infra::ManagedProcess::spawn("sourcehub", &binary, &args, &[], &log_dir)
-            .wrap_err("failed to spawn sourcehubd")?;
+            .wrap_err("failed to spawn verad")?;
 
         let _first_block: String = log_tracker
             .wait_for_pattern("first_block", ready_timeout)
             .await
-            .wrap_err("sourcehubd did not produce first block")?;
+            .wrap_err("verad did not produce first block")?;
 
         let lcd_url = format!("http://127.0.0.1:{}", ports.lcd);
 
@@ -116,7 +116,7 @@ impl SourceHubNode {
                 _ => {}
             }
             if tokio::time::Instant::now() >= deadline {
-                eyre::bail!("sourcehubd LCD health check timed out at {}", health_url);
+                eyre::bail!("verad LCD health check timed out at {}", health_url);
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -128,7 +128,7 @@ impl SourceHubNode {
             lcd = %lcd_url,
             comet_rpc = %comet_rpc_url,
             grpc = %grpc_url,
-            "SourceHub devnet ready"
+            "Vera devnet ready"
         );
 
         Ok(Self {

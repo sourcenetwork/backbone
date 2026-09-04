@@ -86,34 +86,60 @@ impl BulletinEventSubscription {
     }
 }
 
+/// Typed event emitted by Vera's bulletin keeper on `MsgCreatePost`
+/// (`proto/vera/bulletin/events.proto`). CometBFT flattens typed events into
+/// `<proto name>.<field>` keys whose values are JSON-encoded, so a string
+/// attribute arrives wrapped in quotes.
+const POST_CREATED_EVENT: &str = "vera.bulletin.EventPostCreated";
+
 fn extract_bulletin_post_event(
     msg: &serde_json::Value,
     _session_id: &str,
 ) -> Option<BulletinPostEvent> {
     // CometBFT event structure:
-    // { "result": { "events": { "bulletin_post.post_id": ["..."], ... } } }
+    // { "result": { "events": { "vera.bulletin.EventPostCreated.post_id": ["\"...\""], ... } } }
     let events = msg.pointer("/result/events")?;
 
-    // Check for bulletin post events
-    let post_ids = events
-        .get("bulletin_post.post_id")
-        .or_else(|| events.get("sourcehub.bulletin.v1beta1.EventBulletinPost.post_id"))
-        .and_then(|v| v.as_array())?;
+    let post_id = first_event_attr(events, POST_CREATED_EVENT, "post_id")?;
+    let namespace = first_event_attr(events, POST_CREATED_EVENT, "namespace_id")
+        .unwrap_or_else(|| "orbis".to_string());
 
-    let namespaces = events
-        .get("bulletin_post.namespace")
-        .or_else(|| events.get("sourcehub.bulletin.v1beta1.EventBulletinPost.namespace"))
-        .and_then(|v| v.as_array());
+    Some(BulletinPostEvent { post_id, namespace })
+}
 
-    let post_id = post_ids.first()?.as_str()?;
-    let namespace = namespaces
-        .and_then(|ns| ns.first())
-        .and_then(|v| v.as_str())
-        .unwrap_or("orbis")
-        .to_string();
+/// First value of `<event>.<field>`, with the typed-event JSON quoting removed.
+fn first_event_attr(events: &serde_json::Value, event: &str, field: &str) -> Option<String> {
+    let raw = events
+        .get(format!("{event}.{field}"))
+        .and_then(|v| v.as_array())
+        .and_then(|values| values.first())
+        .and_then(|v| v.as_str())?;
+    let unquoted = serde_json::from_str::<String>(raw).unwrap_or_else(|_| raw.to_string());
+    Some(unquoted)
+}
 
-    Some(BulletinPostEvent {
-        post_id: post_id.to_string(),
-        namespace,
-    })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_typed_post_created_event_with_json_quoted_values() {
+        let msg = serde_json::json!({
+            "result": {
+                "events": {
+                    "vera.bulletin.EventPostCreated.post_id": ["\"abc123\""],
+                    "vera.bulletin.EventPostCreated.namespace_id": ["\"orbis\""]
+                }
+            }
+        });
+        let event = extract_bulletin_post_event(&msg, "session").expect("event");
+        assert_eq!(event.post_id, "abc123");
+        assert_eq!(event.namespace, "orbis");
+    }
+
+    #[test]
+    fn ignores_messages_without_post_created_event() {
+        let msg = serde_json::json!({"result": {"events": {"tx.height": ["1"]}}});
+        assert!(extract_bulletin_post_event(&msg, "session").is_none());
+    }
 }

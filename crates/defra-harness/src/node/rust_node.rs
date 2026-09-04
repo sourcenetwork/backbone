@@ -135,6 +135,9 @@ impl DefraNode for RustNode {
                 "--signer-orbis-derivation".into(),
                 signer.derivation.clone(),
             ]);
+            if let Some(ref service_identity) = signer.service_identity {
+                args.extend(["--signer-orbis-identity".into(), service_identity.clone()]);
+            }
         } else if !config.signing_enabled {
             args.push("--no-signing".to_string());
         }
@@ -220,6 +223,7 @@ impl DefraNode for RustNode {
         }
 
         args.extend(config.extra_args.iter().cloned());
+        envs.extend(config.extra_envs.iter().cloned());
 
         (self.binary_path.clone(), args, envs)
     }

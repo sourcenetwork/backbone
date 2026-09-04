@@ -181,6 +181,13 @@ pub struct OrbisSignerConfig {
     pub ring_id: String,
     /// Derivation label (e.g. `"x-archive"`) for derived key signing.
     pub derivation: String,
+    /// Hex ed25519 private key (64 bytes) the node authenticates to the ring
+    /// with, when it differs from `--identity`.
+    ///
+    /// The ring accepts EdDSA bearer tokens only, while a node whose document
+    /// ACP is SourceHub/Vera must hold a secp256k1 identity to sign chain
+    /// transactions. Set this to keep both.
+    pub service_identity: Option<String>,
 }
 
 /// Configuration for a single DefraDB node.
@@ -217,6 +224,12 @@ pub struct NodeConfig {
     pub acp_circuit_breaker_reset_timeout: Option<u64>,
     pub acp_request_timeout: Option<u64>,
     pub acp_receipt_timeout: Option<u64>,
+    /// Extra environment variables for the node process, applied after the
+    /// managed ones. The escape hatch for process-global switches a node reads
+    /// from the environment rather than a flag -- notably
+    /// `DEFRA_ALLOW_NON_GO_VERIFIABLE_SIGNING`, which gates emitting BLS
+    /// (ring-signed) blocks that Go peers cannot verify.
+    pub extra_envs: Vec<(String, String)>,
     /// Raw CLI flags appended after every managed flag, so they win under
     /// clap's last-one-wins parsing. The escape hatch for options the builder
     /// has no typed method for -- notably enforcement tests, which must set an
@@ -258,6 +271,7 @@ impl NodeConfig {
             acp_circuit_breaker_reset_timeout: None,
             acp_request_timeout: None,
             acp_receipt_timeout: None,
+            extra_envs: Vec::new(),
             extra_args: Vec::new(),
         }
     }

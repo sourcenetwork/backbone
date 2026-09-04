@@ -1,7 +1,7 @@
 [package]
 name = "sourcehub-harness"
 version = "0.1.0"
-description = "SourceHub devnet manager for integration tests"
+description = "Vera (Go verad, formerly SourceHub) devnet manager for integration tests"
 edition.workspace = true
 license.workspace = true
 

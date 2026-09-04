@@ -3,23 +3,28 @@
 # Single source of truth for binary dependency versions. The CI script
 # ensure-binaries.sh reads refs from this file. To use a different
 # version, edit the ref here — branches, tags, and commit SHAs all work.
+#
+# defra and orbis-node are pinned to their Vera-compatibility branches until
+# those land on main: Vera (github.com/sourcenetwork/vera, formerly SourceHub)
+# renamed its protos to `vera.*` and its bech32 prefix to `vera`, and the
+# clients on main still speak `sourcehub.*` / `source`.
 
 [components.defra]
 prefix = "DEFRA"
 repo = "https://github.com/sourcenetwork/defradb.rs"
-ref = "main"
+ref = "vclq/vera-compat"
 cargo_package = "cli"
 
 [components.orbis-node]
 prefix = "ORBIS"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "jack/integration-testing"
+ref = "vclq/vera-compat"
 cargo_package = "orbis-node"
 
 [components.cli-tool]
 prefix = "ORBIS_CLI"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "jack/integration-testing"
+ref = "vclq/vera-compat"
 cargo_package = "cli-tool"
 
 [components.hubd]
@@ -27,3 +32,9 @@ prefix = "HUBD"
 repo = "https://github.com/sourcenetwork/hub.rs"
 ref = "main"
 cargo_package = "hubd"
+
+[components.verad]
+prefix = "VERA"
+repo = "https://github.com/sourcenetwork/vera"
+ref = "main"
+go_package = "./cmd/verad"

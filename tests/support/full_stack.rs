@@ -97,6 +97,15 @@ pub async fn wait_for_block_finality(hub_state: &ClusterState, label: &str) {
     );
 }
 
+/// Peer two nodes, subscribe both to `collections`, and install a replicator
+/// from `source` to `dest`.
+///
+/// Readiness is the replicator appearing in the source's own replicator list.
+/// An earlier version waited for a `replicator_completed` SSE event, but the
+/// node's event filter accepts only `topic-peer-event`, `acp-cache-invalidated`,
+/// `acp-height-advanced`, `update`, and `merge-complete`; any other filter is a
+/// 400, so that wait could only ever time out. Document-level convergence is
+/// asserted by the caller, which is the property that actually matters.
 pub async fn configure_replication_link(
     source: &DefraClient,
     source_api_url: &str,
@@ -104,8 +113,7 @@ pub async fn configure_replication_link(
     collections: &[&str],
     label: &str,
 ) {
-    let (replicator_sse, replicator_events) =
-        defra_harness::open_events_sse(source_api_url, "replicator_completed").await;
+    let _ = source_api_url;
     let dest_addr = p2p_addr(dest, label);
     source
         .p2p_connect(&[&dest_addr])
@@ -119,8 +127,39 @@ pub async fn configure_replication_link(
     source
         .p2p_replicator_set(collections, &dest_addr)
         .unwrap_or_else(|e| panic!("{}: set replicator: {}", label, e));
-    wait_for_event_count(&replicator_events, 1, Duration::from_secs(15), label).await;
-    replicator_sse.abort();
+    wait_for_replicator(source, Duration::from_secs(15), label).await;
+}
+
+/// Poll the source node's replicator list until it holds at least one entry.
+async fn wait_for_replicator(source: &DefraClient, timeout: Duration, label: &str) {
+    let t = Instant::now();
+    loop {
+        let installed = source
+            .p2p_replicator_list()
+            .ok()
+            .map(|value| match value {
+                serde_json::Value::Array(entries) => !entries.is_empty(),
+                serde_json::Value::Null => false,
+                _ => true,
+            })
+            .unwrap_or(false);
+        if installed {
+            eprintln!(
+                "[backbone]   {} replicator installed in {:.2}s",
+                label,
+                t.elapsed().as_secs_f64()
+            );
+            return;
+        }
+        if t.elapsed() > timeout {
+            panic!(
+                "{}: replicator did not appear in the source's replicator list within {}s",
+                label,
+                timeout.as_secs()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 pub fn graphql_string_literal(value: &str) -> String {
