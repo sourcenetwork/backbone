@@ -239,7 +239,7 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
         .await
         .is_err());
     assert!(client.header_chain().state().is_none());
-    assert!(client.check_policy("policy-1").await.is_err());
+    assert!(client.read_policy("policy-1").await.is_err());
     assert!(client.cache().is_empty());
     let root = server.fixture.read().root;
     send.send(GossipHeader {
@@ -253,13 +253,14 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
         .await
         .unwrap();
     assert_eq!(sync.module_state_root, server.fixture.read().root);
-    assert!(client.check_policy("policy-1").await.unwrap().allowed);
-    assert!(client
-        .check_policy("policy-1")
-        .await
-        .unwrap()
-        .proof
-        .is_none());
+    let record = client.read_policy("policy-1").await.unwrap();
+    assert_eq!(record.value.as_deref(), Some(b"allowed".as_slice()));
+    assert_eq!(record.module_state_root, root);
+    assert!(record.proof.is_some());
+    let cached = client.read_policy("policy-1").await.unwrap();
+    assert_eq!(cached.value, record.value);
+    assert_eq!(cached.module_state_root, root);
+    assert!(cached.proof.is_none());
     task.abort();
 }
 
@@ -268,12 +269,16 @@ fn delayed_proof_cannot_restore_a_revoked_cache_entry() {
     let cache = AcpCache::new(10);
     let old_root = B256::repeat_byte(1);
     let new_root = B256::repeat_byte(2);
-    cache.insert("key", Some(vec![1]), HEIGHT, old_root);
+    cache.insert("key", Some(Arc::from([1])), HEIGHT, old_root);
     assert_eq!(cache.invalidate_stale(new_root), 1);
-    cache.insert("key", Some(vec![1]), HEIGHT, old_root);
+    cache.insert("key", Some(Arc::from([1])), HEIGHT, old_root);
     assert!(cache.get("key", HEIGHT + 1, new_root).is_none());
     assert!(cache.get("key", HEIGHT - 1, old_root).is_none());
     assert!(cache.get("key", HEIGHT + 11, old_root).is_none());
     cache.insert("key", None, HEIGHT + 1, new_root);
-    assert!(!cache.get("key", HEIGHT + 1, new_root).unwrap().allowed);
+    assert!(cache
+        .get("key", HEIGHT + 1, new_root)
+        .unwrap()
+        .value
+        .is_none());
 }

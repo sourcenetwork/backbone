@@ -13,7 +13,7 @@
 //!                           hub_getStateProof  ──→  ProofClient  ──→  verify
 //!                           hub_getLightBlock  ──→       │
 //!                                                       ▼
-//!                                                   AcpCache  ──→  check_access()
+//!                                                   AcpCache  ──→  read_relationship()
 //! ```
 
 pub mod cache;
@@ -27,11 +27,11 @@ pub use cache::AcpCache;
 pub use header_sync::{HeaderChain, SyncState};
 pub use proof_client::ProofClient;
 pub use types::{
-    AccessResult, ConsensusPublicKey, GossipHeader, LightBlock, ModuleId, ModuleStateProof,
+    ConsensusPublicKey, GossipHeader, LightBlock, ModuleId, ModuleStateProof, VerifiedRecord,
 };
 pub use verify::{verify_light_block, verify_module_state_proof, LightBlockError, ProofError};
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::B256;
 use tracing::info;
@@ -39,7 +39,7 @@ use tracing::info;
 /// Top-level ACP light client.
 ///
 /// Wires together header sync, proof fetching, and caching. Provides
-/// `check_access()` as the primary entry point for ACP enforcement.
+/// `read_relationship()` as the primary entry point for ACP enforcement.
 pub struct AcpLightClient {
     header_chain: HeaderChain,
     proof_client: ProofClient,
@@ -87,28 +87,28 @@ impl AcpLightClient {
         &self.cache
     }
 
-    /// Check whether a relationship record exists at the verified revision.
-    pub async fn check_access(
+    /// Read a relationship record at the verified revision.
+    pub async fn read_relationship(
         &self,
         policy_id: &str,
         storage_key: &str,
-    ) -> eyre::Result<AccessResult> {
-        self.check_key(cache::keys::relationship_key(policy_id, storage_key))
+    ) -> eyre::Result<VerifiedRecord> {
+        self.read_key(cache::keys::relationship_key(policy_id, storage_key))
             .await
     }
 
-    /// Check whether an access decision record exists at the verified revision.
-    pub async fn check_access_decision(&self, decision_id: &str) -> eyre::Result<AccessResult> {
-        self.check_key(cache::keys::access_decision_key(decision_id))
+    /// Read an access decision record at the verified revision.
+    pub async fn read_access_decision(&self, decision_id: &str) -> eyre::Result<VerifiedRecord> {
+        self.read_key(cache::keys::access_decision_key(decision_id))
             .await
     }
 
-    /// Check whether a policy exists at the verified revision.
-    pub async fn check_policy(&self, policy_id: &str) -> eyre::Result<AccessResult> {
-        self.check_key(cache::keys::policy_key(policy_id)).await
+    /// Read a policy record at the verified revision.
+    pub async fn read_policy(&self, policy_id: &str) -> eyre::Result<VerifiedRecord> {
+        self.read_key(cache::keys::policy_key(policy_id)).await
     }
 
-    async fn check_key(&self, key: Vec<u8>) -> eyre::Result<AccessResult> {
+    async fn read_key(&self, key: Vec<u8>) -> eyre::Result<VerifiedRecord> {
         let key_hex = cache::keys::hex_encode_key(&key);
         self.invalidate_if_root_changed();
         let sync = self
@@ -137,12 +137,13 @@ impl AcpLightClient {
             .value
             .as_ref()
             .map(|v| hex::decode(v.strip_prefix("0x").unwrap_or(v)))
-            .transpose()?;
-        let allowed = value.is_some();
+            .transpose()?
+            .map(Arc::<[u8]>::from);
         self.cache
-            .insert(&key_hex, value, sync.height, sync.module_state_root);
-        Ok(AccessResult {
-            allowed,
+            .insert(&key_hex, value.clone(), sync.height, sync.module_state_root);
+        Ok(VerifiedRecord {
+            value,
+            module_state_root: sync.module_state_root,
             verified_at_height: sync.height,
             proof: Some(proof),
         })

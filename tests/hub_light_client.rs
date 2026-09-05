@@ -149,13 +149,16 @@ async fn hub_acp_light_client() {
         sync.height, sync.module_state_root
     );
 
-    // Step 6. check_policy → allowed (existence proof)
+    // Step 6. read_policy → allowed (existence proof)
     eprintln!("[hub-lc] Step 6: Checking policy existence...");
     let policy_check = light_client
-        .check_policy(policy_id_str)
+        .read_policy(policy_id_str)
         .await
-        .expect("check_policy should succeed");
-    assert!(policy_check.allowed, "policy should exist on hub.rs");
+        .expect("read_policy should succeed");
+    assert!(
+        policy_check.value.is_some(),
+        "policy should exist on hub.rs"
+    );
     assert!(policy_check.proof.is_some(), "proof should be returned");
     eprintln!(
         "[hub-lc] PASSED: Policy exists, verified at height {}",
@@ -165,10 +168,13 @@ async fn hub_acp_light_client() {
     // Step 7. Verify non-existence proof for absent policy
     eprintln!("[hub-lc] Step 7: Checking non-existent policy...");
     let absent_check = light_client
-        .check_policy("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        .read_policy("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
         .await
         .expect("check absent policy should succeed");
-    assert!(!absent_check.allowed, "absent policy should not exist");
+    assert!(
+        absent_check.value.is_none(),
+        "absent policy should not exist"
+    );
     assert!(
         absent_check.proof.is_some(),
         "non-existence proof should be returned"
@@ -212,10 +218,10 @@ async fn hub_acp_light_client() {
     // Step 10. Re-check policy (cache invalidated, re-verified with new root)
     eprintln!("[hub-lc] Step 10: Re-checking policy after state change...");
     let recheck = light_client
-        .check_policy(policy_id_str)
+        .read_policy(policy_id_str)
         .await
         .expect("re-check policy should succeed");
-    assert!(recheck.allowed, "policy should still exist");
+    assert!(recheck.value.is_some(), "policy should still exist");
     assert!(
         recheck.proof.is_some(),
         "new proof should be returned (cache was invalidated)"
