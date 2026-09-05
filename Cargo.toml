@@ -41,10 +41,10 @@ alloy-consensus = { version = "1.0", features = ["k256"] }
 alloy-eips = "1.0"
 alloy-signer = "1"
 alloy-signer-local = { version = "1", default-features = false }
-commonware-codec = "2026.2.0"
-commonware-consensus = "2026.2.0"
-commonware-cryptography = "2026.2.0"
-commonware-utils = "2026.2.0"
+commonware-codec = "2026.9.0"
+commonware-consensus = "2026.9.0"
+commonware-cryptography = "2026.9.0"
+commonware-utils = "2026.9.0"
 
 # ── Full-stack integration tests ──────────────────────────────────────────────
 
@@ -61,6 +61,8 @@ orbis-harness = { path = "crates/orbis-harness" }
 defra-harness = { path = "crates/defra-harness" }
 hub-harness = { path = "crates/hub-harness" }
 acp-light-client = { path = "crates/acp-light-client" }
+vera-harness = { package = "hub-harness", git = "https://github.com/sourcenetwork/hub.rs", rev = "4ac43d3ee25c9ee519291803852b0a22c4e5e7ea" }
+commonware-codec.workspace = true
 test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }
 serde_json.workspace = true

@@ -18,20 +18,19 @@ parking_lot.workspace = true
 futures.workspace = true
 alloy-primitives = { workspace = true, features = ["serde"] }
 
-# Commonware — consensus framework types for light block verification
+# Shared wire types and finality verification
+hub-domain = { git = "https://github.com/sourcenetwork/hub.rs", rev = "4ac43d3ee25c9ee519291803852b0a22c4e5e7ea" }
 commonware-codec.workspace = true
-commonware-consensus.workspace = true
-commonware-cryptography.workspace = true
-
-# Verification
-jmt = "0.11"
-borsh = "1"
-sha2 = "0.10"
-thiserror = "2"
 
 # Transport
 tokio-tungstenite = "0.26"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+commonware-consensus.workspace = true
+commonware-cryptography.workspace = true
+commonware-utils.workspace = true
+commonware-parallel = "2026.9.0"
 jmt = { version = "0.11", features = ["mocks"] }
+sha2 = "0.10"
+axum = "0.8"

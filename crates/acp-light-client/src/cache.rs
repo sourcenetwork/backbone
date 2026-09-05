@@ -44,13 +44,20 @@ impl AcpCache {
     /// Look up a cached entry by its hex-encoded ACP key.
     ///
     /// Returns `Some(AccessResult)` if the entry exists and is fresh enough
-    /// relative to `current_height`. Returns `None` if the entry is missing
-    /// or stale.
-    pub fn get(&self, key_hex: &str, current_height: u64) -> Option<AccessResult> {
+    /// relative to `current_height`, and matches `current_root`. Returns `None`
+    /// if the entry is missing or stale.
+    pub fn get(
+        &self,
+        key_hex: &str,
+        current_height: u64,
+        current_root: B256,
+    ) -> Option<AccessResult> {
         let entries = self.entries.read();
         let entry = entries.get(key_hex)?;
 
-        if current_height.saturating_sub(entry.verified_height) > self.staleness_threshold {
+        if entry.module_state_root != current_root
+            || current_height.checked_sub(entry.verified_height)? > self.staleness_threshold
+        {
             return None;
         }
 

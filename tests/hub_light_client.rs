@@ -10,8 +10,9 @@ use std::time::Duration;
 mod support;
 
 use acp_light_client::AcpLightClient;
-use hub_harness::cluster::{ConsensusPreset, GenesisBuilder, TestCluster};
+use commonware_codec::Encode as _;
 use support::hubd::{HubdCli, HARDHAT_KEY_0};
+use vera_harness::cluster::{ConsensusPreset, GenesisBuilder, KeySet, TestCluster};
 
 const POLICY_YAML: &str = "\
 name: light-client-test-policy
@@ -42,7 +43,7 @@ async fn hub_acp_light_client() {
         .with_test_writer()
         .try_init();
 
-    let hubd_binary = hub_harness::resolve_binary().expect("resolve hubd binary");
+    let hubd_binary = vera_harness::resolve_binary().expect("resolve hubd binary");
 
     // Step 1. Start hub.rs cluster
     eprintln!("[hub-lc] Step 1: Starting hub.rs cluster (4 validators)...");
@@ -50,6 +51,7 @@ async fn hub_acp_light_client() {
     let hub_genesis = GenesisBuilder::devnet().funded_accounts(1, "1000000000000000000000000");
     let hub_cluster = TestCluster::builder()
         .nodes(4)
+        .seed(42)
         .chain_id(hub_chain_id)
         .genesis(hub_genesis)
         .preset(ConsensusPreset::Fast)
@@ -126,7 +128,13 @@ async fn hub_acp_light_client() {
     eprintln!("[hub-lc] Step 4: Starting ACP light client...");
     let hub_rpc = hub_cluster.node(0).rpc_url();
     let hub_ws = hub_cluster.node(0).ws_url();
-    let light_client = AcpLightClient::new(&hub_rpc, &hub_ws, 10)
+    let keys = KeySet::builder()
+        .nodes(4)
+        .seed(42)
+        .build()
+        .expect("bootstrap keys");
+    let trusted_key = hex::encode(keys.epoch_info().output.public().public().encode());
+    let light_client = AcpLightClient::new(&hub_rpc, &hub_ws, &trusted_key, 10)
         .await
         .expect("ACP light client should connect");
 
@@ -215,13 +223,6 @@ async fn hub_acp_light_client() {
     eprintln!(
         "[hub-lc] PASSED: Policy re-verified at height {} after cache invalidation",
         recheck.verified_at_height
-    );
-
-    // Step 11. Measure revocation SLA
-    let revocation_blocks = new_sync.height.saturating_sub(sync.height);
-    eprintln!(
-        "[hub-lc] Step 11: Revocation SLA: {} blocks from tx to cache invalidation",
-        revocation_blocks
     );
 
     drop(hub_cluster);
