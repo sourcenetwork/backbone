@@ -16,7 +16,8 @@ pub use cache::AcpCache;
 pub use freshness::FreshnessPolicy;
 pub use header_sync::{HeaderChain, SyncState};
 pub use hub_permission::{
-    AccessRequest, Actor, Object, Operation, PermissionProof, PERMISSION_LIMITS,
+    AccessDecision, AccessRequest, Actor, DecisionRequest, Object, Operation, PermissionProof,
+    Timestamp, PERMISSION_LIMITS,
 };
 pub use proof_client::ProofClient;
 pub use types::{
@@ -131,6 +132,31 @@ impl AcpLightClient {
     pub async fn read_access_decision(&self, decision_id: &str) -> eyre::Result<VerifiedRecord> {
         self.read_key(cache::keys::access_decision_key(decision_id))
             .await
+    }
+
+    /// Verify a persisted successful decision for an exact submission at fresh authenticated state.
+    /// This checks issuance and expiry, not permission changes after issuance or payload authorization.
+    pub async fn verify_access_decision(
+        &self,
+        request: &DecisionRequest,
+    ) -> eyre::Result<AccessDecision> {
+        let record = self.read_access_decision(&request.id()?).await?;
+        let state = self.header_chain.fresh_state()?;
+        eyre::ensure!(
+            record.module_state_root == state.module_state_root,
+            "ACP state changed during decision verification; retry the request"
+        );
+        let bytes = record
+            .value
+            .as_deref()
+            .ok_or_else(|| eyre::eyre!("access decision is absent at the verified revision"))?;
+        Ok(request.verify_record(
+            bytes,
+            &Timestamp {
+                seconds: state.timestamp,
+                block_height: state.height,
+            },
+        )?)
     }
 
     /// Read a policy record at the verified revision.

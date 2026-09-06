@@ -93,6 +93,12 @@ A fresh newer revision restores reads. This requires a reasonably synchronized l
 clock and bounds staleness; it does not establish that an endpoint supplied the
 latest revision.
 
+`verify_access_decision` validates a persisted successful decision against an exact
+`DecisionRequest`: deployment, policy, submitting identity and sequence, actor and
+ordered operations. It also checks issuance metadata and revision-based expiry at
+fresh authenticated state. This proves authorization at issuance; callers still
+need to bind any payload or ticket use and enforce later revocation semantics.
+
 `HeaderChain::state` is diagnostic and may return stale state. Use `fresh_state` for
 current state. `ProofClient` methods for explicitly requested historical revisions
 verify authenticity without applying current-read freshness bounds.

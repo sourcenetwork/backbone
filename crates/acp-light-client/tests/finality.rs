@@ -175,7 +175,16 @@ impl Server {
                             let f = f.read();
                             let result = match request["method"].as_str().unwrap() {
                                 "hub_getLightBlock" => serde_json::to_value(&f.light).unwrap(),
-                                "hub_getStateProof" => serde_json::to_value(&f.proof).unwrap(),
+                                "hub_getStateProof" => {
+                                    let key = request["params"][1].as_str().unwrap();
+                                    let key = hex::decode(key.trim_start_matches("0x")).unwrap();
+                                    let proof = if key == KEY {
+                                        &f.proof
+                                    } else {
+                                        f.points.get(&key).unwrap_or(&f.proof)
+                                    };
+                                    serde_json::to_value(proof).unwrap()
+                                }
                                 "hub_getPermissionProof" => {
                                     serde_json::to_value(f.permission.as_ref().unwrap()).unwrap()
                                 }
@@ -471,6 +480,32 @@ async fn permission_requests_replay_verified_records_and_reject_removed_coverage
             permission: "read".into(),
         }],
     };
+    let block = hub_modules::types::BlockExecCtx {
+        deployment_id: 9001,
+        timestamp: hub_modules::types::Timestamp {
+            seconds: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            block_height: HEIGHT,
+        },
+        ..Default::default()
+    };
+    let tx = hub_modules::types::TxExecCtx {
+        sequence: 7,
+        signer: request.actor.0.to_string(),
+        tx_hash: vec![1; 32],
+    };
+    let decision = module
+        .check_access(&request.actor.0, &policy, &request, &block, &tx)
+        .unwrap();
+    let expected_decision = acp_light_client::DecisionRequest {
+        deployment_id: 9001,
+        policy_id: policy.clone(),
+        creator: tx.signer,
+        creator_sequence: tx.sequence,
+        request: request.clone(),
+    };
     let reads =
         hub_permission::capture_reads(module.store().clone(), &policy, &request, PERMISSION_LIMITS)
             .unwrap();
@@ -521,6 +556,19 @@ async fn permission_requests_replay_verified_records_and_reject_removed_coverage
         .await
         .unwrap();
     assert!(client.verify_access(&policy, &request).await.unwrap());
+    assert_eq!(
+        client
+            .verify_access_decision(&expected_decision)
+            .await
+            .unwrap(),
+        decision
+    );
+    let mut wrong_submission = expected_decision.clone();
+    wrong_submission.creator_sequence += 1;
+    assert!(client
+        .verify_access_decision(&wrong_submission)
+        .await
+        .is_err());
     for index in 0..proof.reads.len() {
         let mut incomplete = proof.clone();
         incomplete.reads.remove(index);
