@@ -93,6 +93,15 @@ A fresh newer revision restores reads. This requires a reasonably synchronized l
 clock and bounds staleness; it does not establish that an endpoint supplied the
 latest revision.
 
+Proof HTTP calls share bounded streaming reads and a ten-second total request
+timeout. State-proof and permission responses are limited to 4 MiB plus a 1 KiB
+RPC envelope; light-block responses to 16 MiB plus 1 KiB. These are client acceptance
+limits, not consensus payload limits or aggregate memory budgets. Oversized declared
+or streamed bodies, HTTP failures and invalid JSON-RPC envelopes return errors.
+Header WebSocket frames and assembled messages are limited to 64 KiB; connection
+setup has a ten-second timeout. Subscription metadata is checked before processing
+notifications. The WebSocket write buffer is bounded to 256 KiB.
+
 `verify_access_decision` validates a persisted successful decision against an exact
 `DecisionRequest`: deployment, policy, submitting identity and sequence, actor and
 ordered operations. It also checks issuance metadata and revision-based expiry at

@@ -593,3 +593,73 @@ async fn permission_requests_replay_verified_records_and_reject_removed_coverage
     assert!(error.to_string().contains("stale"), "{error:?}");
     task.abort();
 }
+
+#[tokio::test]
+async fn oversized_header_frames_and_fragmented_messages_close_without_publishing() {
+    use tokio_tungstenite::tungstenite::protocol::frame::{
+        coding::{Data, OpCode},
+        Frame,
+    };
+    for fragmented in [false, true] {
+        let data = fixture(42);
+        let trusted = data.key.clone();
+        let header = GossipHeader {
+            chain_id: 9001,
+            height: HEIGHT,
+            block_hash: data.light.block_hash.parse().unwrap(),
+            parent_hash: data.light.parent_hash.parse().unwrap(),
+            timestamp: data.light.timestamp,
+            state_root: data.light.state_root.parse().unwrap(),
+            module_state_root: data.root,
+            tx_count: 0,
+            publisher_index: 0,
+            signature: vec![],
+        };
+        let mut message = vec![b' '; acp_light_client::header_sync::HEADER_MESSAGE_BYTES + 1];
+        message.extend(serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0", "method":"eth_subscription", "params":{"subscription":"1", "result":header}})).unwrap());
+        let server = Server::start(data).await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            ws.next().await.unwrap().unwrap();
+            if fragmented {
+                let second = message.split_off(message.len() / 2);
+                assert!(message.len() < acp_light_client::header_sync::HEADER_MESSAGE_BYTES);
+                assert!(second.len() < acp_light_client::header_sync::HEADER_MESSAGE_BYTES);
+                let _ = ws
+                    .send(Message::Frame(Frame::message(
+                        message,
+                        OpCode::Data(Data::Text),
+                        false,
+                    )))
+                    .await;
+                let _ = ws
+                    .send(Message::Frame(Frame::message(
+                        second,
+                        OpCode::Data(Data::Continue),
+                        true,
+                    )))
+                    .await;
+            } else {
+                let _ = ws
+                    .send(Message::Text(String::from_utf8(message).unwrap().into()))
+                    .await;
+            }
+            let response = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .unwrap();
+            assert!(
+                matches!(response, None | Some(Err(_)) | Some(Ok(Message::Close(_)))),
+                "{response:?}"
+            );
+        });
+        let client = AcpLightClient::new(&server.url, &ws_url, &trusted, 10)
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert!(client.header_chain().state().is_none());
+        assert!(client.cache().is_empty());
+    }
+}

@@ -8,12 +8,15 @@ use eyre::WrapErr;
 use futures::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use std::sync::Arc;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tracing::{debug, warn};
 
 use crate::{
     freshness::ObservedState, proof_client::ProofClient, types::GossipHeader, FreshnessPolicy,
 };
+
+/// Maximum frame and assembled-message bytes accepted from the header stream.
+pub const HEADER_MESSAGE_BYTES: usize = 64 << 10;
 
 /// Snapshot of the latest finalized state tracked by header sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,9 +181,17 @@ async fn run_header_loop(
     notify: &tokio::sync::Notify,
     freshness: FreshnessPolicy,
 ) -> eyre::Result<()> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
-        .await
-        .wrap_err("connecting to hub.rs WebSocket")?;
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(HEADER_MESSAGE_BYTES))
+        .max_frame_size(Some(HEADER_MESSAGE_BYTES))
+        .max_write_buffer_size(256 << 10);
+    let (mut ws, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio_tungstenite::connect_async_with_config(ws_url, Some(config), false),
+    )
+    .await
+    .wrap_err("header WebSocket connection timeout")?
+    .wrap_err("connecting to hub.rs WebSocket")?;
 
     let subscribe_msg = serde_json::json!({
         "jsonrpc": "2.0",
@@ -236,8 +247,9 @@ async fn run_header_loop(
 }
 
 fn extract_header(msg: &serde_json::Value) -> Option<GossipHeader> {
-    // eth_subscription notification format:
-    // {"jsonrpc":"2.0","method":"eth_subscription","params":{"subscription":"...","result":{...}}}
+    if msg["jsonrpc"] != "2.0" || msg["method"] != "eth_subscription" {
+        return None;
+    }
     let result = msg.pointer("/params/result")?;
     serde_json::from_value(result.clone()).ok()
 }
