@@ -63,6 +63,7 @@ impl ProofClient {
         let (_, module_state_root) = verify::verify_light_block(&light, &self.trusted_key)?;
         Ok(SyncState {
             height,
+            timestamp: light.timestamp,
             module_state_root,
             block_hash: light.block_hash.parse()?,
         })

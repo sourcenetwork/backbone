@@ -11,12 +11,16 @@ use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, warn};
 
-use crate::{proof_client::ProofClient, types::GossipHeader};
+use crate::{
+    freshness::ObservedState, proof_client::ProofClient, types::GossipHeader, FreshnessPolicy,
+};
 
 /// Snapshot of the latest finalized state tracked by header sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncState {
     pub height: u64,
+    /// Timestamp authenticated by the finalized revision certificate, in Unix seconds.
+    pub timestamp: u64,
     pub module_state_root: B256,
     pub block_hash: B256,
 }
@@ -27,7 +31,8 @@ pub struct SyncState {
 /// authenticates the requested light blocks, and updates the latest finalized
 /// `(height, module_state_root)`.
 pub struct HeaderChain {
-    state: Arc<RwLock<Option<SyncState>>>,
+    state: Arc<RwLock<Option<ObservedState>>>,
+    freshness: FreshnessPolicy,
     notify: Arc<tokio::sync::Notify>,
     _handle: tokio::task::JoinHandle<()>,
 }
@@ -35,7 +40,20 @@ pub struct HeaderChain {
 impl HeaderChain {
     /// Connect to a hub.rs node's WebSocket endpoint and start syncing headers.
     pub async fn connect(ws_url: &str, proof_client: ProofClient) -> eyre::Result<Self> {
-        let state: Arc<RwLock<Option<SyncState>>> = Arc::new(RwLock::new(None));
+        Self::connect_with_freshness(ws_url, proof_client, FreshnessPolicy::default()).await
+    }
+
+    /// Connect with explicit local age and clock-skew bounds.
+    pub async fn connect_with_freshness(
+        ws_url: &str,
+        proof_client: ProofClient,
+        freshness: FreshnessPolicy,
+    ) -> eyre::Result<Self> {
+        eyre::ensure!(
+            !freshness.max_age.is_zero(),
+            "maximum revision age must be positive"
+        );
+        let state = Arc::new(RwLock::new(None));
         let notify = Arc::new(tokio::sync::Notify::new());
 
         let state_clone = state.clone();
@@ -44,8 +62,14 @@ impl HeaderChain {
 
         let handle = tokio::spawn(async move {
             loop {
-                if let Err(e) =
-                    run_header_loop(&ws_url, &proof_client, &state_clone, &notify_clone).await
+                if let Err(e) = run_header_loop(
+                    &ws_url,
+                    &proof_client,
+                    &state_clone,
+                    &notify_clone,
+                    freshness,
+                )
+                .await
                 {
                     warn!("header sync disconnected: {e}");
                 }
@@ -55,24 +79,38 @@ impl HeaderChain {
 
         Ok(Self {
             state,
+            freshness,
             notify,
             _handle: handle,
         })
     }
 
-    /// Current sync state, or `None` if no header has been received yet.
+    /// Last authenticated state for diagnostics; it may be stale.
     pub fn state(&self) -> Option<SyncState> {
-        self.state.read().clone()
+        self.state.read().as_ref().map(|s| s.revision.clone())
     }
 
-    /// Latest finalized height, or 0 if not yet synced.
+    /// Current authenticated state within the configured age and clock-skew bounds.
+    pub fn fresh_state(&self) -> eyre::Result<SyncState> {
+        let guard = self.state.read();
+        let state = guard
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("no verified finalized state available"))?;
+        state.check(self.freshness)?;
+        Ok(state.revision.clone())
+    }
+
+    /// Latest authenticated height for diagnostics, or 0 if not yet synced.
     pub fn latest_height(&self) -> u64 {
-        self.state.read().as_ref().map_or(0, |s| s.height)
+        self.state.read().as_ref().map_or(0, |s| s.revision.height)
     }
 
     /// Latest finalized module state root.
     pub fn latest_module_state_root(&self) -> Option<B256> {
-        self.state.read().as_ref().map(|s| s.module_state_root)
+        self.state
+            .read()
+            .as_ref()
+            .map(|s| s.revision.module_state_root)
     }
 
     /// Wait until the finalized height reaches at least `target`.
@@ -86,7 +124,7 @@ impl HeaderChain {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(state) = self.state() {
+            if let Ok(state) = self.fresh_state() {
                 if state.height >= target {
                     return Ok(state);
                 }
@@ -113,7 +151,7 @@ impl HeaderChain {
             let notified = self.notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(state) = self.state() {
+            if let Ok(state) = self.fresh_state() {
                 if state.module_state_root != previous {
                     return Ok(state);
                 }
@@ -136,8 +174,9 @@ impl Drop for HeaderChain {
 async fn run_header_loop(
     ws_url: &str,
     proof_client: &ProofClient,
-    state: &RwLock<Option<SyncState>>,
+    state: &RwLock<Option<ObservedState>>,
     notify: &tokio::sync::Notify,
+    freshness: FreshnessPolicy,
 ) -> eyre::Result<()> {
     let (mut ws, _) = tokio_tungstenite::connect_async(ws_url)
         .await
@@ -167,13 +206,22 @@ async fn run_header_loop(
                     if state
                         .read()
                         .as_ref()
-                        .is_some_and(|prev| header.height <= prev.height)
+                        .is_some_and(|prev| header.height <= prev.revision.height)
                     {
                         continue;
                     }
-                    match authenticate_header(proof_client, &header).await {
+                    match authenticate_header(proof_client, &header)
+                        .await
+                        .and_then(|verified| {
+                            let observed = ObservedState::new(verified)?;
+                            observed.check(freshness)?;
+                            Ok(observed)
+                        }) {
                         Ok(verified) => {
-                            debug!(height = verified.height, "verified finalized revision");
+                            debug!(
+                                height = verified.revision.height,
+                                "verified finalized revision"
+                            );
                             *state.write() = Some(verified);
                             notify.notify_waiters();
                         }

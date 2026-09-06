@@ -40,6 +40,7 @@ struct Fixture {
     root: B256,
     points: std::collections::BTreeMap<Vec<u8>, ModuleStateProof>,
     permission: Option<hub_permission::PermissionProof>,
+    delay: Duration,
 }
 
 fn fixture(seed: u64) -> Fixture {
@@ -47,6 +48,19 @@ fn fixture(seed: u64) -> Fixture {
 }
 
 fn fixture_records(seed: u64, records: Vec<(Vec<u8>, Vec<u8>)>) -> Fixture {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fixture_records_at(seed, records, timestamp, HEIGHT)
+}
+
+fn fixture_records_at(
+    seed: u64,
+    records: Vec<(Vec<u8>, Vec<u8>)>,
+    timestamp: u64,
+    height: u64,
+) -> Fixture {
     let store = MockTreeStore::default();
     let tree = JellyfishMerkleTree::<_, Sha256>::new(&store);
     let key_hash = KeyHash::with::<Sha256>(KEY);
@@ -55,16 +69,16 @@ fn fixture_records(seed: u64, records: Vec<(Vec<u8>, Vec<u8>)>) -> Fixture {
             records
                 .iter()
                 .map(|(key, value)| (KeyHash::with::<Sha256>(key), Some(value.clone()))),
-            HEIGHT,
+            height,
         )
         .unwrap();
     store.write_tree_update_batch(batch).unwrap();
-    let (value, proof) = tree.get_with_proof(key_hash, HEIGHT).unwrap();
+    let (value, proof) = tree.get_with_proof(key_hash, height).unwrap();
     let roots = [root.0; 4];
     let root = keccak256([b"_HUB_MODULE_ROOT".as_slice(), roots.as_flattened()].concat());
     let proof = ModuleStateProof::new(
         ModuleId::Acp,
-        HEIGHT,
+        height,
         KEY,
         value.as_deref(),
         &proof,
@@ -76,13 +90,13 @@ fn fixture_records(seed: u64, records: Vec<(Vec<u8>, Vec<u8>)>) -> Fixture {
         .iter()
         .map(|(key, _)| {
             let (value, proof) = tree
-                .get_with_proof(KeyHash::with::<Sha256>(key), HEIGHT)
+                .get_with_proof(KeyHash::with::<Sha256>(key), height)
                 .unwrap();
             (
                 key.clone(),
                 ModuleStateProof::new(
                     ModuleId::Acp,
-                    HEIGHT,
+                    height,
                     key,
                     value.as_deref(),
                     &proof,
@@ -106,16 +120,16 @@ fn fixture_records(seed: u64, records: Vec<(Vec<u8>, Vec<u8>)>) -> Fixture {
     )
     .unwrap();
     let material = EpochMaterial::new(players, output.public().clone());
-    let round = Round::new(Epoch::zero(), View::new(HEIGHT));
+    let round = Round::new(Epoch::zero(), View::new(height));
     let block = Block {
         context: ConsensusContext {
             round,
             leader: identity,
-            parent: (View::new(HEIGHT - 1), ConsensusDigest::from([3; 32])),
+            parent: (View::new(height - 1), ConsensusDigest::from([3; 32])),
         },
         parent: BlockId(B256::repeat_byte(3)),
-        height: HEIGHT,
-        timestamp: 1_700_000_000,
+        height,
+        timestamp,
         prevrandao: B256::ZERO,
         state_root: StateRoot(B256::repeat_byte(1)),
         module_state_root: root,
@@ -125,7 +139,7 @@ fn fixture_records(seed: u64, records: Vec<(Vec<u8>, Vec<u8>)>) -> Fixture {
     };
     let vote = Finalize::sign(
         &signer,
-        Proposal::new(round, View::new(HEIGHT - 1), block.digest()),
+        Proposal::new(round, View::new(height - 1), block.digest()),
     )
     .unwrap();
     let votes = [vote];
@@ -138,6 +152,7 @@ fn fixture_records(seed: u64, records: Vec<(Vec<u8>, Vec<u8>)>) -> Fixture {
         root,
         points,
         permission: None,
+        delay: Duration::ZERO,
     }
 }
 
@@ -156,15 +171,19 @@ impl Server {
                 post(
                     |State(f): State<Arc<RwLock<Fixture>>>,
                      Json(request): Json<serde_json::Value>| async move {
-                        let f = f.read();
-                        let result = match request["method"].as_str().unwrap() {
-                            "hub_getLightBlock" => serde_json::to_value(&f.light).unwrap(),
-                            "hub_getStateProof" => serde_json::to_value(&f.proof).unwrap(),
-                            "hub_getPermissionProof" => {
-                                serde_json::to_value(f.permission.as_ref().unwrap()).unwrap()
-                            }
-                            method => panic!("unexpected RPC: {method}"),
+                        let (result, delay) = {
+                            let f = f.read();
+                            let result = match request["method"].as_str().unwrap() {
+                                "hub_getLightBlock" => serde_json::to_value(&f.light).unwrap(),
+                                "hub_getStateProof" => serde_json::to_value(&f.proof).unwrap(),
+                                "hub_getPermissionProof" => {
+                                    serde_json::to_value(f.permission.as_ref().unwrap()).unwrap()
+                                }
+                                method => panic!("unexpected RPC: {method}"),
+                            };
+                            (result, f.delay)
                         };
+                        tokio::time::sleep(delay).await;
                         Json(serde_json::json!({"jsonrpc":"2.0", "id":1, "result":result}))
                     },
                 ),
@@ -279,9 +298,38 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
     assert!(client.read_policy("policy-1").await.is_err());
     assert!(client.cache().is_empty());
     let root = server.fixture.read().root;
+    for timestamp in [light.timestamp - 60, light.timestamp + 60] {
+        *server.fixture.write() = fixture_records_at(
+            42,
+            vec![(KEY.to_vec(), b"allowed".to_vec())],
+            timestamp,
+            HEIGHT,
+        );
+        let bad_time = server.fixture.read().light.clone();
+        send.send(GossipHeader {
+            module_state_root: root,
+            block_hash: bad_time.block_hash.parse().unwrap(),
+            // An unauthenticated notification cannot repair a signed stale timestamp.
+            timestamp: light.timestamp,
+            ..header.clone()
+        })
+        .await
+        .unwrap();
+        assert!(client
+            .wait_for_height(HEIGHT, Duration::from_millis(100))
+            .await
+            .is_err());
+        assert!(client.header_chain().state().is_none());
+    }
+    *server.fixture.write() = fixture_records_at(
+        42,
+        vec![(KEY.to_vec(), b"allowed".to_vec())],
+        light.timestamp,
+        HEIGHT,
+    );
     send.send(GossipHeader {
         module_state_root: root,
-        ..header
+        ..header.clone()
     })
     .await
     .unwrap();
@@ -298,7 +346,64 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
     assert_eq!(cached.value, record.value);
     assert_eq!(cached.module_state_root, root);
     assert!(cached.proof.is_none());
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    // Replaying the same valid certificate must not renew a cached grant.
+    send.send(GossipHeader {
+        module_state_root: root,
+        ..header.clone()
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(client
+        .read_policy("policy-1")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("stale"));
+    assert!(client
+        .wait_for_height(HEIGHT, Duration::from_millis(100))
+        .await
+        .is_err());
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    *server.fixture.write() = fixture_records_at(
+        42,
+        vec![(KEY.to_vec(), b"allowed".to_vec())],
+        timestamp,
+        HEIGHT + 1,
+    );
+    let renewed = server.fixture.read().light.clone();
+    send.send(GossipHeader {
+        height: HEIGHT + 1,
+        block_hash: renewed.block_hash.parse().unwrap(),
+        timestamp,
+        module_state_root: renewed.module_state_root.parse().unwrap(),
+        ..header
+    })
+    .await
+    .unwrap();
+    client
+        .wait_for_height(HEIGHT + 1, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .read_policy("policy-1")
+            .await
+            .unwrap()
+            .value
+            .as_deref(),
+        Some(b"allowed".as_slice())
+    );
     task.abort();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    assert!(client.read_policy("policy-1").await.is_err());
 }
 
 #[test]
@@ -431,5 +536,12 @@ async fn permission_requests_replay_verified_records_and_reject_removed_coverage
     );
     assert!(client.verify_access(&policy, &wrong).await.is_err());
     assert!(client.verify_access(&policy, &request).await.unwrap());
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(28)).await;
+    tokio::time::resume();
+    assert!(client.header_chain().fresh_state().is_ok());
+    server.fixture.write().delay = Duration::from_secs(3);
+    let error = client.verify_access(&policy, &request).await.unwrap_err();
+    assert!(error.to_string().contains("stale"), "{error:?}");
     task.abort();
 }

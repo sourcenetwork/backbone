@@ -5,6 +5,7 @@
 //! evidence and run the shared evaluator before returning a result.
 
 pub mod cache;
+mod freshness;
 pub mod header_sync;
 pub mod proof_client;
 pub mod rpc;
@@ -12,6 +13,7 @@ pub mod types;
 pub mod verify;
 
 pub use cache::AcpCache;
+pub use freshness::FreshnessPolicy;
 pub use header_sync::{HeaderChain, SyncState};
 pub use hub_permission::{
     AccessRequest, Actor, Object, Operation, PermissionProof, PERMISSION_LIMITS,
@@ -29,7 +31,7 @@ use tracing::info;
 
 /// Top-level ACP light client.
 ///
-/// Wires together header sync, proof fetching, and caching. Provides
+/// Wires together header sync, proof fetching, and caching.
 /// `verify_access()` evaluates permission requests; record reads return data only.
 pub struct AcpLightClient {
     header_chain: HeaderChain,
@@ -45,14 +47,36 @@ impl AcpLightClient {
     /// `ws_url` — WebSocket endpoint (e.g., `ws://127.0.0.1:9944`)
     /// `trusted_key_hex` — consensus public key from operator configuration
     /// `staleness_threshold` — max blocks behind before a cached entry is stale
+    ///
+    /// Revision freshness defaults to 30 seconds with up to 15 seconds of future clock skew.
+    /// Disconnection or withheld headers do not extend this lifetime.
     pub async fn new(
         rpc_url: &str,
         ws_url: &str,
         trusted_key_hex: &str,
         staleness_threshold: u64,
     ) -> eyre::Result<Self> {
+        Self::new_with_freshness(
+            rpc_url,
+            ws_url,
+            trusted_key_hex,
+            staleness_threshold,
+            FreshnessPolicy::default(),
+        )
+        .await
+    }
+
+    /// Create a client with explicit local revision age and clock-skew bounds.
+    pub async fn new_with_freshness(
+        rpc_url: &str,
+        ws_url: &str,
+        trusted_key_hex: &str,
+        staleness_threshold: u64,
+        freshness: FreshnessPolicy,
+    ) -> eyre::Result<Self> {
         let proof_client = ProofClient::new(rpc_url, trusted_key_hex)?;
-        let header_chain = HeaderChain::connect(ws_url, proof_client.clone()).await?;
+        let header_chain =
+            HeaderChain::connect_with_freshness(ws_url, proof_client.clone(), freshness).await?;
         let cache = AcpCache::new(staleness_threshold);
 
         Ok(Self {
@@ -80,18 +104,12 @@ impl AcpLightClient {
 
     /// Evaluate a request at the current verified revision, rejecting root changes during fetch.
     pub async fn verify_access(&self, policy: &str, request: &AccessRequest) -> eyre::Result<bool> {
-        let state = self
-            .header_chain
-            .state()
-            .ok_or_else(|| eyre::eyre!("no verified finalized state available"))?;
+        let state = self.header_chain.fresh_state()?;
         let allowed = self
             .proof_client
             .verify_permission_at(policy, request, &state)
             .await?;
-        let current = self
-            .header_chain
-            .state()
-            .ok_or_else(|| eyre::eyre!("no verified finalized state available"))?;
+        let current = self.header_chain.fresh_state()?;
         eyre::ensure!(
             current.module_state_root == state.module_state_root,
             "ACP state changed during permission verification; retry the request"
@@ -123,10 +141,7 @@ impl AcpLightClient {
     async fn read_key(&self, key: Vec<u8>) -> eyre::Result<VerifiedRecord> {
         let key_hex = cache::keys::hex_encode_key(&key);
         self.invalidate_if_root_changed();
-        let sync = self
-            .header_chain
-            .state()
-            .ok_or_else(|| eyre::eyre!("no verified finalized state available"))?;
+        let sync = self.header_chain.fresh_state()?;
         if let Some(cached) = self
             .cache
             .get(&key_hex, sync.height, sync.module_state_root)
@@ -137,10 +152,7 @@ impl AcpLightClient {
             .proof_client
             .fetch_and_verify_proof_with_root("acp", &key_hex, sync.height, sync.module_state_root)
             .await?;
-        let current = self
-            .header_chain
-            .state()
-            .ok_or_else(|| eyre::eyre!("no verified finalized state available"))?;
+        let current = self.header_chain.fresh_state()?;
         eyre::ensure!(
             current.module_state_root == sync.module_state_root,
             "ACP state changed during proof verification; retry the request"

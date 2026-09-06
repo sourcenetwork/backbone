@@ -28,7 +28,7 @@ tokio-tungstenite = "0.26"
 
 [dev-dependencies]
 hub-modules = { git = "https://github.com/sourcenetwork/hub.rs", rev = "55f15fd6958359d930d5b1d5c7e78c4acbd1f286" }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 commonware-utils.workspace = true

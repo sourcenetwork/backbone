@@ -77,6 +77,26 @@ Everything needed to orchestrate Orbis DKG rings:
 - `DkgFixture` — complete SourceHub + Orbis ring with DKG ceremony
 - Event-based synchronization — WebSocket subscriptions for DKG completion
 
+### acp-light-client
+
+Permission requests verify complete ACP evidence at an authenticated finalized revision
+and run the shared policy evaluator. Record reads also support a cache bound to the
+verified module root.
+
+`AcpLightClient::new` accepts revisions younger than 30 seconds and permits up to
+15 seconds of future timestamp skew. `new_with_freshness` accepts explicit
+`FreshnessPolicy` bounds. The certificate authenticates the timestamp; notifications
+cannot override it. All current reads, including cache hits, require fresh state. Proof fetches check
+freshness again before returning. Monotonic elapsed time prevents a local clock rollback from extending
+an already observed revision's lifetime. Disconnection and replay do not renew it.
+A fresh newer revision restores reads. This requires a reasonably synchronized local
+clock and bounds staleness; it does not establish that an endpoint supplied the
+latest revision.
+
+`HeaderChain::state` is diagnostic and may return stale state. Use `fresh_state` for
+current state. `ProofClient` methods for explicitly requested historical revisions
+verify authenticity without applying current-read freshness bounds.
+
 ## How Component Repos Use Backbone
 
 Each component repo imports its harness crate for integration tests:
