@@ -32,20 +32,22 @@ dependencies = [
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
+ "commonware-glue",
  "commonware-parallel",
+ "commonware-runtime",
  "commonware-utils",
  "eyre",
  "futures",
  "hex",
+ "hub-backend",
  "hub-domain",
  "hub-modules",
  "hub-permission",
- "jmt",
  "parking_lot",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -1260,7 +1262,7 @@ dependencies = [
  "eyre",
  "hex",
  "hub-harness 0.1.0",
- "hub-harness 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24)",
+ "hub-harness 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e)",
  "orbis-harness",
  "serde_json",
  "sha2 0.10.9",
@@ -3904,7 +3906,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hub-app"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -3930,7 +3932,7 @@ dependencies = [
 [[package]]
 name = "hub-backend"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-primitives",
  "bytes",
@@ -3941,6 +3943,9 @@ dependencies = [
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
+ "futures",
+ "hub-modules",
+ "hub-permission",
  "hub-qmdb",
  "hub-traits",
  "thiserror 2.0.18",
@@ -3950,7 +3955,7 @@ dependencies = [
 [[package]]
 name = "hub-config"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "commonware-codec",
  "commonware-cryptography",
@@ -3964,7 +3969,7 @@ dependencies = [
 [[package]]
 name = "hub-consensus"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -3982,7 +3987,7 @@ dependencies = [
 [[package]]
 name = "hub-crypto"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-primitives",
  "ark-bls12-381 0.4.0",
@@ -4002,7 +4007,7 @@ dependencies = [
 [[package]]
 name = "hub-domain"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-evm",
  "alloy-primitives",
@@ -4027,7 +4032,7 @@ dependencies = [
 [[package]]
 name = "hub-executor"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "acp",
  "alloy-consensus",
@@ -4057,7 +4062,7 @@ dependencies = [
 [[package]]
 name = "hub-genesis"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-evm",
  "commonware-codec",
@@ -4101,7 +4106,7 @@ dependencies = [
 [[package]]
 name = "hub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4122,7 +4127,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "test-infra 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24)",
+ "test-infra 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e)",
  "tokio",
  "tracing",
 ]
@@ -4130,7 +4135,7 @@ dependencies = [
 [[package]]
 name = "hub-indexer"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-primitives",
  "parking_lot",
@@ -4141,16 +4146,18 @@ dependencies = [
 [[package]]
 name = "hub-jsonrpc"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-primitives",
  "async-trait",
  "axum",
  "commonware-cryptography",
  "hex",
+ "hub-backend",
  "hub-domain",
  "hub-executor",
  "hub-indexer",
+ "hub-modules",
  "hub-permission",
  "hub-traits",
  "jsonrpsee",
@@ -4167,7 +4174,7 @@ dependencies = [
 [[package]]
 name = "hub-modules"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "acp",
  "alloy-primitives",
@@ -4175,6 +4182,7 @@ dependencies = [
  "async-trait",
  "borsh",
  "bytes",
+ "futures",
  "hex",
  "hub-crypto",
  "identity",
@@ -4189,7 +4197,7 @@ dependencies = [
 [[package]]
 name = "hub-node"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4206,6 +4214,7 @@ dependencies = [
  "commonware-macros",
  "commonware-p2p",
  "commonware-parallel",
+ "commonware-resolver",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
@@ -4223,12 +4232,12 @@ dependencies = [
  "hub-jsonrpc",
  "hub-modules",
  "hub-qmdb",
- "hub-state",
  "hub-traits",
  "parking_lot",
  "rocksdb",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4237,7 +4246,7 @@ dependencies = [
 [[package]]
 name = "hub-overlay"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-primitives",
  "hub-qmdb",
@@ -4247,9 +4256,13 @@ dependencies = [
 [[package]]
 name = "hub-permission"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-primitives",
+ "bytes",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-storage",
  "hex",
  "hub-domain",
  "hub-modules",
@@ -4262,7 +4275,7 @@ dependencies = [
 [[package]]
 name = "hub-qmdb"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-primitives",
  "thiserror 2.0.18",
@@ -4271,7 +4284,7 @@ dependencies = [
 [[package]]
 name = "hub-state"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "anyhow",
  "borsh",
@@ -4283,7 +4296,7 @@ dependencies = [
 [[package]]
 name = "hub-traits"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "alloy-primitives",
  "hub-qmdb",
@@ -4753,7 +4766,6 @@ dependencies = [
  "mirai-annotations",
  "num-derive",
  "num-traits",
- "parking_lot",
  "serde",
  "sha2 0.10.9",
  "thiserror 1.0.69",
@@ -8141,7 +8153,7 @@ dependencies = [
 [[package]]
 name = "test-infra"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=85226f4391114858ce9feefb684f8f1d63952a24#85226f4391114858ce9feefb684f8f1d63952a24"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=aaa27ef18a5522c72e641b619750637931742b5e#aaa27ef18a5522c72e641b619750637931742b5e"
 dependencies = [
  "eyre",
  "futures",

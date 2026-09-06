@@ -1,9 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use acp_light_client::{
-    AcpCache, AcpLightClient, GossipHeader, LightBlock, ModuleId, ModuleStateProof, ProofClient,
+    AcpCache, AcpLightClient, GossipHeader, LightBlock, ModuleId, ProofClient, RecordProof,
 };
-use alloy_primitives::{keccak256, B256};
+use alloy_primitives::B256;
 use axum::{extract::State, routing::post, Json, Router};
 use commonware_codec::{Decode as _, Encode as _};
 use commonware_consensus::{
@@ -24,9 +24,7 @@ use hub_domain::{
     Block, BlockId, ConsensusContext, ConsensusDigest, DbTargets, EpochMaterial,
     LightConsensusScheme, StateRoot, LIGHT_BLOCK_NAMESPACE,
 };
-use jmt::{mock::MockTreeStore, JellyfishMerkleTree, KeyHash};
 use parking_lot::RwLock;
-use sha2::Sha256;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -35,10 +33,10 @@ const KEY: &[u8] = b"policy/objs/policy-1";
 
 struct Fixture {
     light: LightBlock,
-    proof: ModuleStateProof,
+    proof: RecordProof,
     key: String,
     root: B256,
-    points: std::collections::BTreeMap<Vec<u8>, ModuleStateProof>,
+    points: std::collections::BTreeMap<Vec<u8>, RecordProof>,
     permission: Option<hub_permission::PermissionProof>,
     delay: Duration,
 }
@@ -61,51 +59,53 @@ fn fixture_records_at(
     timestamp: u64,
     height: u64,
 ) -> Fixture {
-    let store = MockTreeStore::default();
-    let tree = JellyfishMerkleTree::<_, Sha256>::new(&store);
-    let key_hash = KeyHash::with::<Sha256>(KEY);
-    let (root, batch) = tree
-        .put_value_set(
-            records
-                .iter()
-                .map(|(key, value)| (KeyHash::with::<Sha256>(key), Some(value.clone()))),
-            height,
-        )
-        .unwrap();
-    store.write_tree_update_batch(batch).unwrap();
-    let (value, proof) = tree.get_with_proof(key_hash, height).unwrap();
-    let roots = [root.0; 4];
-    let root = keccak256([b"_HUB_MODULE_ROOT".as_slice(), roots.as_flattened()].concat());
-    let proof = ModuleStateProof::new(
-        ModuleId::Acp,
-        height,
-        KEY,
-        value.as_deref(),
-        &proof,
-        roots[0],
-        roots,
-    );
+    let (root, points, proof) = std::thread::spawn(move || {
+        use commonware_glue::stateful::db::DatabaseSet;
+        use commonware_runtime::{buffer::paged::CacheRef, tokio, Runner as _, Supervisor as _};
+        use commonware_utils::{NZUsize, NZU16};
+        use hub_backend::native::{self, NativeStateSet};
 
-    let points = records
-        .iter()
-        .map(|(key, _)| {
-            let (value, proof) = tree
-                .get_with_proof(KeyHash::with::<Sha256>(key), height)
-                .unwrap();
-            (
-                key.clone(),
-                ModuleStateProof::new(
-                    ModuleId::Acp,
-                    height,
-                    key,
-                    value.as_deref(),
-                    &proof,
-                    roots[0],
-                    roots,
-                ),
-            )
-        })
-        .collect();
+        let directory = tempfile::tempdir().unwrap();
+        tokio::Runner::new(tokio::Config::new().with_storage_directory(directory.path())).start(
+            |context| async move {
+                let cache = CacheRef::from_pooler(&context, NZU16!(4084), NZUsize!(64));
+                let set = NativeStateSet::init(
+                    context.child("proof"),
+                    native::state_config("proof", cache),
+                )
+                .await;
+                let mut changes: Vec<_> = records
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Some(v.clone())))
+                    .collect();
+                changes.sort_by(|a, b| a.0.cmp(&b.0));
+                set.apply(
+                    native::prepare(set.new_batches().await, [changes, vec![], vec![], vec![]])
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                let (a, b, h, n) =
+                    futures::join!(set.0.read(), set.1.read(), set.2.read(), set.3.read());
+                let roots = [a.root().0, b.root().0, h.root().0, n.root().0];
+                let root = hub_modules::module_state::combine_module_roots(&roots);
+                let mut points = std::collections::BTreeMap::new();
+                for (key, _) in records {
+                    let proof =
+                        native::record_proof_at([&a, &b, &h, &n], root, ModuleId::Acp, &key)
+                            .await
+                            .unwrap();
+                    points.insert(key, proof);
+                }
+                let proof = native::record_proof_at([&a, &b, &h, &n], root, ModuleId::Acp, KEY)
+                    .await
+                    .unwrap();
+                (root, points, proof)
+            },
+        )
+    })
+    .join()
+    .unwrap();
 
     let identity = ed25519::PrivateKey::from_seed(seed).public_key();
     let players = Set::from_iter_dedup([identity.clone()]);
@@ -136,6 +136,8 @@ fn fixture_records_at(
         txs: vec![],
         payload: None,
         db_targets: DbTargets::default(),
+        native_targets: Some(Default::default()),
+        receipt_commitment: Some(B256::ZERO),
     };
     let vote = Finalize::sign(
         &signer,
@@ -175,7 +177,7 @@ impl Server {
                             let f = f.read();
                             let result = match request["method"].as_str().unwrap() {
                                 "hub_getLightBlock" => serde_json::to_value(&f.light).unwrap(),
-                                "hub_getStateProof" => {
+                                "hub_getCurrentRecordProof" => {
                                     let key = request["params"][1].as_str().unwrap();
                                     let key = hex::decode(key.trim_start_matches("0x")).unwrap();
                                     let proof = if key == KEY {
@@ -183,10 +185,18 @@ impl Server {
                                     } else {
                                         f.points.get(&key).unwrap_or(&f.proof)
                                     };
-                                    serde_json::to_value(proof).unwrap()
+                                    serde_json::to_value(hub_permission::RecordResponse {
+                                        revision: f.light.clone(),
+                                        record: proof.clone(),
+                                    })
+                                    .unwrap()
                                 }
-                                "hub_getPermissionProof" => {
-                                    serde_json::to_value(f.permission.as_ref().unwrap()).unwrap()
+                                "hub_getCurrentPermissionProof" => {
+                                    serde_json::to_value(hub_permission::PermissionResponse {
+                                        revision: f.light.clone(),
+                                        proof: f.permission.as_ref().unwrap().clone(),
+                                    })
+                                    .unwrap()
                                 }
                                 method => panic!("unexpected RPC: {method}"),
                             };
@@ -221,35 +231,24 @@ impl Drop for Server {
 async fn proof_is_bound_to_requested_revision_module_and_key() {
     let server = Server::start(fixture(42)).await;
     let client = server.client();
-    let key = hex::encode(KEY);
-    let fetch = || client.fetch_and_verify_proof("acp", &key, HEIGHT);
-    assert!(fetch().await.unwrap().0.value.is_some());
+    let fetch = || client.fetch_and_verify_record(ModuleId::Acp, KEY, HEIGHT);
+    assert!(fetch().await.unwrap().record.value.is_some());
     assert!(client
-        .fetch_and_verify_proof("acp", &key, HEIGHT + 1)
+        .fetch_and_verify_record(ModuleId::Acp, KEY, HEIGHT + 1)
         .await
-        .unwrap_err()
-        .to_string()
-        .contains("light block height"));
-    server.fixture.write().proof.height += 1;
-    assert!(fetch()
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("proof height"));
-    server.fixture.write().proof.height = HEIGHT;
+        .is_err());
+    server.fixture.write().light.height += 1;
+    assert!(fetch().await.is_err());
+    server.fixture.write().light.height = HEIGHT;
     assert!(client
-        .fetch_and_verify_proof("bulletin", &key, HEIGHT)
+        .fetch_and_verify_record(ModuleId::Bulletin, KEY, HEIGHT)
         .await
-        .unwrap_err()
-        .to_string()
-        .contains("proof module"));
+        .is_err());
     assert!(client
-        .fetch_and_verify_proof("acp", "0x00", HEIGHT)
+        .fetch_and_verify_record(ModuleId::Acp, b"other", HEIGHT)
         .await
-        .unwrap_err()
-        .to_string()
-        .contains("proof key"));
-    server.fixture.write().proof.value = Some("0x00".into());
+        .is_err());
+    server.fixture.write().proof.value = Some(vec![0].into());
     assert!(fetch().await.is_err());
 }
 
@@ -409,6 +408,21 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
             .as_deref(),
         Some(b"allowed".as_slice())
     );
+    client.cache().clear();
+    *server.fixture.write() = fixture_records_at(
+        42,
+        vec![(KEY.to_vec(), b"changed".to_vec())],
+        timestamp,
+        HEIGHT + 2,
+    );
+    let current = client.read_policy("policy-1").await.unwrap();
+    assert_eq!(current.value.as_deref(), Some(b"changed".as_slice()));
+    assert_eq!(current.verified_at_height, HEIGHT + 2);
+    assert_eq!(client.header_chain().latest_height(), HEIGHT + 2);
+    assert_eq!(
+        client.read_policy("policy-1").await.unwrap().value,
+        current.value
+    );
     task.abort();
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(31)).await;
@@ -511,14 +525,18 @@ async fn permission_requests_replay_verified_records_and_reject_removed_coverage
             .unwrap();
     let mut data = fixture_records(42, module.store().prefix_scan(b""));
     let proof = PermissionProof {
+        roots: Some(data.proof.roots),
         reads: reads
             .into_iter()
             .map(|read| {
                 let RecordRead::Key(key) = read else {
                     panic!("owner requires only point evidence")
                 };
-                PermissionRead::Point {
-                    proof: data.points[&key].clone(),
+                let point = &data.points[&key];
+                PermissionRead::CurrentPoint {
+                    key: point.key.clone(),
+                    value: point.value.clone(),
+                    proof: point.proof.clone(),
                 }
             })
             .collect(),
@@ -584,8 +602,12 @@ async fn permission_requests_replay_verified_records_and_reject_removed_coverage
     );
     assert!(client.verify_access(&policy, &wrong).await.is_err());
     assert!(client.verify_access(&policy, &request).await.unwrap());
+    let age = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .saturating_sub(Duration::from_secs(server.fixture.read().light.timestamp));
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(28)).await;
+    tokio::time::advance(Duration::from_secs(29).saturating_sub(age)).await;
     tokio::time::resume();
     assert!(client.header_chain().fresh_state().is_ok());
     server.fixture.write().delay = Duration::from_secs(3);
@@ -723,11 +745,14 @@ async fn indirect_finality_preserves_requested_state_and_timestamp() {
     assert_eq!(state.height, HEIGHT);
     assert_eq!(state.timestamp, target_time);
     assert_eq!(state.module_state_root, root);
-    let (_, authenticated) = client
-        .fetch_and_verify_proof("acp", &hex::encode(KEY), HEIGHT)
+    let record = client
+        .fetch_and_verify_record(ModuleId::Acp, KEY, HEIGHT)
         .await
         .unwrap();
-    assert_eq!(authenticated, root);
+    assert_eq!(
+        record.revision.module_state_root.parse::<B256>().unwrap(),
+        root
+    );
     server.fixture.write().light.descendants.clear();
     assert!(client.verified_state(HEIGHT).await.is_err());
 }

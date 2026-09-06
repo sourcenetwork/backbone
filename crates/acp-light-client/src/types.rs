@@ -12,5 +12,5 @@ pub struct VerifiedRecord {
     pub value: Option<Arc<[u8]>>,
     pub module_state_root: B256,
     pub verified_at_height: u64,
-    pub proof: Option<ModuleStateProof>,
+    pub proof: Option<hub_permission::RecordProof>,
 }

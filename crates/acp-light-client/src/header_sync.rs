@@ -103,6 +103,17 @@ impl HeaderChain {
         Ok(state.revision.clone())
     }
 
+    /// Publish an independently verified response revision without regressing header state.
+    pub(crate) fn accept_response(&self, revision: SyncState) -> eyre::Result<SyncState> {
+        let root = revision.module_state_root;
+        let current = observe_revision(&self.state, &self.notify, self.freshness, revision)?;
+        eyre::ensure!(
+            current.module_state_root == root,
+            "ACP state changed during verification; retry the request"
+        );
+        Ok(current)
+    }
+
     /// Latest authenticated height for diagnostics, or 0 if not yet synced.
     pub fn latest_height(&self) -> u64 {
         self.state.read().as_ref().map_or(0, |s| s.revision.height)
@@ -223,18 +234,10 @@ async fn run_header_loop(
                     }
                     match authenticate_header(proof_client, &header)
                         .await
-                        .and_then(|verified| {
-                            let observed = ObservedState::new(verified)?;
-                            observed.check(freshness)?;
-                            Ok(observed)
-                        }) {
+                        .and_then(|verified| observe_revision(state, notify, freshness, verified))
+                    {
                         Ok(verified) => {
-                            debug!(
-                                height = verified.revision.height,
-                                "verified finalized revision"
-                            );
-                            *state.write() = Some(verified);
-                            notify.notify_waiters();
+                            debug!(height = verified.height, "verified finalized revision");
                         }
                         Err(error) => {
                             warn!(height = header.height, %error, "rejecting unverified header")
@@ -244,6 +247,34 @@ async fn run_header_loop(
             }
         }
     }
+}
+
+fn observe_revision(
+    state: &RwLock<Option<ObservedState>>,
+    notify: &tokio::sync::Notify,
+    freshness: FreshnessPolicy,
+    revision: SyncState,
+) -> eyre::Result<SyncState> {
+    let observed = ObservedState::new(revision)?;
+    observed.check(freshness)?;
+    let mut state = state.write();
+    if let Some(previous) = state.as_ref() {
+        if observed.revision.height <= previous.revision.height {
+            if observed.revision.height == previous.revision.height {
+                eyre::ensure!(
+                    observed.revision == previous.revision,
+                    "conflicting finalized revision at the same height"
+                );
+            }
+            // Repeated certificates cannot reset the monotonic age of a cached revision.
+            previous.check(freshness)?;
+            return Ok(previous.revision.clone());
+        }
+    }
+    let current = observed.revision.clone();
+    *state = Some(observed);
+    notify.notify_waiters();
+    Ok(current)
 }
 
 fn extract_header(msg: &serde_json::Value) -> Option<GossipHeader> {
@@ -268,4 +299,58 @@ async fn authenticate_header(
         "header root differs from verified block"
     );
     Ok(verified)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn responses_and_delayed_headers_cannot_regress_or_renew_state() {
+        let chain = HeaderChain {
+            state: Arc::new(RwLock::new(None)),
+            freshness: FreshnessPolicy::default(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            _handle: tokio::spawn(std::future::pending()),
+        };
+        let first = SyncState {
+            height: 10,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            module_state_root: B256::repeat_byte(1),
+            block_hash: B256::repeat_byte(2),
+        };
+        chain.accept_response(first.clone()).unwrap();
+        let second = SyncState {
+            height: 11,
+            module_state_root: B256::repeat_byte(3),
+            block_hash: B256::repeat_byte(4),
+            ..first.clone()
+        };
+        chain.accept_response(second.clone()).unwrap();
+        let delayed =
+            observe_revision(&chain.state, &chain.notify, chain.freshness, first.clone()).unwrap();
+        assert_eq!(delayed, second);
+        assert!(chain.accept_response(first).is_err());
+        let conflicting = SyncState {
+            block_hash: B256::repeat_byte(9),
+            ..second.clone()
+        };
+        assert!(chain.accept_response(conflicting).is_err());
+        let stale = SyncState {
+            height: 12,
+            timestamp: second.timestamp - 60,
+            ..second.clone()
+        };
+        assert!(chain.accept_response(stale).is_err());
+        assert_eq!(chain.fresh_state().unwrap(), second);
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        assert!(chain.accept_response(second.clone()).is_err());
+        assert!(chain.fresh_state().is_err());
+        assert_eq!(chain.state().unwrap(), second);
+    }
 }

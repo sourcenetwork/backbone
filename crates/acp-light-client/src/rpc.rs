@@ -5,29 +5,29 @@ use std::time::Duration;
 use eyre::WrapErr;
 use serde::de::DeserializeOwned;
 
-use crate::types::{LightBlock, ModuleStateProof};
+use crate::types::{LightBlock, ModuleId};
 
-/// Maximum state-proof response, including its JSON-RPC envelope.
-pub const STATE_PROOF_RESPONSE_BYTES: usize = (4 << 20) + 1024;
 /// Maximum light-block response, including hex-encoded block and consensus material.
 pub use hub_domain::LIGHT_BLOCK_RESPONSE_BYTES;
-/// Maximum permission response, including its JSON-RPC envelope.
-pub const PERMISSION_RESPONSE_BYTES: usize = hub_permission::PERMISSION_LIMITS.proof_bytes + 1024;
+/// Maximum current permission response, including finalization and the RPC envelope.
+pub use hub_permission::PERMISSION_RESPONSE_BYTES;
+/// Maximum native record response, including finalization and the RPC envelope.
+pub use hub_permission::RECORD_RESPONSE_BYTES;
 
-/// Fetch a module state proof. `key_hex` is the hex-encoded record key.
-pub async fn get_state_proof(
+/// Fetch current record evidence paired with its finalized revision.
+pub async fn get_current_record_proof(
     client: &reqwest::Client,
     rpc_url: &str,
-    module: &str,
-    key_hex: &str,
-    height: u64,
-) -> eyre::Result<ModuleStateProof> {
+    module: ModuleId,
+    key: &[u8],
+    minimum_height: u64,
+) -> eyre::Result<hub_permission::RecordResponse> {
     request(
         client,
         rpc_url,
-        "hub_getStateProof",
-        serde_json::json!([module, key_hex, height]),
-        STATE_PROOF_RESPONSE_BYTES,
+        "hub_getCurrentRecordProof",
+        serde_json::json!([module, format!("0x{}", hex::encode(key)), minimum_height]),
+        RECORD_RESPONSE_BYTES,
     )
     .await
 }
@@ -48,19 +48,19 @@ pub async fn get_light_block(
     .await
 }
 
-/// Fetch complete permission evidence for the requested revision.
-pub async fn get_permission_proof(
+/// Fetch current permission evidence paired with its finalized revision.
+pub async fn get_current_permission_proof(
     client: &reqwest::Client,
     rpc_url: &str,
     policy: &str,
     access: &hub_permission::AccessRequest,
-    height: u64,
-) -> eyre::Result<hub_permission::PermissionProof> {
+    minimum_height: u64,
+) -> eyre::Result<hub_permission::PermissionResponse> {
     request(
         client,
         rpc_url,
-        "hub_getPermissionProof",
-        serde_json::json!([policy, access, height]),
+        "hub_getCurrentPermissionProof",
+        serde_json::json!([policy, access, minimum_height]),
         PERMISSION_RESPONSE_BYTES,
     )
     .await

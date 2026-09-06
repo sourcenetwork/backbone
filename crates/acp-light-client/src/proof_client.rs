@@ -2,13 +2,12 @@
 
 use std::time::Duration;
 
-use alloy_primitives::B256;
 use commonware_codec::DecodeExt as _;
 use eyre::{ensure, WrapErr};
 
 use crate::header_sync::SyncState;
 use crate::rpc;
-use crate::types::{ConsensusPublicKey, LightBlock, ModuleId, ModuleStateProof};
+use crate::types::{ConsensusPublicKey, LightBlock, ModuleId};
 use crate::verify;
 
 /// HTTP JSON-RPC client with an independently configured consensus trust anchor.
@@ -35,16 +34,6 @@ impl ProofClient {
         })
     }
 
-    /// Fetch a module state proof without verifying it.
-    pub async fn get_state_proof(
-        &self,
-        module: &str,
-        key_hex: &str,
-        height: u64,
-    ) -> eyre::Result<ModuleStateProof> {
-        rpc::get_state_proof(&self.client, &self.rpc_url, module, key_hex, height).await
-    }
-
     /// Fetch a light block without verifying it.
     pub async fn get_light_block(&self, height: u64) -> eyre::Result<LightBlock> {
         rpc::get_light_block(&self.client, &self.rpc_url, height).await
@@ -69,82 +58,66 @@ impl ProofClient {
         })
     }
 
-    pub(crate) async fn verify_permission_at(
+    /// Verify a current permission response against independently configured trust.
+    pub async fn verify_current_permission(
         &self,
         policy: &str,
         request: &hub_permission::AccessRequest,
-        state: &SyncState,
-    ) -> eyre::Result<bool> {
+        minimum_height: u64,
+    ) -> eyre::Result<(SyncState, bool)> {
         hub_permission::validate_request(policy, request, hub_permission::PERMISSION_LIMITS)?;
-        let proof =
-            rpc::get_permission_proof(&self.client, &self.rpc_url, policy, request, state.height)
-                .await?;
-        Ok(hub_permission::verify_permission_proof(
-            state.module_state_root,
-            state.height,
+        let response = rpc::get_current_permission_proof(
+            &self.client,
+            &self.rpc_url,
             policy,
             request,
-            &proof,
+            minimum_height,
+        )
+        .await?;
+        let allowed = response.verify(
+            policy,
+            request,
+            minimum_height,
+            &self.trusted_key,
             hub_permission::PERMISSION_LIMITS,
-        )?)
+        )?;
+        Ok((revision_state(&response.revision)?, allowed))
     }
 
-    /// Fetch and verify finality and a state proof at the requested revision.
-    pub async fn fetch_and_verify_proof(
+    /// Fetch and verify a native record and its finalized revision in one response.
+    pub async fn fetch_and_verify_record(
         &self,
-        module: &str,
-        key_hex: &str,
-        height: u64,
-    ) -> eyre::Result<(ModuleStateProof, B256)> {
-        let state = self.verified_state(height).await?;
-        let proof = self
-            .fetch_and_verify_proof_with_root(
-                module,
-                key_hex,
-                state.height,
-                state.module_state_root,
-            )
-            .await?;
-        Ok((proof, state.module_state_root))
+        module: ModuleId,
+        key: &[u8],
+        minimum_height: u64,
+    ) -> eyre::Result<hub_permission::RecordResponse> {
+        eyre::ensure!(
+            key.len() <= hub_permission::current::MAX_KEY_BYTES,
+            "record key exceeds limit"
+        );
+        let response =
+            rpc::get_current_record_proof(&self.client, &self.rpc_url, module, key, minimum_height)
+                .await?;
+        response.verify(
+            module,
+            key,
+            minimum_height,
+            &self.trusted_key,
+            hub_permission::RECORD_PROOF_BYTES,
+        )?;
+        Ok(response)
     }
+}
 
-    /// Verify a proof against a root authenticated by this client's header sync.
-    pub(crate) async fn fetch_and_verify_proof_with_root(
-        &self,
-        module: &str,
-        key_hex: &str,
-        height: u64,
-        module_state_root: B256,
-    ) -> eyre::Result<ModuleStateProof> {
-        let proof = self
-            .get_state_proof(module, key_hex, height)
-            .await
-            .wrap_err("fetching state proof")?;
-        verify_response(&proof, module, key_hex, height, module_state_root)?;
-        Ok(proof)
-    }
+pub(crate) fn revision_state(light: &LightBlock) -> eyre::Result<SyncState> {
+    Ok(SyncState {
+        height: light.height,
+        timestamp: light.timestamp,
+        module_state_root: light.module_state_root.parse()?,
+        block_hash: light.block_hash.parse()?,
+    })
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, hex::FromHexError> {
     hex::decode(value.strip_prefix("0x").unwrap_or(value))
-}
-
-fn verify_response(
-    proof: &ModuleStateProof,
-    module: &str,
-    key_hex: &str,
-    height: u64,
-    root: B256,
-) -> eyre::Result<()> {
-    ensure!(
-        Some(proof.module) == ModuleId::from_str_name(module),
-        "proof module differs from request"
-    );
-    ensure!(proof.height == height, "proof height differs from request");
-    ensure!(
-        decode_hex(&proof.key)? == decode_hex(key_hex)?,
-        "proof key differs from request"
-    );
-    verify::verify_module_state_proof(root, proof)?;
-    Ok(())
 }

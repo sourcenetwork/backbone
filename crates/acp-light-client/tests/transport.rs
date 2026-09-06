@@ -41,7 +41,7 @@ enum Endpoint {
 impl Endpoint {
     fn maximum(self) -> usize {
         match self {
-            Self::State => rpc::STATE_PROOF_RESPONSE_BYTES,
+            Self::State => rpc::RECORD_RESPONSE_BYTES,
             Self::Light => rpc::LIGHT_BLOCK_RESPONSE_BYTES,
             Self::Permission => rpc::PERMISSION_RESPONSE_BYTES,
         }
@@ -50,11 +50,17 @@ impl Endpoint {
     async fn fetch(self, url: &str) -> eyre::Result<()> {
         let client = reqwest::Client::new();
         match self {
-            Self::State => rpc::get_state_proof(&client, url, "acp", "0x00", 1)
-                .await
-                .map(|_| ()),
+            Self::State => rpc::get_current_record_proof(
+                &client,
+                url,
+                acp_light_client::ModuleId::Acp,
+                &[0],
+                1,
+            )
+            .await
+            .map(|_| ()),
             Self::Light => rpc::get_light_block(&client, url, 1).await.map(|_| ()),
-            Self::Permission => rpc::get_permission_proof(
+            Self::Permission => rpc::get_current_permission_proof(
                 &client,
                 url,
                 "policy",
@@ -153,7 +159,18 @@ async fn every_proof_endpoint_checks_http_and_rpc_envelopes() {
 
 #[tokio::test]
 async fn exact_response_limit_is_accepted_and_stalled_bodies_time_out() {
-    let mut body = r#"{"jsonrpc":"2.0","id":1,"result":{"reads":[]}}"#.to_string();
+    let mut body = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1,
+        "result": {
+            "revision": {
+                "block_hash": "", "parent_hash": "", "height": 1, "timestamp": 0,
+                "state_root": "", "module_state_root": "", "epoch": 0, "view": 1,
+                "parent_view": 0, "block": "", "finalization": "", "epoch_material": ""
+            },
+            "proof": { "reads": [] }
+        }
+    })
+    .to_string();
     body.extend(std::iter::repeat_n(
         ' ',
         rpc::PERMISSION_RESPONSE_BYTES - body.len(),

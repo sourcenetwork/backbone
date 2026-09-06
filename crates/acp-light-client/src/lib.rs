@@ -17,7 +17,7 @@ pub use freshness::FreshnessPolicy;
 pub use header_sync::{HeaderChain, SyncState};
 pub use hub_permission::{
     AccessDecision, AccessRequest, Actor, DecisionRequest, Object, Operation, PermissionProof,
-    Timestamp, PERMISSION_LIMITS,
+    RecordProof, RecordResponse, Timestamp, PERMISSION_LIMITS,
 };
 pub use proof_client::ProofClient;
 pub use types::{
@@ -103,18 +103,14 @@ impl AcpLightClient {
         &self.cache
     }
 
-    /// Evaluate a request at the current verified revision, rejecting root changes during fetch.
+    /// Evaluate current certified evidence at or beyond the latest verified revision.
     pub async fn verify_access(&self, policy: &str, request: &AccessRequest) -> eyre::Result<bool> {
-        let state = self.header_chain.fresh_state()?;
-        let allowed = self
+        let minimum = self.header_chain.fresh_state()?.height;
+        let (revision, allowed) = self
             .proof_client
-            .verify_permission_at(policy, request, &state)
+            .verify_current_permission(policy, request, minimum)
             .await?;
-        let current = self.header_chain.fresh_state()?;
-        eyre::ensure!(
-            current.module_state_root == state.module_state_root,
-            "ACP state changed during permission verification; retry the request"
-        );
+        self.header_chain.accept_response(revision)?;
         Ok(allowed)
     }
 
@@ -174,27 +170,24 @@ impl AcpLightClient {
         {
             return Ok(cached);
         }
-        let proof = self
+        let response = self
             .proof_client
-            .fetch_and_verify_proof_with_root("acp", &key_hex, sync.height, sync.module_state_root)
+            .fetch_and_verify_record(ModuleId::Acp, &key, sync.height)
             .await?;
-        let current = self.header_chain.fresh_state()?;
-        eyre::ensure!(
-            current.module_state_root == sync.module_state_root,
-            "ACP state changed during proof verification; retry the request"
+        let revision = proof_client::revision_state(&response.revision)?;
+        self.header_chain.accept_response(revision.clone())?;
+        let proof = response.record;
+        let value = proof.value.as_ref().map(|v| Arc::<[u8]>::from(v.as_ref()));
+        self.cache.insert(
+            &key_hex,
+            value.clone(),
+            revision.height,
+            revision.module_state_root,
         );
-        let value = proof
-            .value
-            .as_ref()
-            .map(|v| hex::decode(v.strip_prefix("0x").unwrap_or(v)))
-            .transpose()?
-            .map(Arc::<[u8]>::from);
-        self.cache
-            .insert(&key_hex, value.clone(), sync.height, sync.module_state_root);
         Ok(VerifiedRecord {
             value,
-            module_state_root: sync.module_state_root,
-            verified_at_height: sync.height,
+            module_state_root: revision.module_state_root,
+            verified_at_height: revision.height,
             proof: Some(proof),
         })
     }
