@@ -38,14 +38,25 @@ struct Fixture {
     proof: ModuleStateProof,
     key: String,
     root: B256,
+    points: std::collections::BTreeMap<Vec<u8>, ModuleStateProof>,
+    permission: Option<hub_permission::PermissionProof>,
 }
 
 fn fixture(seed: u64) -> Fixture {
+    fixture_records(seed, vec![(KEY.to_vec(), b"allowed".to_vec())])
+}
+
+fn fixture_records(seed: u64, records: Vec<(Vec<u8>, Vec<u8>)>) -> Fixture {
     let store = MockTreeStore::default();
     let tree = JellyfishMerkleTree::<_, Sha256>::new(&store);
     let key_hash = KeyHash::with::<Sha256>(KEY);
     let (root, batch) = tree
-        .put_value_set([(key_hash, Some(b"allowed".to_vec()))], HEIGHT)
+        .put_value_set(
+            records
+                .iter()
+                .map(|(key, value)| (KeyHash::with::<Sha256>(key), Some(value.clone()))),
+            HEIGHT,
+        )
         .unwrap();
     store.write_tree_update_batch(batch).unwrap();
     let (value, proof) = tree.get_with_proof(key_hash, HEIGHT).unwrap();
@@ -60,6 +71,27 @@ fn fixture(seed: u64) -> Fixture {
         roots[0],
         roots,
     );
+
+    let points = records
+        .iter()
+        .map(|(key, _)| {
+            let (value, proof) = tree
+                .get_with_proof(KeyHash::with::<Sha256>(key), HEIGHT)
+                .unwrap();
+            (
+                key.clone(),
+                ModuleStateProof::new(
+                    ModuleId::Acp,
+                    HEIGHT,
+                    key,
+                    value.as_deref(),
+                    &proof,
+                    roots[0],
+                    roots,
+                ),
+            )
+        })
+        .collect();
 
     let identity = ed25519::PrivateKey::from_seed(seed).public_key();
     let players = Set::from_iter_dedup([identity.clone()]);
@@ -104,6 +136,8 @@ fn fixture(seed: u64) -> Fixture {
         proof,
         key,
         root,
+        points,
+        permission: None,
     }
 }
 
@@ -126,6 +160,9 @@ impl Server {
                         let result = match request["method"].as_str().unwrap() {
                             "hub_getLightBlock" => serde_json::to_value(&f.light).unwrap(),
                             "hub_getStateProof" => serde_json::to_value(&f.proof).unwrap(),
+                            "hub_getPermissionProof" => {
+                                serde_json::to_value(f.permission.as_ref().unwrap()).unwrap()
+                            }
                             method => panic!("unexpected RPC: {method}"),
                         };
                         Json(serde_json::json!({"jsonrpc":"2.0", "id":1, "result":result}))
@@ -281,4 +318,118 @@ fn delayed_proof_cannot_restore_a_revoked_cache_entry() {
         .unwrap()
         .value
         .is_none());
+}
+
+#[tokio::test]
+async fn permission_requests_replay_verified_records_and_reject_removed_coverage() {
+    use hub_modules::{
+        acp::{
+            types::{PolicyCmd, PolicyMarshalingType},
+            AcpModule,
+        },
+        kv_store::ModuleKvStore,
+    };
+    use hub_permission::{
+        AccessRequest, Actor, Object, Operation, PermissionProof, PermissionRead, RecordRead,
+        PERMISSION_LIMITS,
+    };
+    let mut module = AcpModule::new();
+    let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        .parse()
+        .unwrap();
+    let policy = module
+        .create_policy(
+            &owner,
+            "name: documents\nresources:\n  - name: file\n    permissions:\n      - name: read\n",
+            PolicyMarshalingType::ShortYaml,
+        )
+        .unwrap()
+        .policy
+        .id;
+    module
+        .direct_policy_cmd(
+            &owner,
+            &policy,
+            PolicyCmd::RegisterObject(Object {
+                resource: "file".into(),
+                id: "report".into(),
+            }),
+        )
+        .unwrap();
+    let request = AccessRequest {
+        actor: Actor(owner),
+        operations: vec![Operation {
+            object: Object {
+                resource: "file".into(),
+                id: "report".into(),
+            },
+            permission: "read".into(),
+        }],
+    };
+    let reads =
+        hub_permission::capture_reads(module.store().clone(), &policy, &request, PERMISSION_LIMITS)
+            .unwrap();
+    let mut data = fixture_records(42, module.store().prefix_scan(b""));
+    let proof = PermissionProof {
+        reads: reads
+            .into_iter()
+            .map(|read| {
+                let RecordRead::Key(key) = read else {
+                    panic!("owner requires only point evidence")
+                };
+                PermissionRead::Point {
+                    proof: data.points[&key].clone(),
+                }
+            })
+            .collect(),
+    };
+    data.permission = Some(proof.clone());
+    let light = data.light.clone();
+    let trusted = data.key.clone();
+    let server = Server::start(data).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_url = format!("ws://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        ws.next().await.unwrap().unwrap();
+        let header = GossipHeader {
+            chain_id: 9001,
+            height: HEIGHT,
+            block_hash: light.block_hash.parse().unwrap(),
+            parent_hash: light.parent_hash.parse().unwrap(),
+            timestamp: light.timestamp,
+            state_root: light.state_root.parse().unwrap(),
+            module_state_root: light.module_state_root.parse().unwrap(),
+            tx_count: 0,
+            publisher_index: 0,
+            signature: vec![],
+        };
+        ws.send(Message::Text(serde_json::json!({"jsonrpc":"2.0", "method":"eth_subscription", "params":{"subscription":"1", "result":header}}).to_string().into())).await.unwrap();
+        while ws.next().await.is_some() {}
+    });
+    let client = AcpLightClient::new(&server.url, &ws_url, &trusted, 10)
+        .await
+        .unwrap();
+    client
+        .wait_for_height(HEIGHT, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert!(client.verify_access(&policy, &request).await.unwrap());
+    for index in 0..proof.reads.len() {
+        let mut incomplete = proof.clone();
+        incomplete.reads.remove(index);
+        server.fixture.write().permission = Some(incomplete);
+        assert!(client.verify_access(&policy, &request).await.is_err());
+    }
+    server.fixture.write().permission = Some(proof);
+    let mut wrong = request.clone();
+    wrong.actor = Actor(
+        "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"
+            .parse()
+            .unwrap(),
+    );
+    assert!(client.verify_access(&policy, &wrong).await.is_err());
+    assert!(client.verify_access(&policy, &request).await.unwrap());
+    task.abort();
 }

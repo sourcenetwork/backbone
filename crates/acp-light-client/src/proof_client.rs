@@ -68,6 +68,26 @@ impl ProofClient {
         })
     }
 
+    pub(crate) async fn verify_permission_at(
+        &self,
+        policy: &str,
+        request: &hub_permission::AccessRequest,
+        state: &SyncState,
+    ) -> eyre::Result<bool> {
+        hub_permission::validate_request(policy, request, hub_permission::PERMISSION_LIMITS)?;
+        let proof =
+            rpc::get_permission_proof(&self.client, &self.rpc_url, policy, request, state.height)
+                .await?;
+        Ok(hub_permission::verify_permission_proof(
+            state.module_state_root,
+            state.height,
+            policy,
+            request,
+            &proof,
+            hub_permission::PERMISSION_LIMITS,
+        )?)
+    }
+
     /// Fetch and verify finality and a state proof at the requested revision.
     pub async fn fetch_and_verify_proof(
         &self,

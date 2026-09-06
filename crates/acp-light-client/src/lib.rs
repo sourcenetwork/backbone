@@ -1,20 +1,8 @@
-//! ACP Light Client — proof-validated ACP cache for the Source Network stack.
+//! Authenticated ACP records and full permission evaluation at verified revisions.
 //!
-//! Subscribes to hub.rs finalized block headers, fetches and verifies Merkle
-//! inclusion proofs, and maintains a local ACP cache. Consumed by both
-//! DefraDB (query gate) and Orbis (signing gate) for local ACP enforcement
-//! without per-query RPC round-trips.
-//!
-//! # Architecture
-//!
-//! ```text
-//! eth_subscribe("headers")  ──→  HeaderChain  ──→  height + module_state_root
-//!                                                         │
-//!                           hub_getStateProof  ──→  ProofClient  ──→  verify
-//!                           hub_getLightBlock  ──→       │
-//!                                                       ▼
-//!                                                   AcpCache  ──→  read_relationship()
-//! ```
+//! Header synchronization verifies finalization against configured consensus trust.
+//! Record reads may use a root-bound cache; permission requests fetch complete
+//! evidence and run the shared evaluator before returning a result.
 
 pub mod cache;
 pub mod header_sync;
@@ -25,6 +13,9 @@ pub mod verify;
 
 pub use cache::AcpCache;
 pub use header_sync::{HeaderChain, SyncState};
+pub use hub_permission::{
+    AccessRequest, Actor, Object, Operation, PermissionProof, PERMISSION_LIMITS,
+};
 pub use proof_client::ProofClient;
 pub use types::{
     ConsensusPublicKey, GossipHeader, LightBlock, ModuleId, ModuleStateProof, VerifiedRecord,
@@ -39,7 +30,7 @@ use tracing::info;
 /// Top-level ACP light client.
 ///
 /// Wires together header sync, proof fetching, and caching. Provides
-/// `read_relationship()` as the primary entry point for ACP enforcement.
+/// `verify_access()` evaluates permission requests; record reads return data only.
 pub struct AcpLightClient {
     header_chain: HeaderChain,
     proof_client: ProofClient,
@@ -85,6 +76,27 @@ impl AcpLightClient {
     /// Access to the underlying cache.
     pub fn cache(&self) -> &AcpCache {
         &self.cache
+    }
+
+    /// Evaluate a request at the current verified revision, rejecting root changes during fetch.
+    pub async fn verify_access(&self, policy: &str, request: &AccessRequest) -> eyre::Result<bool> {
+        let state = self
+            .header_chain
+            .state()
+            .ok_or_else(|| eyre::eyre!("no verified finalized state available"))?;
+        let allowed = self
+            .proof_client
+            .verify_permission_at(policy, request, &state)
+            .await?;
+        let current = self
+            .header_chain
+            .state()
+            .ok_or_else(|| eyre::eyre!("no verified finalized state available"))?;
+        eyre::ensure!(
+            current.module_state_root == state.module_state_root,
+            "ACP state changed during permission verification; retry the request"
+        );
+        Ok(allowed)
     }
 
     /// Read a relationship record at the verified revision.
