@@ -95,7 +95,7 @@ latest revision.
 
 Proof HTTP calls share bounded streaming reads and a ten-second total request
 timeout. State-proof and permission responses are limited to 4 MiB plus a 1 KiB
-RPC envelope; light-block responses to 16 MiB plus 1 KiB. These are client acceptance
+RPC envelope; light-block responses to 16 MiB plus 64 KiB. These are client acceptance
 limits, not consensus payload limits or aggregate memory budgets. Oversized declared
 or streamed bodies, HTTP failures and invalid JSON-RPC envelopes return errors.
 Header WebSocket frames and assembled messages are limited to 64 KiB; connection
@@ -135,3 +135,11 @@ Full-stack tests that need multiple components live in `backbone/tests/`.
 ## The Idea
 
 The data is the source. Its encryption, its access controls, and where it lives are the most important things when building a system. Backbone is the foundation that makes data sovereign — encrypted to real identities, replicated by policy, verifiable by proof.
+
+
+Light blocks can authenticate a requested revision through a bounded chain of
+canonical descendants ending in a threshold certificate. The shared verifier
+checks parent hashes and contiguous heights, and returns the requested revision's
+roots and timestamp. It accepts at most 64 descendants and 8 MiB of decoded
+artifacts. A newer certified descendant does not renew the requested revision's
+freshness. Direct-certificate responses retain their existing shape.

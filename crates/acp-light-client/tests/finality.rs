@@ -5,7 +5,7 @@ use acp_light_client::{
 };
 use alloy_primitives::{keccak256, B256};
 use axum::{extract::State, routing::post, Json, Router};
-use commonware_codec::Encode as _;
+use commonware_codec::{Decode as _, Encode as _};
 use commonware_consensus::{
     simplex::types::{Finalization, Finalize, Proposal},
     types::{Epoch, Round, View},
@@ -662,4 +662,72 @@ async fn oversized_header_frames_and_fragmented_messages_close_without_publishin
         assert!(client.header_chain().state().is_none());
         assert!(client.cache().is_empty());
     }
+}
+
+#[tokio::test]
+async fn indirect_finality_preserves_requested_state_and_timestamp() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut f = fixture_records_at(
+        42,
+        vec![(KEY.to_vec(), b"allowed".to_vec())],
+        now - 60,
+        HEIGHT,
+    );
+    let target_time = f.light.timestamp;
+    let parent = Block::decode_cfg(
+        hex::decode(f.light.block.trim_start_matches("0x"))
+            .unwrap()
+            .as_slice(),
+        &hub_domain::BlockCfg {
+            max_txs: 64,
+            tx: hub_domain::TxCfg {
+                max_tx_bytes: 65_536,
+            },
+        },
+    )
+    .unwrap();
+    let mut child = parent.clone();
+    child.parent = parent.id();
+    child.height += 1;
+    child.timestamp += 60;
+    child.module_state_root = B256::repeat_byte(99);
+    child.context.parent = (parent.context.round.view(), parent.digest());
+    child.context.round = Round::new(Epoch::new(1), View::new(1));
+    let identity = ed25519::PrivateKey::from_seed(42).public_key();
+    let players = Set::from_iter_dedup([identity.clone()]);
+    let (output, shares) =
+        deal::<MinSig, _, N3f1>(TestRng::new(42), Mode::NonZeroCounter, players.clone()).unwrap();
+    let signer = LightConsensusScheme::signer(
+        LIGHT_BLOCK_NAMESPACE,
+        players,
+        output.public().clone(),
+        shares.get_value(&identity).unwrap().clone(),
+    )
+    .unwrap();
+    let vote = Finalize::sign(
+        &signer,
+        Proposal::new(child.context.round, child.context.parent.0, child.digest()),
+    )
+    .unwrap();
+    let finalization =
+        Finalization::from_finalizes(&signer, non_empty![&vote], &Sequential).unwrap();
+    f.light.finalization = format!("0x{}", hex::encode(finalization.encode()));
+    f.light.descendants = vec![format!("0x{}", hex::encode(child.encode()))];
+    let root = f.root;
+    let server = Server::start(f).await;
+    let client = server.client();
+    let state = client.verified_state(HEIGHT).await.unwrap();
+    assert_eq!(state.height, HEIGHT);
+    assert_eq!(state.timestamp, target_time);
+    assert_eq!(state.module_state_root, root);
+    let (_, authenticated) = client
+        .fetch_and_verify_proof("acp", &hex::encode(KEY), HEIGHT)
+        .await
+        .unwrap();
+    assert_eq!(authenticated, root);
+    server.fixture.write().light.descendants.clear();
+    assert!(client.verified_state(HEIGHT).await.is_err());
 }

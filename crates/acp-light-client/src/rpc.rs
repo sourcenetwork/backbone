@@ -10,7 +10,7 @@ use crate::types::{LightBlock, ModuleStateProof};
 /// Maximum state-proof response, including its JSON-RPC envelope.
 pub const STATE_PROOF_RESPONSE_BYTES: usize = (4 << 20) + 1024;
 /// Maximum light-block response, including hex-encoded block and consensus material.
-pub const LIGHT_BLOCK_RESPONSE_BYTES: usize = (16 << 20) + 1024;
+pub use hub_domain::LIGHT_BLOCK_RESPONSE_BYTES;
 /// Maximum permission response, including its JSON-RPC envelope.
 pub const PERMISSION_RESPONSE_BYTES: usize = hub_permission::PERMISSION_LIMITS.proof_bytes + 1024;
 
