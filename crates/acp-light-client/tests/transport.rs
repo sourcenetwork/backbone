@@ -34,6 +34,7 @@ impl Drop for Server {
 #[derive(Clone, Copy, Debug)]
 enum Endpoint {
     State,
+    Prefix,
     Light,
     Permission,
 }
@@ -41,7 +42,7 @@ enum Endpoint {
 impl Endpoint {
     fn maximum(self) -> usize {
         match self {
-            Self::State => rpc::RECORD_RESPONSE_BYTES,
+            Self::State | Self::Prefix => rpc::RECORD_RESPONSE_BYTES,
             Self::Light => rpc::LIGHT_BLOCK_RESPONSE_BYTES,
             Self::Permission => rpc::PERMISSION_RESPONSE_BYTES,
         }
@@ -51,6 +52,15 @@ impl Endpoint {
         let client = reqwest::Client::new();
         match self {
             Self::State => rpc::get_current_record_proof(
+                &client,
+                url,
+                acp_light_client::ModuleId::Acp,
+                &[0],
+                1,
+            )
+            .await
+            .map(|_| ()),
+            Self::Prefix => rpc::get_current_prefix_proof(
                 &client,
                 url,
                 acp_light_client::ModuleId::Acp,
@@ -78,7 +88,12 @@ impl Endpoint {
 
 #[tokio::test]
 async fn every_proof_endpoint_rejects_declared_and_streamed_oversize_bodies() {
-    for endpoint in [Endpoint::State, Endpoint::Light, Endpoint::Permission] {
+    for endpoint in [
+        Endpoint::State,
+        Endpoint::Prefix,
+        Endpoint::Light,
+        Endpoint::Permission,
+    ] {
         for declared in [true, false] {
             let maximum = endpoint.maximum();
             let app = Router::new().route(
@@ -115,7 +130,12 @@ async fn every_proof_endpoint_rejects_declared_and_streamed_oversize_bodies() {
 
 #[tokio::test]
 async fn every_proof_endpoint_checks_http_and_rpc_envelopes() {
-    for endpoint in [Endpoint::State, Endpoint::Light, Endpoint::Permission] {
+    for endpoint in [
+        Endpoint::State,
+        Endpoint::Prefix,
+        Endpoint::Light,
+        Endpoint::Permission,
+    ] {
         for (status, body, expected) in [
             (
                 StatusCode::BAD_GATEWAY,

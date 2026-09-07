@@ -114,6 +114,21 @@ impl AcpLightClient {
         Ok(allowed)
     }
 
+    /// Read the live owner or proven absence from fresh complete ownership evidence.
+    pub async fn read_object_owner(
+        &self,
+        policy: &str,
+        object: &Object,
+    ) -> eyre::Result<Option<Actor>> {
+        let minimum = self.header_chain.fresh_state()?.height;
+        let (revision, owner) = self
+            .proof_client
+            .read_current_object_owner(policy, object, minimum)
+            .await?;
+        self.header_chain.accept_response(revision)?;
+        Ok(owner)
+    }
+
     /// Read a relationship record at the verified revision.
     pub async fn read_relationship(
         &self,

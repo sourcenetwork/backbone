@@ -32,6 +32,24 @@ pub async fn get_current_record_proof(
     .await
 }
 
+/// Fetch complete current prefix evidence paired with its finalized revision.
+pub async fn get_current_prefix_proof(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    module: ModuleId,
+    prefix: &[u8],
+    minimum_height: u64,
+) -> eyre::Result<hub_permission::PrefixResponse> {
+    request(
+        client,
+        rpc_url,
+        "hub_getCurrentPrefixProof",
+        serde_json::json!([module, format!("0x{}", hex::encode(prefix)), minimum_height]),
+        RECORD_RESPONSE_BYTES,
+    )
+    .await
+}
+
 /// Fetch a finalized block and its certificate.
 pub async fn get_light_block(
     client: &reqwest::Client,

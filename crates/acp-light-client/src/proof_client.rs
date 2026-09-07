@@ -84,6 +84,27 @@ impl ProofClient {
         Ok((revision_state(&response.revision)?, allowed))
     }
 
+    /// Verify complete ownership evidence for the requested object.
+    pub async fn read_current_object_owner(
+        &self,
+        policy: &str,
+        object: &hub_permission::Object,
+        minimum_height: u64,
+    ) -> eyre::Result<(SyncState, Option<hub_permission::Actor>)> {
+        let prefix = hub_permission::object_owner_prefix(policy, object)?;
+        let response = rpc::get_current_prefix_proof(
+            &self.client,
+            &self.rpc_url,
+            ModuleId::Acp,
+            &prefix,
+            minimum_height,
+        )
+        .await?;
+        let owner =
+            response.verify_object_owner(policy, object, minimum_height, &self.trusted_key)?;
+        Ok((revision_state(&response.revision)?, owner))
+    }
+
     /// Fetch and verify a native record and its finalized revision in one response.
     pub async fn fetch_and_verify_record(
         &self,
