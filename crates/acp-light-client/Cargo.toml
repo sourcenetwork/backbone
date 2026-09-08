@@ -19,22 +19,22 @@ futures.workspace = true
 alloy-primitives = { workspace = true, features = ["serde"] }
 
 # Shared wire types and finality verification
-hub-domain = { git = "https://github.com/sourcenetwork/hub.rs", rev = "f4d78c49bb58832d4f038ed258910be67750a13d" }
-hub-permission = { git = "https://github.com/sourcenetwork/hub.rs", rev = "f4d78c49bb58832d4f038ed258910be67750a13d" }
+hub-domain = { git = "https://github.com/sourcenetwork/hub.rs", rev = "8d0507574cdd05f19bc761ba0af8b6f574436c3e" }
+hub-permission = { git = "https://github.com/sourcenetwork/hub.rs", rev = "8d0507574cdd05f19bc761ba0af8b6f574436c3e" }
 commonware-codec.workspace = true
 
 # Transport
 tokio-tungstenite = "0.26"
 
 [dev-dependencies]
-hub-modules = { git = "https://github.com/sourcenetwork/hub.rs", rev = "f4d78c49bb58832d4f038ed258910be67750a13d" }
+hub-modules = { git = "https://github.com/sourcenetwork/hub.rs", rev = "8d0507574cdd05f19bc761ba0af8b6f574436c3e" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 commonware-utils.workspace = true
 commonware-parallel = "2026.9.0"
 axum = "0.8"
-hub-backend = { git = "https://github.com/sourcenetwork/hub.rs", rev = "f4d78c49bb58832d4f038ed258910be67750a13d" }
+hub-backend = { git = "https://github.com/sourcenetwork/hub.rs", rev = "8d0507574cdd05f19bc761ba0af8b6f574436c3e" }
 commonware-glue = "2026.9.0"
 commonware-runtime = "2026.9.0"
 tempfile = "3"

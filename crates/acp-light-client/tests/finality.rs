@@ -694,7 +694,7 @@ async fn oversized_header_frames_and_fragmented_messages_close_without_publishin
 }
 
 #[tokio::test]
-async fn indirect_finality_preserves_requested_state_and_timestamp() {
+async fn epoch_end_reproposal_preserves_requested_state_and_timestamp() {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -729,6 +729,16 @@ async fn indirect_finality_preserves_requested_state_and_timestamp() {
     let players = Set::from_iter_dedup([identity.clone()]);
     let (output, shares) =
         deal::<MinSig, _, N3f1>(TestRng::new(42), Mode::NonZeroCounter, players.clone()).unwrap();
+    child.payload = Some(hub_domain::DkgPayload::EpochInfo(
+        commonware_glue::dkg::types::EpochInfo {
+            outcome: commonware_glue::dkg::types::EpochOutcome::Success,
+            epoch: Epoch::new(2),
+            output: output.clone(),
+            players: players.clone(),
+            next_players: players.clone(),
+            directory: commonware_utils::sequence::Unit,
+        },
+    ));
     let signer = LightConsensusScheme::signer(
         LIGHT_BLOCK_NAMESPACE,
         players,
@@ -738,7 +748,11 @@ async fn indirect_finality_preserves_requested_state_and_timestamp() {
     .unwrap();
     let vote = Finalize::sign(
         &signer,
-        Proposal::new(child.context.round, child.context.parent.0, child.digest()),
+        Proposal::new(
+            Round::new(Epoch::new(1), View::new(3)),
+            View::new(2),
+            child.digest(),
+        ),
     )
     .unwrap();
     let finalization =
