@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "acp"
 version = "0.5.0"
-source = "git+https://github.com/sourcenetwork/defradb.rs?rev=8a62e4c880d1dfec41dd8e089b54d28630e17d02#8a62e4c880d1dfec41dd8e089b54d28630e17d02"
+source = "git+https://github.com/sourcenetwork/defradb.rs?rev=f0814d4ebdb56363dad8d0457062808e363ecebe#f0814d4ebdb56363dad8d0457062808e363ecebe"
 dependencies = [
  "async-lock",
  "async-trait",
@@ -1262,7 +1262,7 @@ dependencies = [
  "eyre",
  "hex",
  "hub-harness 0.1.0",
- "hub-harness 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd)",
+ "hub-harness 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f)",
  "orbis-harness",
  "serde_json",
  "sha2 0.10.9",
@@ -2549,7 +2549,7 @@ dependencies = [
 [[package]]
 name = "crypto"
 version = "0.5.0"
-source = "git+https://github.com/sourcenetwork/defradb.rs?rev=8a62e4c880d1dfec41dd8e089b54d28630e17d02#8a62e4c880d1dfec41dd8e089b54d28630e17d02"
+source = "git+https://github.com/sourcenetwork/defradb.rs?rev=f0814d4ebdb56363dad8d0457062808e363ecebe#f0814d4ebdb56363dad8d0457062808e363ecebe"
 dependencies = [
  "aes-gcm",
  "blst",
@@ -2813,7 +2813,7 @@ dependencies = [
 [[package]]
 name = "defra-core"
 version = "0.5.0"
-source = "git+https://github.com/sourcenetwork/defradb.rs?rev=8a62e4c880d1dfec41dd8e089b54d28630e17d02#8a62e4c880d1dfec41dd8e089b54d28630e17d02"
+source = "git+https://github.com/sourcenetwork/defradb.rs?rev=f0814d4ebdb56363dad8d0457062808e363ecebe#f0814d4ebdb56363dad8d0457062808e363ecebe"
 dependencies = [
  "async-trait",
  "cid",
@@ -2992,7 +2992,7 @@ dependencies = [
 [[package]]
 name = "document"
 version = "0.5.0"
-source = "git+https://github.com/sourcenetwork/defradb.rs?rev=8a62e4c880d1dfec41dd8e089b54d28630e17d02#8a62e4c880d1dfec41dd8e089b54d28630e17d02"
+source = "git+https://github.com/sourcenetwork/defradb.rs?rev=f0814d4ebdb56363dad8d0457062808e363ecebe#f0814d4ebdb56363dad8d0457062808e363ecebe"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3906,7 +3906,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hub-app"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -3932,7 +3932,7 @@ dependencies = [
 [[package]]
 name = "hub-backend"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-primitives",
  "bytes",
@@ -3955,7 +3955,7 @@ dependencies = [
 [[package]]
 name = "hub-config"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "commonware-codec",
  "commonware-cryptography",
@@ -3969,7 +3969,7 @@ dependencies = [
 [[package]]
 name = "hub-consensus"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
@@ -3987,7 +3987,7 @@ dependencies = [
 [[package]]
 name = "hub-crypto"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-primitives",
  "ark-bls12-381 0.4.0",
@@ -4008,7 +4008,7 @@ dependencies = [
 [[package]]
 name = "hub-domain"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -4034,7 +4034,7 @@ dependencies = [
 [[package]]
 name = "hub-executor"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "acp",
  "alloy-consensus",
@@ -4064,7 +4064,7 @@ dependencies = [
 [[package]]
 name = "hub-genesis"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-evm",
  "commonware-codec",
@@ -4108,7 +4108,7 @@ dependencies = [
 [[package]]
 name = "hub-harness"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4129,7 +4129,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "test-infra 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd)",
+ "test-infra 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f)",
  "tokio",
  "tracing",
 ]
@@ -4137,7 +4137,7 @@ dependencies = [
 [[package]]
 name = "hub-indexer"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-primitives",
  "parking_lot",
@@ -4148,7 +4148,7 @@ dependencies = [
 [[package]]
 name = "hub-jsonrpc"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-primitives",
  "async-trait",
@@ -4176,7 +4176,7 @@ dependencies = [
 [[package]]
 name = "hub-modules"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "acp",
  "alloy-primitives",
@@ -4199,7 +4199,7 @@ dependencies = [
 [[package]]
 name = "hub-node"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -4248,7 +4248,7 @@ dependencies = [
 [[package]]
 name = "hub-overlay"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-primitives",
  "hub-qmdb",
@@ -4258,7 +4258,7 @@ dependencies = [
 [[package]]
 name = "hub-permission"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-primitives",
  "bytes",
@@ -4277,7 +4277,7 @@ dependencies = [
 [[package]]
 name = "hub-qmdb"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-primitives",
  "thiserror 2.0.18",
@@ -4286,7 +4286,7 @@ dependencies = [
 [[package]]
 name = "hub-state"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "anyhow",
  "borsh",
@@ -4298,7 +4298,7 @@ dependencies = [
 [[package]]
 name = "hub-traits"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "alloy-primitives",
  "hub-qmdb",
@@ -4567,7 +4567,7 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 [[package]]
 name = "identity"
 version = "0.5.0"
-source = "git+https://github.com/sourcenetwork/defradb.rs?rev=8a62e4c880d1dfec41dd8e089b54d28630e17d02#8a62e4c880d1dfec41dd8e089b54d28630e17d02"
+source = "git+https://github.com/sourcenetwork/defradb.rs?rev=f0814d4ebdb56363dad8d0457062808e363ecebe#f0814d4ebdb56363dad8d0457062808e363ecebe"
 dependencies = [
  "base64 0.22.1",
  "crypto 0.5.0",
@@ -7157,7 +7157,7 @@ dependencies = [
 [[package]]
 name = "schema"
 version = "0.5.0"
-source = "git+https://github.com/sourcenetwork/defradb.rs?rev=8a62e4c880d1dfec41dd8e089b54d28630e17d02#8a62e4c880d1dfec41dd8e089b54d28630e17d02"
+source = "git+https://github.com/sourcenetwork/defradb.rs?rev=f0814d4ebdb56363dad8d0457062808e363ecebe#f0814d4ebdb56363dad8d0457062808e363ecebe"
 dependencies = [
  "cid",
  "defra-core",
@@ -7814,7 +7814,7 @@ dependencies = [
 [[package]]
 name = "storage"
 version = "0.5.0"
-source = "git+https://github.com/sourcenetwork/defradb.rs?rev=8a62e4c880d1dfec41dd8e089b54d28630e17d02#8a62e4c880d1dfec41dd8e089b54d28630e17d02"
+source = "git+https://github.com/sourcenetwork/defradb.rs?rev=f0814d4ebdb56363dad8d0457062808e363ecebe#f0814d4ebdb56363dad8d0457062808e363ecebe"
 dependencies = [
  "async-trait",
  "bm25",
@@ -8155,7 +8155,7 @@ dependencies = [
 [[package]]
 name = "test-infra"
 version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=aa1fd16ae7a9022abd34af45834104ae4989d2dd#aa1fd16ae7a9022abd34af45834104ae4989d2dd"
+source = "git+https://github.com/sourcenetwork/hub.rs?rev=361f3d830666041b8afa307f3a547b239b18788f#361f3d830666041b8afa307f3a547b239b18788f"
 dependencies = [
  "eyre",
  "futures",
@@ -9461,7 +9461,7 @@ dependencies = [
 [[package]]
 name = "zanzibar"
 version = "0.5.0"
-source = "git+https://github.com/sourcenetwork/defradb.rs?rev=8a62e4c880d1dfec41dd8e089b54d28630e17d02#8a62e4c880d1dfec41dd8e089b54d28630e17d02"
+source = "git+https://github.com/sourcenetwork/defradb.rs?rev=f0814d4ebdb56363dad8d0457062808e363ecebe#f0814d4ebdb56363dad8d0457062808e363ecebe"
 dependencies = [
  "async-lock",
  "async-trait",
