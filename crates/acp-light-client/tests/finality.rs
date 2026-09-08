@@ -450,6 +450,15 @@ fn delayed_proof_cannot_restore_a_revoked_cache_entry() {
 
 #[tokio::test]
 async fn permission_requests_replay_verified_records_and_reject_removed_coverage() {
+    verify_permission_records("did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK").await;
+}
+
+#[tokio::test]
+async fn provider_actor_permissions_reject_missing_evidence_and_stale_state() {
+    verify_permission_records(&format!("did:opk:{}", "ab".repeat(32))).await;
+}
+
+async fn verify_permission_records(owner: &str) {
     use hub_modules::{
         acp::{
             types::{PolicyCmd, PolicyMarshalingType},
@@ -462,9 +471,7 @@ async fn permission_requests_replay_verified_records_and_reject_removed_coverage
         PERMISSION_LIMITS,
     };
     let mut module = AcpModule::new();
-    let owner = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
-        .parse()
-        .unwrap();
+    let owner = owner.parse().unwrap();
     let policy = module
         .create_policy(
             &owner,
