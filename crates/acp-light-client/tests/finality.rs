@@ -59,6 +59,16 @@ fn fixture_records_at(
     timestamp: u64,
     height: u64,
 ) -> Fixture {
+    fixture_records_with_operations(seed, records, timestamp, height, 0)
+}
+
+fn fixture_records_with_operations(
+    seed: u64,
+    records: Vec<(Vec<u8>, Vec<u8>)>,
+    timestamp: u64,
+    height: u64,
+    operations: usize,
+) -> Fixture {
     let (root, points, proof) = std::thread::spawn(move || {
         use commonware_glue::stateful::db::DatabaseSet;
         use commonware_runtime::{buffer::paged::CacheRef, tokio, Runner as _, Supervisor as _};
@@ -133,7 +143,9 @@ fn fixture_records_at(
         prevrandao: B256::ZERO,
         state_root: StateRoot(B256::repeat_byte(1)),
         module_state_root: root,
-        txs: vec![],
+        txs: (0..operations)
+            .map(|index| hub_domain::Tx::new(index.to_be_bytes().to_vec().into()))
+            .collect(),
         payload: None,
         db_targets: DbTargets::default(),
         native_targets: Some(Default::default()),
@@ -820,4 +832,25 @@ async fn epoch_end_reproposal_preserves_requested_state_and_timestamp() {
     );
     server.fixture.write().light.descendants.clear();
     assert!(client.verified_state(HEIGHT).await.is_err());
+}
+
+#[tokio::test]
+async fn current_protocol_revision_count_is_verified_and_bounded() {
+    for operations in [256, 257] {
+        let data = fixture_records_with_operations(
+            42,
+            vec![(KEY.to_vec(), b"allowed".to_vec())],
+            1_700_000_000,
+            HEIGHT,
+            operations,
+        );
+        let expected_root = data.root;
+        let server = Server::start(data).await;
+        let result = server.client().verified_state(HEIGHT).await;
+        if operations == 256 {
+            assert_eq!(result.unwrap().module_state_root, expected_root);
+        } else {
+            assert!(result.is_err());
+        }
+    }
 }

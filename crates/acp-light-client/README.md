@@ -7,6 +7,10 @@ relationship and persisted access-decision records, and
 evidence with its certified revision. HTTP responses and header messages are bounded
 before deserialization.
 
+The pinned verifier accepts up to 256 operations per revision while retaining
+the shared encoded-byte limits. Applications pinned to the older 64-operation
+verifier must update before connecting to nodes that produce larger revisions.
+
 Each request requires at least the latest verified height. A newer certified response
 can advance the client's tracked revision ahead of its header subscription. Delayed
 headers cannot move that state backward; repeated certificates cannot renew its
