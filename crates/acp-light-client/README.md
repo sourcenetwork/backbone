@@ -24,3 +24,8 @@ The default freshness policy permits revisions less than 30 seconds old and at m
 15 seconds in the future. Transport operations have a ten-second deadline. A caller
 may configure stricter age and clock-skew bounds. Arbitrary historical native record
 reads are not provided.
+
+Header synchronization uses `hub_subscribeHeaders` and accepts `hub_header`
+notifications only for the acknowledged subscription ID. The acknowledgement
+must arrive within ten seconds. Notifications still require independent finality
+verification before they can advance cached state.

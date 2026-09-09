@@ -1,6 +1,6 @@
 //! WebSocket header subscription and tracking.
 //!
-//! Subscribes to `eth_subscribe("headers")` and maintains a view of the
+//! Subscribes to `hub_subscribeHeaders` and maintains a view of the
 //! latest finalized revision after checking its certificate against a configured key.
 
 use alloy_primitives::B256;
@@ -30,7 +30,7 @@ pub struct SyncState {
 
 /// Tracks the latest finalized header state from WebSocket subscription.
 ///
-/// Spawns a background task that subscribes to `eth_subscribe("headers")`,
+/// Spawns a background task that subscribes to `hub_subscribeHeaders`,
 /// authenticates the requested light blocks, and updates the latest finalized
 /// `(height, module_state_root)`.
 pub struct HeaderChain {
@@ -206,16 +206,24 @@ async fn run_header_loop(
 
     let subscribe_msg = serde_json::json!({
         "jsonrpc": "2.0",
-        "method": "eth_subscribe",
-        "params": ["headers"],
+        "method": "hub_subscribeHeaders",
+        "params": [],
         "id": 1,
     });
     ws.send(Message::Text(subscribe_msg.to_string().into()))
         .await
-        .wrap_err("sending eth_subscribe")?;
+        .wrap_err("sending hub_subscribeHeaders")?;
 
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut subscription = None;
     loop {
-        let msg = ws.next().await;
+        let msg = if subscription.is_none() {
+            tokio::time::timeout_at(deadline, ws.next())
+                .await
+                .wrap_err("header subscription acknowledgement timeout")?
+        } else {
+            ws.next().await
+        };
         let msg = match msg {
             Some(Ok(msg)) => msg,
             Some(Err(e)) => return Err(eyre::eyre!("websocket error: {e}")),
@@ -224,7 +232,11 @@ async fn run_header_loop(
 
         if let Message::Text(ref text) = msg {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(text.as_ref()) {
-                if let Some(header) = extract_header(&json) {
+                let Some(subscription_id) = subscription.as_ref() else {
+                    subscription = Some(subscription_id(&json)?);
+                    continue;
+                };
+                if let Some(header) = extract_header(&json, subscription_id) {
                     if state
                         .read()
                         .as_ref()
@@ -277,8 +289,32 @@ fn observe_revision(
     Ok(current)
 }
 
-fn extract_header(msg: &serde_json::Value) -> Option<GossipHeader> {
-    if msg["jsonrpc"] != "2.0" || msg["method"] != "eth_subscription" {
+fn subscription_id(msg: &serde_json::Value) -> eyre::Result<serde_json::Value> {
+    eyre::ensure!(
+        msg["jsonrpc"] == "2.0" && msg["id"] == 1,
+        "invalid header subscription acknowledgement"
+    );
+    eyre::ensure!(
+        msg.get("error").is_none(),
+        "header subscription rejected: {}",
+        msg["error"]
+    );
+    let id = &msg["result"];
+    eyre::ensure!(
+        id.is_string() || id.as_u64().is_some(),
+        "invalid header subscription ID"
+    );
+    Ok(id.clone())
+}
+
+fn extract_header(
+    msg: &serde_json::Value,
+    subscription_id: &serde_json::Value,
+) -> Option<GossipHeader> {
+    if msg["jsonrpc"] != "2.0"
+        || msg["method"] != "hub_header"
+        || msg.pointer("/params/subscription") != Some(subscription_id)
+    {
         return None;
     }
     let result = msg.pointer("/params/result")?;
@@ -303,6 +339,52 @@ async fn authenticate_header(
 
 #[cfg(test)]
 mod tests {
+    use super::{extract_header, subscription_id};
+    use serde_json::json;
+
+    #[test]
+    fn header_subscription_acknowledgement_requires_matching_request_and_typed_id() {
+        for id in [json!("stream"), json!(7)] {
+            assert_eq!(
+                subscription_id(&json!({"jsonrpc":"2.0", "id":1, "result":id})).unwrap(),
+                id
+            );
+        }
+        for message in [
+            json!({"jsonrpc":"2.0", "id":2, "result":"stream"}),
+            json!({"jsonrpc":"1.0", "id":1, "result":"stream"}),
+            json!({"jsonrpc":"2.0", "id":1, "result":null}),
+            json!({"jsonrpc":"2.0", "id":1, "result":-1}),
+            json!({"jsonrpc":"2.0", "id":1, "result":{}, "error":{"code":-1}}),
+            json!({"jsonrpc":"2.0", "method":"hub_header", "params":{}}),
+        ] {
+            assert!(subscription_id(&message).is_err(), "{message}");
+        }
+    }
+
+    #[test]
+    fn header_subscription_notifications_match_method_and_exact_id() {
+        let header = super::GossipHeader {
+            chain_id: 1,
+            height: 1,
+            block_hash: Default::default(),
+            parent_hash: Default::default(),
+            timestamp: 1,
+            state_root: Default::default(),
+            module_state_root: Default::default(),
+            tx_count: 0,
+            publisher_index: 0,
+            signature: vec![],
+        };
+        let mut message = json!({"jsonrpc":"2.0", "method":"hub_header", "params":{"subscription":"7", "result":header}});
+        assert!(extract_header(&message, &json!("7")).is_some());
+        for id in [json!(7), json!("other"), json!(null)] {
+            assert!(extract_header(&message, &id).is_none());
+        }
+        message["method"] = json!("eth_subscription");
+        assert!(extract_header(&message, &json!("7")).is_none());
+    }
+
     use super::*;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
