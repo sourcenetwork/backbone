@@ -172,6 +172,8 @@ impl DefraNode for RustNode {
                 args.extend([
                     "--source-hub-address".into(),
                     sh.lcd_url.clone(),
+                    "--source-hub-grpc-address".into(),
+                    sh.grpc_url.clone(),
                     "--source-hub-comet-address".into(),
                     sh.comet_rpc_url.clone(),
                     "--source-hub-chain-id".into(),
@@ -263,5 +265,30 @@ mod tests {
         let (_binary, args, _envs) = node.command_parts(&test_config());
 
         assert!(!args.iter().any(|a| a == "--max-schema-size"));
+    }
+
+    #[test]
+    fn source_hub_passes_distinct_lcd_and_grpc_addresses() {
+        let node = RustNode::from_binary("/nonexistent/defra");
+        let mut config = test_config();
+        config.source_hub = Some(sourcehub_harness::SourceHubConfig {
+            lcd_url: "http://127.0.0.1:1317".to_string(),
+            comet_rpc_url: "http://127.0.0.1:26657".to_string(),
+            grpc_url: "http://127.0.0.1:9090".to_string(),
+            chain_id: "sourcehub-test".to_string(),
+        });
+
+        let (_binary, args, _envs) = node.command_parts(&config);
+
+        let grpc_flag = args
+            .iter()
+            .position(|argument| argument == "--source-hub-grpc-address")
+            .expect("gRPC address flag should be present");
+        assert_eq!(args[grpc_flag + 1], "http://127.0.0.1:9090");
+        let lcd_flag = args
+            .iter()
+            .position(|argument| argument == "--source-hub-address")
+            .expect("LCD address flag should be present");
+        assert_eq!(args[lcd_flag + 1], "http://127.0.0.1:1317");
     }
 }
