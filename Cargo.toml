@@ -61,7 +61,7 @@ orbis-harness = { path = "crates/orbis-harness" }
 defra-harness = { path = "crates/defra-harness" }
 hub-harness = { path = "crates/hub-harness" }
 acp-light-client = { path = "crates/acp-light-client" }
-vera-harness = { package = "hub-harness", git = "https://github.com/sourcenetwork/hub.rs", rev = "8d0507574cdd05f19bc761ba0af8b6f574436c3e" }
+vera-harness = { package = "hub-harness", git = "https://github.com/sourcenetwork/hub.rs", rev = "e68cc631ec4d0b5a703055d201d7c5d3cadd6d69" }
 commonware-codec.workspace = true
 test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }
