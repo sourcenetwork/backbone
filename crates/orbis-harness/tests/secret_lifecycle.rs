@@ -29,7 +29,7 @@ resources:
 "#;
 
 #[tokio::test]
-#[ignore = "requires sourcehubd on PATH and ~2 min runtime"]
+#[ignore = "requires verad on PATH and ~2 min runtime"]
 async fn dkg_store_pre_decrypt_full_pipeline() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -214,7 +214,7 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     // ================================================================
     for obj_id in [&object_id_manual, &object_id_derived] {
         sourcehub_cli
-            .register_object(&policy_id, obj_id, resource)
+            .register_object(&policy_id, resource, obj_id)
             .expect("register_object_to_chain");
 
         sourcehub_cli

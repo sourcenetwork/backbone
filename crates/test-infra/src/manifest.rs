@@ -23,6 +23,9 @@ pub struct ComponentPin {
     #[serde(rename = "ref")]
     pub git_ref: Option<String>,
     pub cargo_package: Option<String>,
+    /// Go main package to `go build` (e.g. `./cmd/verad`). A component sets
+    /// either this or `cargo_package`, never both.
+    pub go_package: Option<String>,
 }
 
 const MANIFEST_FILENAME: &str = "backbone.toml";

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use defra_harness::node::RustNode;
 use defra_harness::sse::{open_acp_events_sse, wait_for_acp_invalidation};
 use defra_harness::{DefraClient, NodeKind};
+use orbis_harness::cli::ed25519_identity_hex;
 use orbis_harness::cli::signer_did_for_pk;
 use orbis_harness::cli::types::RingPayload;
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
@@ -546,6 +547,7 @@ async fn secure_training_data_compartments() {
         endpoint: ring.node(0).grpc_addr(),
         ring_id: ring_id.clone(),
         derivation: "acme-corp".to_string(),
+        service_identity: Some(ed25519_identity_hex(&acme_defra_svc.private_key_hex)),
     });
 
     let acme_defra = start_node(&acme_defra_node, acme_defra_config, Duration::from_secs(30))
@@ -586,6 +588,7 @@ async fn secure_training_data_compartments() {
         endpoint: ring.node(0).grpc_addr(),
         ring_id: ring_id.clone(),
         derivation: "platform".to_string(),
+        service_identity: Some(ed25519_identity_hex(&platform_defra_svc.private_key_hex)),
     });
 
     let platform_defra = start_node(
@@ -877,6 +880,7 @@ async fn secure_training_data_compartments() {
         endpoint: ring.node(0).grpc_addr(),
         ring_id: ring_id.clone(),
         derivation: "globex-inc".to_string(),
+        service_identity: Some(ed25519_identity_hex(&globex_defra_svc.private_key_hex)),
     });
 
     let globex_defra = start_node(

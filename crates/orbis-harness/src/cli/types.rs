@@ -14,11 +14,12 @@ pub struct DkgResult {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+/// Result of `store-prepared-secret`, read from the command's labelled text
+/// output (it prints a report rather than JSON).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreSecretResult {
     pub status: String,
     pub message: String,
-    pub created_at: i64,
     pub object_id: String,
     pub ring_id: String,
     pub signature: String,
@@ -55,12 +56,6 @@ pub struct PreparedSecret {
     pub metadata: Vec<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived_pk: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReaderKeyResult {
-    pub secret_key: String,
-    pub public_key: String,
 }
 
 #[derive(Debug, Deserialize)]

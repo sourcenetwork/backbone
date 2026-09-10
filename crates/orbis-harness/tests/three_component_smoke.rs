@@ -33,7 +33,7 @@ resources:
 "#;
 
 #[tokio::test]
-#[ignore = "requires sourcehubd and defra on PATH, ~2 min runtime"]
+#[ignore = "requires verad and defra on PATH, ~2 min runtime"]
 async fn three_component_smoke() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -130,8 +130,7 @@ async fn three_component_smoke() {
         .expect("ring should start");
 
     // Fund orbis nodes' generated signing keys via the SourceHub faucet.
-    let sourcehub_cli =
-        SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
+    let sourcehub_cli = SourceHubCliClient::from_node(&sourcehub).expect("resolve verad binary");
     for i in 0..ring.node_count() {
         let pk_path = ring.node(i).data_dir().join("data/public_key.txt");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);

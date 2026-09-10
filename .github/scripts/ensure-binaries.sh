@@ -8,12 +8,15 @@ set -euo pipefail
 # (branch, tag, or commit SHA).
 #
 # defra and hub.rs binaries are downloaded as GitHub Actions artifacts
-# from their CI workflows. The exact commit for each ref must have a
-# successful CI run with uploaded artifacts, or this script fails.
+# from their CI workflows when the pinned commit has them. Those artifacts
+# are only produced on a push to main, so a ref pinned to a branch still
+# under review has none; that case falls back to a source build rather than
+# failing, because a pinned branch is the normal state while a cross-repo
+# change is in flight.
 #
-# orbis-rs has no CI artifact pipeline, so this script resolves the
-# commit, clones/fetches into a persistent local checkout, and does
-# an incremental cargo build --release.
+# orbis-rs has no CI artifact pipeline at all, so it is always built from
+# source: resolve the commit, clone or fetch into a persistent local
+# checkout, and do an incremental cargo build --release.
 #
 # Required:
 #   backbone.toml    — in the repo root (or any ancestor directory)
@@ -90,11 +93,11 @@ resolve_commit() {
 }
 
 # Download a binary artifact from a GitHub Actions workflow run.
+# Try to place $binary_name in the cache from a CI artifact. Returns non-zero
+# without exiting when the commit has no successful run or that run published
+# no matching artifact, so the caller can build from source instead.
 download_artifact() {
-    local repo=$1 ref=$2 artifact_name=$3 binary_name=$4
-    local commit
-    commit=$(resolve_commit "$repo" "$ref")
-    echo "$repo: $ref → ${commit:0:12}"
+    local repo=$1 commit=$2 artifact_name=$3 binary_name=$4
 
     local run_id
     run_id=$(gh run list -R "sourcenetwork/$repo" \
@@ -102,29 +105,33 @@ download_artifact() {
         --limit 1 --json databaseId -q '.[0].databaseId')
 
     if [[ -z "$run_id" ]]; then
-        echo "  ERROR: no successful CI run found for $repo@${commit:0:12}" >&2
-        echo "  The CI for $repo must complete successfully before backbone CI can run." >&2
-        exit 1
+        echo "  no successful CI run for $repo@${commit:0:12}"
+        return 1
     fi
 
     echo "  Downloading $artifact_name from run $run_id..."
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    gh run download "$run_id" -R "sourcenetwork/$repo" \
-        --name "$artifact_name" --dir "$tmp_dir"
+    if ! gh run download "$run_id" -R "sourcenetwork/$repo" \
+        --name "$artifact_name" --dir "$tmp_dir" 2>/dev/null; then
+        echo "  run $run_id published no $artifact_name"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
 
     local found
     found=$(find "$tmp_dir" -type f | head -1)
     if [[ -z "$found" ]]; then
-        echo "  ERROR: artifact $artifact_name was empty" >&2
+        echo "  artifact $artifact_name was empty"
         rm -rf "$tmp_dir"
-        exit 1
+        return 1
     fi
 
     cp "$found" "$CACHE_DIR/$binary_name"
     chmod +x "$CACHE_DIR/$binary_name"
     rm -rf "$tmp_dir"
-    echo "  $binary_name: ready"
+    echo "  $binary_name: ready (artifact)"
+    return 0
 }
 
 # --- orbis-rs helper functions (source build, no CI artifacts) ---
@@ -246,11 +253,31 @@ for var in DEFRA_REPO DEFRA_REF HUBD_REPO HUBD_REF ORBIS_REPO ORBIS_REF; do
     echo "  $var=${!var}"
 done
 
-# defra and hub.rs: download release artifacts from their CI
+# defra and hub.rs: prefer a CI artifact, build from source when the pinned
+# commit has none. Their artifact jobs are gated on a push to main, so a ref
+# pinned to a branch under review always takes the source path.
 echo ""
-echo "--- defra/hub.rs (GitHub Actions artifacts) ---"
-download_artifact "$DEFRA_REPO" "$DEFRA_REF" "defra-iroh-aarch64-apple-darwin" "defra-iroh"
-download_artifact "$HUBD_REPO" "$HUBD_REF" "hubd-aarch64-apple-darwin" "hubd"
+echo "--- defra (artifact, else source) ---"
+DEFRA_COMMIT=$(resolve_commit "$DEFRA_REPO" "$DEFRA_REF")
+echo "$DEFRA_REPO: $DEFRA_REF → ${DEFRA_COMMIT:0:12}"
+if ! download_artifact "$DEFRA_REPO" "$DEFRA_COMMIT" \
+    "defra-iroh-aarch64-apple-darwin" "defra-iroh"; then
+    echo "  Falling back to a source build."
+    build_if_missing "$DEFRA_REPO" "$DEFRA_REF" "$DEFRA_COMMIT" \
+        "cli:defra:defra-iroh:sourcehub,orbis,iroh"
+    prune_old_versions "$DEFRA_REPO"
+fi
+
+echo ""
+echo "--- hub.rs (artifact, else source) ---"
+HUBD_COMMIT=$(resolve_commit "$HUBD_REPO" "$HUBD_REF")
+echo "$HUBD_REPO: $HUBD_REF → ${HUBD_COMMIT:0:12}"
+if ! download_artifact "$HUBD_REPO" "$HUBD_COMMIT" \
+    "hubd-aarch64-apple-darwin" "hubd"; then
+    echo "  Falling back to a source build."
+    build_if_missing "$HUBD_REPO" "$HUBD_REF" "$HUBD_COMMIT" "hubd:hubd"
+    prune_old_versions "$HUBD_REPO"
+fi
 
 # orbis-rs: no CI artifact pipeline, build from source
 echo ""

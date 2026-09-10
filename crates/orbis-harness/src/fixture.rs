@@ -38,12 +38,12 @@ impl DkgFixture {
     }
 }
 
-/// Start a 3-node ring with SourceHub, run DKG, and return the fixture.
+/// Start a 3-node ring with Vera, run DKG, and return the fixture.
 ///
 /// This takes ~30-40s. The returned fixture owns all processes — they are
 /// killed when the fixture is dropped.
 pub async fn setup_dkg() -> DkgFixture {
-    eprintln!("[fixture] Starting DKG fixture (3 nodes + SourceHub)...");
+    eprintln!("[fixture] Starting DKG fixture (3 nodes + Vera)...");
 
     let run_id = generate_run_id();
     let base_dir = crate::e2e_base_dir();
@@ -83,7 +83,7 @@ pub async fn setup_dkg() -> DkgFixture {
 
     // Fund orbis nodes' generated signing keys via the SourceHub faucet.
     let sourcehub_cli =
-        SourceHubCliClient::from_node(&sourcehub).expect("fixture: resolve sourcehubd binary");
+        SourceHubCliClient::from_node(&sourcehub).expect("fixture: resolve verad binary");
     for i in 0..ring.node_count() {
         let pk_path = ring.node(i).data_dir().join("data/public_key.txt");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);

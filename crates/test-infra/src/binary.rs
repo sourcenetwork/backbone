@@ -1,6 +1,6 @@
 //! Version-aware binary resolution for integration test dependencies.
 //!
-//! Each component in the stack (defra, hubd, orbis-node, sourcehubd) needs to be
+//! Each component in the stack (defra, hubd, orbis-node, verad) needs to be
 //! resolved at test time. The resolution order supports both local development
 //! (dirty working tree) and CI (pinned versions):
 //!
@@ -284,11 +284,6 @@ impl BinaryResolver {
             _ => return Ok(None),
         };
 
-        let pkg = pin
-            .cargo_package
-            .as_deref()
-            .or(self.default_cargo_package.as_deref());
-
         tracing::info!(
             prefix = %self.prefix,
             repo = repo,
@@ -297,15 +292,55 @@ impl BinaryResolver {
             self.binary_name
         );
 
+        if let Some(go_pkg) = pin.go_package.as_deref() {
+            return self.build_go_from_git(repo, git_ref, go_pkg).map(Some);
+        }
+
+        let pkg = pin
+            .cargo_package
+            .as_deref()
+            .or(self.default_cargo_package.as_deref());
         self.build_from_git(repo, git_ref, pkg).map(Some)
     }
 
-    fn build_from_git(
-        &self,
-        repo: &str,
-        git_ref: &str,
-        cargo_package: Option<&str>,
-    ) -> Result<ResolvedBinary> {
+    /// Clone (or refresh) `repo` at `git_ref` and `go build` the main package
+    /// `go_pkg` into `<build dir>/target/<binary>`. Requires `go` on PATH.
+    fn build_go_from_git(&self, repo: &str, git_ref: &str, go_pkg: &str) -> Result<ResolvedBinary> {
+        let build_dir = self.checkout_from_git(repo, git_ref)?;
+        let out_dir = build_dir.join("target");
+        std::fs::create_dir_all(&out_dir)?;
+        let binary_path = out_dir.join(&self.binary_name);
+
+        let status = Command::new("go")
+            .args(["build", "-o"])
+            .arg(&binary_path)
+            .arg(go_pkg)
+            .current_dir(&build_dir)
+            .status()
+            .wrap_err("go build from source failed (is `go` on PATH?)")?;
+        eyre::ensure!(
+            status.success(),
+            "go build {} failed for {} @ {}",
+            go_pkg,
+            repo,
+            git_ref
+        );
+        eyre::ensure!(binary_path.exists(), "Binary not found after go build");
+
+        let version = self.extract_version(&binary_path);
+        Ok(ResolvedBinary {
+            path: binary_path,
+            version,
+            source: BinarySource::BuiltFromSource {
+                repo: repo.to_string(),
+                git_ref: git_ref.to_string(),
+            },
+        })
+    }
+
+    /// Shallow-clone `repo` at `git_ref` into the per-binary build directory,
+    /// or fast-forward an existing clone to the ref's current tip.
+    fn checkout_from_git(&self, repo: &str, git_ref: &str) -> Result<PathBuf> {
         let build_dir = std::env::temp_dir()
             .join("backbone-builds")
             .join(&self.binary_name)
@@ -341,6 +376,16 @@ impl BinaryResolver {
                 .current_dir(&build_dir)
                 .status();
         }
+        Ok(build_dir)
+    }
+
+    fn build_from_git(
+        &self,
+        repo: &str,
+        git_ref: &str,
+        cargo_package: Option<&str>,
+    ) -> Result<ResolvedBinary> {
+        let build_dir = self.checkout_from_git(repo, git_ref)?;
 
         // Create sibling symlinks (e.g. ../backbone → /path/to/backbone)
         if let Some(parent) = build_dir.parent() {

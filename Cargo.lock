@@ -909,6 +909,7 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-types",
+ "blst",
  "bs58",
  "defra-harness",
  "eyre",

@@ -49,6 +49,10 @@ impl OrbisRing {
         &self.nodes[index]
     }
 
+    pub fn node_mut(&mut self, index: usize) -> &mut OrbisNode {
+        &mut self.nodes[index]
+    }
+
     pub fn nodes(&self) -> &[OrbisNode] {
         &self.nodes
     }
@@ -229,7 +233,9 @@ impl OrbisRingBuilder {
                     hub.chain_id.to_string(),
                 ]);
             } else if let Some(ref sh) = self.sourcehub_config {
-                // Legacy SourceHub mode: all services via SourceHub
+                // Vera mode: authz, bulletin, and chain all via the Go chain.
+                // The chain id is signed into every transaction, so it must be
+                // the devnet's, not the binary's built-in default.
                 args_owned.extend([
                     "--authz-grpc".to_string(),
                     sh.grpc_url.clone(),
@@ -239,6 +245,8 @@ impl OrbisRingBuilder {
                     sh.comet_rpc_url.clone(),
                     "--chain-rest".to_string(),
                     sh.lcd_url.clone(),
+                    "--chain-id".to_string(),
+                    sh.chain_id.clone(),
                 ]);
             }
 

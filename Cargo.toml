@@ -56,6 +56,10 @@ path = "tests/full_stack.rs"
 name = "hub_light_client"
 path = "tests/hub_light_client.rs"
 
+[[test]]
+name = "gents_cloud"
+path = "tests/gents_cloud/main.rs"
+
 [dev-dependencies]
 orbis-harness = { path = "crates/orbis-harness" }
 defra-harness = { path = "crates/defra-harness" }
@@ -68,6 +72,7 @@ hex.workspace = true
 bs58 = "0.5"
 eyre.workspace = true
 sha2 = "0.10"
+blst = "0.3"
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 alloy-primitives.workspace = true

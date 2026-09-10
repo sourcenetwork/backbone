@@ -488,6 +488,7 @@ impl TestClusterBuilder {
                 acp_request_timeout: self.acp_request_timeout,
                 acp_receipt_timeout: self.acp_receipt_timeout,
                 extra_args: self.extra_rust_args.clone(),
+                extra_envs: Vec::new(),
             };
 
             let mut attempt = 1;
@@ -588,6 +589,7 @@ impl TestClusterBuilder {
                 acp_request_timeout: self.acp_request_timeout,
                 acp_receipt_timeout: self.acp_receipt_timeout,
                 extra_args: Vec::new(),
+                extra_envs: Vec::new(),
             };
 
             let mut attempt = 1;

@@ -69,9 +69,14 @@ impl OrbisCliClient {
     }
 
     /// Run a command with `--output json` and deserialize the result.
+    ///
+    /// Some subcommands print a human-readable heading before the JSON body,
+    /// so parsing starts at the first `{` or `[`.
     fn parse<T: serde::de::DeserializeOwned>(&self, args: &[&str]) -> Result<T> {
         let stdout = self.exec_json(args)?;
-        serde_json::from_str(&stdout).map_err(|e| {
+        let json = json_body(&stdout)
+            .ok_or_else(|| eyre!("no JSON body in cli-tool output: stdout={}", stdout))?;
+        serde_json::from_str(json).map_err(|e| {
             eyre!(
                 "failed to parse cli-tool JSON output: {}: stdout={}",
                 e,
@@ -205,8 +210,11 @@ impl OrbisCliClient {
         signer_did_pk: Option<&str>,
         acp: Option<&SignAcpFields>,
     ) -> Result<SignResult> {
+        // `utility-sign` is the UtilityService pathway that takes a ring id and
+        // an optional ACP tuple directly. The `sign` subcommand is the separate
+        // KeyDerivation pathway and takes a derivation id instead.
         let mut args = vec![
-            "sign",
+            "utility-sign",
             "--endpoint",
             endpoint,
             "--ring-id",
@@ -223,13 +231,13 @@ impl OrbisCliClient {
             args.push(pk);
         }
         if let Some(acp) = acp {
-            args.push("--acp-policy-id");
+            args.push("--policy-id");
             args.push(&acp.policy_id);
-            args.push("--acp-resource");
+            args.push("--resource");
             args.push(&acp.resource);
-            args.push("--acp-object-id");
+            args.push("--object-id");
             args.push(&acp.object_id);
-            args.push("--acp-permission");
+            args.push("--permission");
             args.push(&acp.permission);
         }
         self.parse(&args)
@@ -310,7 +318,8 @@ impl OrbisCliClient {
         if with_proof {
             args.push("--with-proof");
         }
-        self.parse(&args)
+        let stdout = self.exec(&args)?;
+        parse_store_secret_result(&stdout)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -353,8 +362,104 @@ impl OrbisCliClient {
             .map_err(|e| eyre!("failed to decode PRE result hex: {}", e))
     }
 
+    /// Generate a PRE reader keypair, returning `(secret_key_hex, public_key_hex)`.
+    ///
+    /// `generate-reader-key` prints a labelled text block and ignores
+    /// `--output json`, so the hex values are read from the lines following
+    /// their labels rather than parsed as JSON.
     pub fn generate_reader_key(&self) -> Result<(String, String)> {
-        let result: ReaderKeyResult = self.parse(&["generate-reader-key"])?;
-        Ok((result.secret_key, result.public_key))
+        let stdout = self.exec(&["generate-reader-key"])?;
+        let secret_key = value_after_label(&stdout, "Reader Secret Key")
+            .ok_or_else(|| eyre!("no reader secret key in output: {}", stdout))?;
+        let public_key = value_after_label(&stdout, "Reader Public Key")
+            .ok_or_else(|| eyre!("no reader public key in output: {}", stdout))?;
+        Ok((secret_key, public_key))
+    }
+}
+
+/// Parse the labelled report `store-prepared-secret` prints.
+///
+/// The command reports `Status`, `Message`, `Object ID`, `Ring ID` and
+/// `signature` as `  Label: value` lines under a heading, and ignores
+/// `--output json`.
+fn parse_store_secret_result(output: &str) -> Result<StoreSecretResult> {
+    let field = |label: &str| -> Option<String> {
+        output.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            (key.trim() == label).then(|| value.trim().to_string())
+        })
+    };
+    let missing = |label: &str| eyre!("no `{}` in store-secret output: {}", label, output);
+    Ok(StoreSecretResult {
+        status: field("Status").ok_or_else(|| missing("Status"))?,
+        message: field("Message").ok_or_else(|| missing("Message"))?,
+        object_id: field("Object ID").ok_or_else(|| missing("Object ID"))?,
+        ring_id: field("Ring ID").ok_or_else(|| missing("Ring ID"))?,
+        signature: field("signature").ok_or_else(|| missing("signature"))?,
+    })
+}
+
+/// The JSON body of a cli-tool response, skipping any human-readable heading.
+fn json_body(output: &str) -> Option<&str> {
+    let start = output.find(['{', '['])?;
+    Some(output[start..].trim())
+}
+
+/// First non-empty line after the line containing `label`.
+fn value_after_label(output: &str, label: &str) -> Option<String> {
+    let mut lines = output.lines().skip_while(|line| !line.contains(label));
+    lines.next()?;
+    lines
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::value_after_label;
+
+    #[test]
+    fn reads_the_hex_under_a_label() {
+        let output = "Generated Reader Keypair:\n====\nReader Secret Key (--reader-sk):\nabc123\n\nReader Public Key (--reader-pk):\ndef456";
+        assert_eq!(
+            value_after_label(output, "Reader Secret Key").as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            value_after_label(output, "Reader Public Key").as_deref(),
+            Some("def456")
+        );
+    }
+
+    #[test]
+    fn parses_the_store_secret_report() {
+        let output = "StoreSecret Result:\n====\n  Status: success\n  Message: Secret stored successfully\n  Object ID: abc\n  Ring ID: ring1\n  signature: sig1\n  enc_cmt: cmt";
+        let result = super::parse_store_secret_result(output).expect("parse");
+        assert_eq!(result.status, "success");
+        assert_eq!(result.object_id, "abc");
+        assert_eq!(result.ring_id, "ring1");
+        assert_eq!(result.signature, "sig1");
+    }
+
+    #[test]
+    fn store_secret_report_missing_a_field_is_an_error() {
+        assert!(super::parse_store_secret_result("Status: success").is_err());
+    }
+
+    #[test]
+    fn json_body_skips_a_heading() {
+        let output = "Prepared Secret (save this):\n====\n{\n  \"a\": 1\n}";
+        assert_eq!(super::json_body(output), Some("{\n  \"a\": 1\n}"));
+    }
+
+    #[test]
+    fn json_body_is_none_without_json() {
+        assert!(super::json_body("no json here").is_none());
+    }
+
+    #[test]
+    fn returns_none_when_the_label_is_absent() {
+        assert!(value_after_label("nothing here", "Reader Secret Key").is_none());
     }
 }

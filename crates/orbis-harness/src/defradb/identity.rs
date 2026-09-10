@@ -36,6 +36,22 @@ pub fn did_key_from_secp256k1(private_key_hex: &str) -> Result<(String, Vec<u8>)
 
 /// Generate an ES256K JWT compatible with DefraDB's identity extractor.
 pub fn generate_defra_jwt(private_key_hex: &str, audience: &str) -> Result<String> {
+    generate_defra_jwt_with_account(private_key_hex, audience, None)
+}
+
+/// Generate an ES256K JWT that DefraDB accepts and that Vera also accepts as
+/// the bearer token behind `MsgBearerPolicyCmd`.
+///
+/// DefraDB stores the request JWT keyed by DID and passes it through to Vera
+/// when it registers a document object (`resolve_cosmos_bearer_token`). Vera
+/// then requires an `authorized_account` claim equal to the transaction
+/// creator, which is the DefraDB node's own `vera1...` address. Without the
+/// claim the registration transaction is rejected and the create fails.
+pub fn generate_defra_jwt_with_account(
+    private_key_hex: &str,
+    audience: &str,
+    authorized_account: Option<&str>,
+) -> Result<String> {
     let key_bytes = hex::decode(private_key_hex).map_err(|e| eyre!("invalid hex key: {}", e))?;
     let signing_key =
         SigningKey::from_slice(&key_bytes).map_err(|e| eyre!("invalid secp256k1 key: {}", e))?;
@@ -56,7 +72,7 @@ pub fn generate_defra_jwt(private_key_hex: &str, audience: &str) -> Result<Strin
     let header = serde_json::json!({"alg": "ES256K", "typ": "JWT"});
     let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
 
-    let claims = serde_json::json!({
+    let mut claims = serde_json::json!({
         "sub": sub,
         "iss": did_key,
         "exp": now + 900,
@@ -65,6 +81,9 @@ pub fn generate_defra_jwt(private_key_hex: &str, audience: &str) -> Result<Strin
         "aud": [aud],
         "key_type": "secp256k1",
     });
+    if let Some(account) = authorized_account {
+        claims["authorized_account"] = serde_json::Value::String(account.to_string());
+    }
     let claims_b64 = URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
 
     let message = format!("{}.{}", header_b64, claims_b64);
@@ -82,6 +101,26 @@ pub fn generate_defra_jwt(private_key_hex: &str, audience: &str) -> Result<Strin
 pub struct DefraHttpClient {
     http: reqwest::Client,
     base_url: String,
+    /// Vera address stamped into every identity JWT as `authorized_account`,
+    /// so DefraDB's bearer passthrough satisfies Vera's creator check.
+    authorized_account: Option<String>,
+}
+
+/// Direction of a document ACP relationship change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationshipChange {
+    Add,
+    Delete,
+}
+
+/// A GraphQL response before any success or shape interpretation.
+///
+/// Used where a test must compare two responses byte for byte, such as the
+/// absence-versus-denial pairing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawGraphqlResponse {
+    pub status: u16,
+    pub body: String,
 }
 
 impl DefraHttpClient {
@@ -89,7 +128,27 @@ impl DefraHttpClient {
         Self {
             http: reqwest::Client::new(),
             base_url: base_url.to_string(),
+            authorized_account: None,
         }
+    }
+
+    /// Stamp `account` into every identity JWT this client issues.
+    #[must_use]
+    pub fn with_authorized_account(mut self, account: &str) -> Self {
+        self.authorized_account = Some(account.to_string());
+        self
+    }
+
+    fn identity_header(&self, identity_hex: Option<&str>) -> Result<Option<String>> {
+        let Some(key_hex) = identity_hex else {
+            return Ok(None);
+        };
+        let jwt = generate_defra_jwt_with_account(
+            key_hex,
+            &self.base_url,
+            self.authorized_account.as_deref(),
+        )?;
+        Ok(Some(format!("Bearer {}", jwt)))
     }
 
     /// Execute a GraphQL query/mutation, optionally with identity authentication.
@@ -98,30 +157,84 @@ impl DefraHttpClient {
         query: &str,
         identity_hex: Option<&str>,
     ) -> Result<serde_json::Value> {
+        let raw = self.graphql_raw(query, identity_hex).await?;
+        if !(200..300).contains(&raw.status) {
+            return Err(eyre!("graphql HTTP {}: {}", raw.status, raw.body));
+        }
+        serde_json::from_str(&raw.body)
+            .map_err(|e| eyre!("failed to parse graphql response: {}", e))
+    }
+
+    /// Execute a GraphQL request and return the status and body verbatim.
+    pub async fn graphql_raw(
+        &self,
+        query: &str,
+        identity_hex: Option<&str>,
+    ) -> Result<RawGraphqlResponse> {
         let url = format!("{}/api/v0/graphql", self.base_url);
         let body = serde_json::json!({"query": query});
 
         let mut request = self.http.post(&url).json(&body);
-
-        if let Some(key_hex) = identity_hex {
-            let jwt = generate_defra_jwt(key_hex, &self.base_url)?;
-            request = request.header("Authorization", format!("Bearer {}", jwt));
+        if let Some(header) = self.identity_header(identity_hex)? {
+            request = request.header("Authorization", header);
         }
 
         let resp = request
             .send()
             .await
             .map_err(|e| eyre!("graphql request failed: {}", e))?;
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| eyre!("failed to read graphql response: {}", e))?;
+        Ok(RawGraphqlResponse { status, body })
+    }
 
+    /// Add or remove a document ACP relationship, authenticated as
+    /// `identity_hex`.
+    ///
+    /// The node forwards this to Vera as a bearer policy command on the
+    /// caller's behalf, so the caller must be the document's manager (its
+    /// owner) and the JWT must carry the `authorized_account` claim naming the
+    /// node's own chain address, which is what Vera checks the transaction
+    /// creator against.
+    pub async fn acp_relationship(
+        &self,
+        method: RelationshipChange,
+        collection: &str,
+        doc_id: &str,
+        relation: &str,
+        actor_did: &str,
+        identity_hex: &str,
+    ) -> Result<serde_json::Value> {
+        let url = format!("{}/api/v0/acp/document/relationship", self.base_url);
+        let body = serde_json::json!({
+            "collection": collection,
+            "docID": doc_id,
+            "relation": relation,
+            "actor": actor_did,
+        });
+        let request = match method {
+            RelationshipChange::Add => self.http.post(&url),
+            RelationshipChange::Delete => self.http.delete(&url),
+        };
+        let mut request = request.json(&body);
+        if let Some(header) = self.identity_header(Some(identity_hex))? {
+            request = request.header("Authorization", header);
+        }
+        let resp = request
+            .send()
+            .await
+            .map_err(|e| eyre!("acp relationship request failed: {}", e))?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(eyre!("graphql HTTP {}: {}", status, body));
+            return Err(eyre!("acp relationship HTTP {}: {}", status, body));
         }
-
         resp.json()
             .await
-            .map_err(|e| eyre!("failed to parse graphql response: {}", e))
+            .map_err(|e| eyre!("failed to parse acp relationship response: {}", e))
     }
 
     /// Add a schema (SDL string) to DefraDB.
