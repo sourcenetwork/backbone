@@ -206,7 +206,7 @@ async fn run_header_loop(
 
     let subscribe_msg = serde_json::json!({
         "jsonrpc": "2.0",
-        "method": "hub_subscribeHeaders",
+        "method": "vera_subscribeHeaders",
         "params": [],
         "id": 1,
     });
@@ -312,7 +312,7 @@ fn extract_header(
     subscription_id: &serde_json::Value,
 ) -> Option<GossipHeader> {
     if msg["jsonrpc"] != "2.0"
-        || msg["method"] != "hub_header"
+        || msg["method"] != "vera_header"
         || msg.pointer("/params/subscription") != Some(subscription_id)
     {
         return None;
@@ -356,7 +356,7 @@ mod tests {
             json!({"jsonrpc":"2.0", "id":1, "result":null}),
             json!({"jsonrpc":"2.0", "id":1, "result":-1}),
             json!({"jsonrpc":"2.0", "id":1, "result":{}, "error":{"code":-1}}),
-            json!({"jsonrpc":"2.0", "method":"hub_header", "params":{}}),
+            json!({"jsonrpc":"2.0", "method":"vera_header", "params":{}}),
         ] {
             assert!(subscription_id(&message).is_err(), "{message}");
         }
@@ -376,7 +376,7 @@ mod tests {
             publisher_index: 0,
             signature: vec![],
         };
-        let mut message = json!({"jsonrpc":"2.0", "method":"hub_header", "params":{"subscription":"7", "result":header}});
+        let mut message = json!({"jsonrpc":"2.0", "method":"vera_header", "params":{"subscription":"7", "result":header}});
         assert!(extract_header(&message, &json!("7")).is_some());
         for id in [json!(7), json!("other"), json!(null)] {
             assert!(extract_header(&message, &id).is_none());

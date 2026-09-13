@@ -25,7 +25,7 @@ pub async fn get_current_record_proof(
     request(
         client,
         rpc_url,
-        "hub_getCurrentRecordProof",
+        "vera_getCurrentRecordProof",
         serde_json::json!([module, format!("0x{}", hex::encode(key)), minimum_height]),
         RECORD_RESPONSE_BYTES,
     )
@@ -43,7 +43,7 @@ pub async fn get_current_prefix_proof(
     request(
         client,
         rpc_url,
-        "hub_getCurrentPrefixProof",
+        "vera_getCurrentPrefixProof",
         serde_json::json!([module, format!("0x{}", hex::encode(prefix)), minimum_height]),
         RECORD_RESPONSE_BYTES,
     )
@@ -59,7 +59,7 @@ pub async fn get_light_block(
     request(
         client,
         rpc_url,
-        "hub_getLightBlock",
+        "vera_getLightBlock",
         serde_json::json!([height]),
         LIGHT_BLOCK_RESPONSE_BYTES,
     )
@@ -77,7 +77,7 @@ pub async fn get_current_permission_proof(
     request(
         client,
         rpc_url,
-        "hub_getCurrentPermissionProof",
+        "vera_getCurrentPermissionProof",
         serde_json::json!([policy, access, minimum_height]),
         PERMISSION_RESPONSE_BYTES,
     )

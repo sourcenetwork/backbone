@@ -188,8 +188,8 @@ impl Server {
                         let (result, delay) = {
                             let f = f.read();
                             let result = match request["method"].as_str().unwrap() {
-                                "hub_getLightBlock" => serde_json::to_value(&f.light).unwrap(),
-                                "hub_getCurrentRecordProof" => {
+                                "vera_getLightBlock" => serde_json::to_value(&f.light).unwrap(),
+                                "vera_getCurrentRecordProof" => {
                                     let key = request["params"][1].as_str().unwrap();
                                     let key = hex::decode(key.trim_start_matches("0x")).unwrap();
                                     let proof = if key == KEY {
@@ -203,7 +203,7 @@ impl Server {
                                     })
                                     .unwrap()
                                 }
-                                "hub_getCurrentPermissionProof" => {
+                                "vera_getCurrentPermissionProof" => {
                                     serde_json::to_value(vera_permission::PermissionResponse {
                                         revision: f.light.clone(),
                                         proof: f.permission.as_ref().unwrap().clone(),
@@ -303,7 +303,7 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
         let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
         let request = ws.next().await.unwrap().unwrap().into_text().unwrap();
         let request: serde_json::Value = serde_json::from_str(&request).unwrap();
-        assert_eq!(request["method"], "hub_subscribeHeaders");
+        assert_eq!(request["method"], "vera_subscribeHeaders");
         assert_eq!(request["params"], serde_json::json!([]));
         ws.send(Message::Text(
             serde_json::json!({"jsonrpc":"2.0", "id":1, "result":"1"})
@@ -314,7 +314,7 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
         .unwrap();
         ws.send(Message::Text(
             serde_json::json!({
-                "jsonrpc":"2.0", "method":"hub_header",
+                "jsonrpc":"2.0", "method":"vera_header",
                 "params":{"subscription":"other", "result":other_subscription_header}
             })
             .to_string()
@@ -323,7 +323,7 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
         .await
         .unwrap();
         while let Some(header) = receive.recv().await {
-            let msg = serde_json::json!({"jsonrpc":"2.0", "method":"hub_header", "params":{"subscription":"1", "result":header}});
+            let msg = serde_json::json!({"jsonrpc":"2.0", "method":"vera_header", "params":{"subscription":"1", "result":header}});
             ws.send(Message::Text(msg.to_string().into()))
                 .await
                 .unwrap();
@@ -599,7 +599,7 @@ async fn verify_permission_records(owner: &str) {
         let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
         let request = ws.next().await.unwrap().unwrap().into_text().unwrap();
         let request: serde_json::Value = serde_json::from_str(&request).unwrap();
-        assert_eq!(request["method"], "hub_subscribeHeaders");
+        assert_eq!(request["method"], "vera_subscribeHeaders");
         assert_eq!(request["params"], serde_json::json!([]));
         ws.send(Message::Text(
             serde_json::json!({"jsonrpc":"2.0", "id":1, "result":"1"})
@@ -620,7 +620,7 @@ async fn verify_permission_records(owner: &str) {
             publisher_index: 0,
             signature: vec![],
         };
-        ws.send(Message::Text(serde_json::json!({"jsonrpc":"2.0", "method":"hub_header", "params":{"subscription":"1", "result":header}}).to_string().into())).await.unwrap();
+        ws.send(Message::Text(serde_json::json!({"jsonrpc":"2.0", "method":"vera_header", "params":{"subscription":"1", "result":header}}).to_string().into())).await.unwrap();
         while ws.next().await.is_some() {}
     });
     let client = AcpLightClient::new(&server.url, &ws_url, &trusted, 10)
@@ -695,7 +695,7 @@ async fn oversized_header_frames_and_fragmented_messages_close_without_publishin
             signature: vec![],
         };
         let mut message = vec![b' '; acp_light_client::header_sync::HEADER_MESSAGE_BYTES + 1];
-        message.extend(serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0", "method":"hub_header", "params":{"subscription":"1", "result":header}})).unwrap());
+        message.extend(serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0", "method":"vera_header", "params":{"subscription":"1", "result":header}})).unwrap());
         let server = Server::start(data).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let ws_url = format!("ws://{}", listener.local_addr().unwrap());
@@ -704,7 +704,7 @@ async fn oversized_header_frames_and_fragmented_messages_close_without_publishin
             let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
             let request = ws.next().await.unwrap().unwrap().into_text().unwrap();
             let request: serde_json::Value = serde_json::from_str(&request).unwrap();
-            assert_eq!(request["method"], "hub_subscribeHeaders");
+            assert_eq!(request["method"], "vera_subscribeHeaders");
             assert_eq!(request["params"], serde_json::json!([]));
             ws.send(Message::Text(
                 serde_json::json!({"jsonrpc":"2.0", "id":1, "result":"1"})
