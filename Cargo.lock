@@ -38,10 +38,10 @@ dependencies = [
  "eyre",
  "futures",
  "hex",
- "hub-backend 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
- "hub-domain 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
- "hub-permission 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
+ "hub-backend",
+ "hub-domain",
+ "hub-modules",
+ "hub-permission",
  "parking_lot",
  "reqwest 0.12.28",
  "serde",
@@ -3912,13 +3912,13 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "futures",
- "hub-backend 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-backend",
  "hub-consensus",
- "hub-domain 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-domain",
  "hub-executor",
  "hub-genesis",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-qmdb 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-modules",
+ "hub-qmdb",
  "parking_lot",
  "thiserror 2.0.18",
  "tracing",
@@ -3939,33 +3939,10 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "futures",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-permission 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-qmdb 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-traits 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "hub-backend"
-version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6#8f1db8a4202dc64639752e2be37ef0294bd79b28"
-dependencies = [
- "alloy-primitives",
- "bytes",
- "commonware-codec",
- "commonware-cryptography",
- "commonware-glue",
- "commonware-parallel",
- "commonware-runtime",
- "commonware-storage",
- "commonware-utils",
- "futures",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
- "hub-permission 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
- "hub-qmdb 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
- "hub-traits 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
+ "hub-modules",
+ "hub-permission",
+ "hub-qmdb",
+ "hub-traits",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -4003,10 +3980,10 @@ dependencies = [
  "commonware-cryptography",
  "futures",
  "hub-config",
- "hub-domain 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-domain",
  "hub-executor",
- "hub-qmdb 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-traits 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-qmdb",
+ "hub-traits",
  "parking_lot",
  "thiserror 2.0.18",
 ]
@@ -4035,58 +4012,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "hub-crypto"
-version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6#8f1db8a4202dc64639752e2be37ef0294bd79b28"
-dependencies = [
- "alloy-primitives",
- "ark-bls12-381 0.4.0",
- "ark-ec 0.4.2",
- "ark-ff 0.4.2",
- "ark-serialize 0.4.2",
- "base64 0.22.1",
- "blst",
- "borsh",
- "decaf377",
- "k256",
- "multibase",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "unsigned-varint",
-]
-
-[[package]]
 name = "hub-domain"
 version = "0.1.0"
 source = "git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28#8f1db8a4202dc64639752e2be37ef0294bd79b28"
-dependencies = [
- "alloy-consensus",
- "alloy-evm",
- "alloy-primitives",
- "alloy-rlp",
- "borsh",
- "bytes",
- "commonware-codec",
- "commonware-consensus",
- "commonware-cryptography",
- "commonware-glue",
- "commonware-parallel",
- "commonware-utils",
- "futures",
- "hex",
- "jmt",
- "parking_lot",
- "serde",
- "sha2 0.10.9",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "hub-domain"
-version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6#8f1db8a4202dc64639752e2be37ef0294bd79b28"
 dependencies = [
  "alloy-consensus",
  "alloy-evm",
@@ -4123,13 +4051,13 @@ dependencies = [
  "commonware-codec",
  "futures",
  "hex",
- "hub-crypto 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-domain 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-crypto",
+ "hub-domain",
+ "hub-modules",
  "hub-overlay",
- "hub-qmdb 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-qmdb",
  "hub-state",
- "hub-traits 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-traits",
  "identity",
  "revm",
  "serde",
@@ -4150,8 +4078,8 @@ dependencies = [
  "commonware-glue",
  "commonware-utils",
  "hex",
- "hub-domain 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-domain",
+ "hub-modules",
  "serde",
  "serde_json",
 ]
@@ -4200,7 +4128,7 @@ dependencies = [
  "eyre",
  "hex",
  "hub-cli",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-modules",
  "hub-node",
  "parking_lot",
  "rand 0.8.5",
@@ -4234,13 +4162,13 @@ dependencies = [
  "axum",
  "commonware-cryptography",
  "hex",
- "hub-backend 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-domain 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-backend",
+ "hub-domain",
  "hub-executor",
  "hub-indexer",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-permission 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-traits 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-modules",
+ "hub-permission",
+ "hub-traits",
  "jsonrpsee",
  "jsonrpsee-server",
  "parking_lot",
@@ -4267,33 +4195,7 @@ dependencies = [
  "bytes",
  "futures",
  "hex",
- "hub-crypto 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "identity",
- "imbl",
- "orbis-reporting",
- "prost 0.14.3",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "zanzibar",
-]
-
-[[package]]
-name = "hub-modules"
-version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6#8f1db8a4202dc64639752e2be37ef0294bd79b28"
-dependencies = [
- "acp",
- "alloy-primitives",
- "alloy-sol-types",
- "async-trait",
- "borsh",
- "bs58",
- "bytes",
- "futures",
- "hex",
- "hub-crypto 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
+ "hub-crypto",
  "identity",
  "imbl",
  "orbis-reporting",
@@ -4332,18 +4234,18 @@ dependencies = [
  "futures",
  "hex",
  "hub-app",
- "hub-backend 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-backend",
  "hub-config",
  "hub-consensus",
- "hub-crypto 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-domain 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-crypto",
+ "hub-domain",
  "hub-executor",
  "hub-genesis",
  "hub-indexer",
  "hub-jsonrpc",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-qmdb 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-traits 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-modules",
+ "hub-qmdb",
+ "hub-traits",
  "parking_lot",
  "rocksdb",
  "serde",
@@ -4360,8 +4262,8 @@ version = "0.1.0"
 source = "git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28#8f1db8a4202dc64639752e2be37ef0294bd79b28"
 dependencies = [
  "alloy-primitives",
- "hub-qmdb 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-traits 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
+ "hub-qmdb",
+ "hub-traits",
 ]
 
 [[package]]
@@ -4375,29 +4277,9 @@ dependencies = [
  "commonware-cryptography",
  "commonware-storage",
  "hex",
- "hub-crypto 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-domain 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "zanzibar",
-]
-
-[[package]]
-name = "hub-permission"
-version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6#8f1db8a4202dc64639752e2be37ef0294bd79b28"
-dependencies = [
- "alloy-primitives",
- "bytes",
- "commonware-codec",
- "commonware-cryptography",
- "commonware-storage",
- "hex",
- "hub-crypto 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
- "hub-domain 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
- "hub-modules 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
+ "hub-crypto",
+ "hub-domain",
+ "hub-modules",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4408,15 +4290,6 @@ dependencies = [
 name = "hub-qmdb"
 version = "0.1.0"
 source = "git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28#8f1db8a4202dc64639752e2be37ef0294bd79b28"
-dependencies = [
- "alloy-primitives",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "hub-qmdb"
-version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6#8f1db8a4202dc64639752e2be37ef0294bd79b28"
 dependencies = [
  "alloy-primitives",
  "thiserror 2.0.18",
@@ -4440,17 +4313,7 @@ version = "0.1.0"
 source = "git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28#8f1db8a4202dc64639752e2be37ef0294bd79b28"
 dependencies = [
  "alloy-primitives",
- "hub-qmdb 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=8f1db8a4202dc64639752e2be37ef0294bd79b28)",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "hub-traits"
-version = "0.1.0"
-source = "git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6#8f1db8a4202dc64639752e2be37ef0294bd79b28"
-dependencies = [
- "alloy-primitives",
- "hub-qmdb 0.1.0 (git+https://github.com/sourcenetwork/hub.rs?rev=b2a38bc99dc1ce3473dc51196baa1d15aa76cef6)",
+ "hub-qmdb",
  "thiserror 2.0.18",
 ]
 
