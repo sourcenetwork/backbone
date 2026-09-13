@@ -20,13 +20,13 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_utils::{non_empty, ordered::Set, N3f1, TestRng};
 use futures::{SinkExt as _, StreamExt as _};
-use hub_domain::{
-    Block, BlockId, ConsensusContext, ConsensusDigest, DbTargets, EpochMaterial,
-    LightConsensusScheme, StateRoot, LIGHT_BLOCK_NAMESPACE,
-};
 use parking_lot::RwLock;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
+use vera_domain::{
+    Block, BlockId, ConsensusContext, ConsensusDigest, DbTargets, EpochMaterial,
+    LightConsensusScheme, StateRoot, LIGHT_BLOCK_NAMESPACE,
+};
 
 const HEIGHT: u64 = 10;
 const KEY: &[u8] = b"policy/objs/policy-1";
@@ -37,7 +37,7 @@ struct Fixture {
     key: String,
     root: B256,
     points: std::collections::BTreeMap<Vec<u8>, RecordProof>,
-    permission: Option<hub_permission::PermissionProof>,
+    permission: Option<vera_permission::PermissionProof>,
     delay: Duration,
 }
 
@@ -73,7 +73,7 @@ fn fixture_records_with_operations(
         use commonware_glue::stateful::db::DatabaseSet;
         use commonware_runtime::{buffer::paged::CacheRef, tokio, Runner as _, Supervisor as _};
         use commonware_utils::{NZUsize, NZU16};
-        use hub_backend::native::{self, NativeStateSet};
+        use vera_backend::native::{self, NativeStateSet};
 
         let directory = tempfile::tempdir().unwrap();
         tokio::Runner::new(tokio::Config::new().with_storage_directory(directory.path())).start(
@@ -98,7 +98,7 @@ fn fixture_records_with_operations(
                 let (a, b, h, n) =
                     futures::join!(set.0.read(), set.1.read(), set.2.read(), set.3.read());
                 let roots = [a.root().0, b.root().0, h.root().0, n.root().0];
-                let root = hub_modules::module_state::combine_module_roots(&roots);
+                let root = vera_modules::module_state::combine_module_roots(&roots);
                 let mut points = std::collections::BTreeMap::new();
                 for (key, _) in records {
                     let proof =
@@ -144,7 +144,7 @@ fn fixture_records_with_operations(
         state_root: StateRoot(B256::repeat_byte(1)),
         module_state_root: root,
         txs: (0..operations)
-            .map(|index| hub_domain::Tx::new(index.to_be_bytes().to_vec().into()))
+            .map(|index| vera_domain::Tx::new(index.to_be_bytes().to_vec().into()))
             .collect(),
         payload: None,
         db_targets: DbTargets::default(),
@@ -197,14 +197,14 @@ impl Server {
                                     } else {
                                         f.points.get(&key).unwrap_or(&f.proof)
                                     };
-                                    serde_json::to_value(hub_permission::RecordResponse {
+                                    serde_json::to_value(vera_permission::RecordResponse {
                                         revision: f.light.clone(),
                                         record: proof.clone(),
                                     })
                                     .unwrap()
                                 }
                                 "hub_getCurrentPermissionProof" => {
-                                    serde_json::to_value(hub_permission::PermissionResponse {
+                                    serde_json::to_value(vera_permission::PermissionResponse {
                                         revision: f.light.clone(),
                                         proof: f.permission.as_ref().unwrap().clone(),
                                     })
@@ -495,14 +495,14 @@ async fn provider_actor_permissions_reject_missing_evidence_and_stale_state() {
 }
 
 async fn verify_permission_records(owner: &str) {
-    use hub_modules::{
+    use vera_modules::{
         acp::{
             types::{PolicyCmd, PolicyMarshalingType},
             AcpModule,
         },
         kv_store::ModuleKvStore,
     };
-    use hub_permission::{
+    use vera_permission::{
         AccessRequest, Actor, Object, Operation, PermissionProof, PermissionRead, RecordRead,
         PERMISSION_LIMITS,
     };
@@ -537,9 +537,9 @@ async fn verify_permission_records(owner: &str) {
             permission: "read".into(),
         }],
     };
-    let block = hub_modules::types::BlockExecCtx {
+    let block = vera_modules::types::BlockExecCtx {
         deployment_id: 9001,
-        timestamp: hub_modules::types::Timestamp {
+        timestamp: vera_modules::types::Timestamp {
             seconds: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -548,7 +548,7 @@ async fn verify_permission_records(owner: &str) {
         },
         ..Default::default()
     };
-    let tx = hub_modules::types::TxExecCtx {
+    let tx = vera_modules::types::TxExecCtx {
         sequence: 7,
         signer: request.actor.0.to_string(),
         tx_hash: vec![1; 32],
@@ -563,9 +563,13 @@ async fn verify_permission_records(owner: &str) {
         creator_sequence: tx.sequence,
         request: request.clone(),
     };
-    let reads =
-        hub_permission::capture_reads(module.store().clone(), &policy, &request, PERMISSION_LIMITS)
-            .unwrap();
+    let reads = vera_permission::capture_reads(
+        module.store().clone(),
+        &policy,
+        &request,
+        PERMISSION_LIMITS,
+    )
+    .unwrap();
     let mut data = fixture_records(42, module.store().prefix_scan(b""));
     let proof = PermissionProof {
         roots: Some(data.proof.roots),
@@ -766,9 +770,9 @@ async fn epoch_end_reproposal_preserves_requested_state_and_timestamp() {
         hex::decode(f.light.block.trim_start_matches("0x"))
             .unwrap()
             .as_slice(),
-        &hub_domain::BlockCfg {
+        &vera_domain::BlockCfg {
             max_txs: 64,
-            tx: hub_domain::TxCfg {
+            tx: vera_domain::TxCfg {
                 max_tx_bytes: 65_536,
             },
         },
@@ -785,7 +789,7 @@ async fn epoch_end_reproposal_preserves_requested_state_and_timestamp() {
     let players = Set::from_iter_dedup([identity.clone()]);
     let (output, shares) =
         deal::<MinSig, _, N3f1>(TestRng::new(42), Mode::NonZeroCounter, players.clone()).unwrap();
-    child.payload = Some(hub_domain::DkgPayload::EpochInfo(
+    child.payload = Some(vera_domain::DkgPayload::EpochInfo(
         commonware_glue::dkg::types::EpochInfo {
             outcome: commonware_glue::dkg::types::EpochOutcome::Success,
             epoch: Epoch::new(2),

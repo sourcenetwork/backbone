@@ -62,10 +62,10 @@ impl ProofClient {
     pub async fn verify_current_permission(
         &self,
         policy: &str,
-        request: &hub_permission::AccessRequest,
+        request: &vera_permission::AccessRequest,
         minimum_height: u64,
     ) -> eyre::Result<(SyncState, bool)> {
-        hub_permission::validate_request(policy, request, hub_permission::PERMISSION_LIMITS)?;
+        vera_permission::validate_request(policy, request, vera_permission::PERMISSION_LIMITS)?;
         let response = rpc::get_current_permission_proof(
             &self.client,
             &self.rpc_url,
@@ -79,7 +79,7 @@ impl ProofClient {
             request,
             minimum_height,
             &self.trusted_key,
-            hub_permission::PERMISSION_LIMITS,
+            vera_permission::PERMISSION_LIMITS,
         )?;
         Ok((revision_state(&response.revision)?, allowed))
     }
@@ -88,10 +88,10 @@ impl ProofClient {
     pub async fn read_current_object_owner(
         &self,
         policy: &str,
-        object: &hub_permission::Object,
+        object: &vera_permission::Object,
         minimum_height: u64,
-    ) -> eyre::Result<(SyncState, Option<hub_permission::Actor>)> {
-        let prefix = hub_permission::object_owner_prefix(policy, object)?;
+    ) -> eyre::Result<(SyncState, Option<vera_permission::Actor>)> {
+        let prefix = vera_permission::object_owner_prefix(policy, object)?;
         let response = rpc::get_current_prefix_proof(
             &self.client,
             &self.rpc_url,
@@ -111,9 +111,9 @@ impl ProofClient {
         module: ModuleId,
         key: &[u8],
         minimum_height: u64,
-    ) -> eyre::Result<hub_permission::RecordResponse> {
+    ) -> eyre::Result<vera_permission::RecordResponse> {
         eyre::ensure!(
-            key.len() <= hub_permission::current::MAX_KEY_BYTES,
+            key.len() <= vera_permission::current::MAX_KEY_BYTES,
             "record key exceeds limit"
         );
         let response =
@@ -124,7 +124,7 @@ impl ProofClient {
             key,
             minimum_height,
             &self.trusted_key,
-            hub_permission::RECORD_PROOF_BYTES,
+            vera_permission::RECORD_PROOF_BYTES,
         )?;
         Ok(response)
     }

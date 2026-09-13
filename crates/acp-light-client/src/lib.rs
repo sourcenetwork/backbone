@@ -15,13 +15,13 @@ pub mod verify;
 pub use cache::AcpCache;
 pub use freshness::FreshnessPolicy;
 pub use header_sync::{HeaderChain, SyncState};
-pub use hub_permission::{
-    AccessDecision, AccessRequest, Actor, DecisionRequest, Object, Operation, PermissionProof,
-    RecordProof, RecordResponse, Timestamp, PERMISSION_LIMITS,
-};
 pub use proof_client::ProofClient;
 pub use types::{
     ConsensusPublicKey, GossipHeader, LightBlock, ModuleId, ModuleStateProof, VerifiedRecord,
+};
+pub use vera_permission::{
+    AccessDecision, AccessRequest, Actor, DecisionRequest, Object, Operation, PermissionProof,
+    RecordProof, RecordResponse, Timestamp, PERMISSION_LIMITS,
 };
 pub use verify::{verify_light_block, verify_module_state_proof, LightBlockError, ProofError};
 

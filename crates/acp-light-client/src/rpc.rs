@@ -8,11 +8,11 @@ use serde::de::DeserializeOwned;
 use crate::types::{LightBlock, ModuleId};
 
 /// Maximum light-block response, including hex-encoded block and consensus material.
-pub use hub_domain::LIGHT_BLOCK_RESPONSE_BYTES;
+pub use vera_domain::LIGHT_BLOCK_RESPONSE_BYTES;
 /// Maximum current permission response, including finalization and the RPC envelope.
-pub use hub_permission::PERMISSION_RESPONSE_BYTES;
+pub use vera_permission::PERMISSION_RESPONSE_BYTES;
 /// Maximum native record response, including finalization and the RPC envelope.
-pub use hub_permission::RECORD_RESPONSE_BYTES;
+pub use vera_permission::RECORD_RESPONSE_BYTES;
 
 /// Fetch current record evidence paired with its finalized revision.
 pub async fn get_current_record_proof(
@@ -21,7 +21,7 @@ pub async fn get_current_record_proof(
     module: ModuleId,
     key: &[u8],
     minimum_height: u64,
-) -> eyre::Result<hub_permission::RecordResponse> {
+) -> eyre::Result<vera_permission::RecordResponse> {
     request(
         client,
         rpc_url,
@@ -39,7 +39,7 @@ pub async fn get_current_prefix_proof(
     module: ModuleId,
     prefix: &[u8],
     minimum_height: u64,
-) -> eyre::Result<hub_permission::PrefixResponse> {
+) -> eyre::Result<vera_permission::PrefixResponse> {
     request(
         client,
         rpc_url,
@@ -71,9 +71,9 @@ pub async fn get_current_permission_proof(
     client: &reqwest::Client,
     rpc_url: &str,
     policy: &str,
-    access: &hub_permission::AccessRequest,
+    access: &vera_permission::AccessRequest,
     minimum_height: u64,
-) -> eyre::Result<hub_permission::PermissionResponse> {
+) -> eyre::Result<vera_permission::PermissionResponse> {
     request(
         client,
         rpc_url,

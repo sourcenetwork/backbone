@@ -48,12 +48,12 @@ async fn hub_acp_light_client() {
     // Step 1. Start hub.rs cluster
     eprintln!("[hub-lc] Step 1: Starting hub.rs cluster (4 validators)...");
     let hub_chain_id = 9003;
-    let hub_genesis = GenesisBuilder::devnet().funded_accounts(1, "1000000000000000000000000");
+    let vera_genesis = GenesisBuilder::devnet().funded_accounts(1, "1000000000000000000000000");
     let hub_cluster = TestCluster::builder()
         .nodes(4)
         .seed(42)
         .chain_id(hub_chain_id)
-        .genesis(hub_genesis)
+        .genesis(vera_genesis)
         .preset(ConsensusPreset::Fast)
         .build()
         .await
@@ -64,8 +64,8 @@ async fn hub_acp_light_client() {
         .await
         .expect("hub.rs cluster should become healthy");
 
-    let hub_state = hub_cluster.observe(Duration::from_millis(200));
-    hub_state
+    let vera_state = hub_cluster.observe(Duration::from_millis(200));
+    vera_state
         .wait_for_height(3, Duration::from_secs(30))
         .await
         .expect("hub.rs should reach height 3");
