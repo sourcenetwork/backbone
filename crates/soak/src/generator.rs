@@ -45,6 +45,11 @@ pub struct Profile {
     /// Node indices that receive create ops; `None` = any node. Other ops are unaffected.
     #[serde(default)]
     pub create_nodes: Option<Vec<usize>>,
+    /// Weighted create-payload sizes as `(doc_bytes, weight)`. Empty means
+    /// "use `doc_bytes`", which is what every pre-existing profile does, and
+    /// is why their frozen plans cannot move: an empty mix draws no randomness.
+    #[serde(default)]
+    pub size_mix: Vec<(usize, u32)>,
     #[serde(default)]
     pub acp: Option<AcpProfile>,
 }
@@ -65,7 +70,19 @@ impl Profile {
             se_field: None,
             unique_names: false,
             create_nodes: None,
+            size_mix: Vec::new(),
             acp: None,
+        }
+    }
+
+    /// `p0-crud` with a within-run payload spread. The buckets are chosen so the
+    /// 1,200 B bucket is byte-identical to every published run's document, and the
+    /// largest stays below any candidate chunk threshold (design 152, reversal R1).
+    pub fn p0_size() -> Self {
+        Self {
+            name: "p0-size".into(),
+            size_mix: vec![(256, 40), (1_200, 30), (16_000, 20), (128_000, 10)],
+            ..Self::p0_crud()
         }
     }
 
@@ -108,6 +125,7 @@ impl Profile {
     pub fn by_name(name: &str) -> Option<Self> {
         match name {
             "p0-crud" => Some(Self::p0_crud()),
+            "p0-size" => Some(Self::p0_size()),
             "p1-encrypted" => Some(Self::p1_encrypted()),
             "p1-unique" => Some(Self::p1_unique()),
             "p2-acp" => Some(Self::p2_acp()),
@@ -347,6 +365,23 @@ impl Generator {
             .collect()
     }
 
+    /// One RNG draw, and only when a mix exists. Profiles with an empty mix
+    /// never reach this, so their draw sequence is unchanged.
+    fn draw_doc_bytes(&mut self) -> usize {
+        let total: u32 = self.profile.size_mix.iter().map(|(_, w)| *w).sum();
+        if total == 0 {
+            return self.profile.doc_bytes;
+        }
+        let mut pick = self.rng.gen_range(0..total);
+        for (bytes, weight) in &self.profile.size_mix {
+            if pick < *weight {
+                return *bytes;
+            }
+            pick -= *weight;
+        }
+        self.profile.size_mix[0].0
+    }
+
     /// At most 8 significant digits, under the 15-digit float roundtrip
     /// ceiling (a known runtime asymmetry).
     fn score(&mut self) -> String {
@@ -357,7 +392,12 @@ impl Generator {
         let name = self.alnum(8);
         let age = self.rng.gen_range(0..100);
         let score = self.score();
-        let blob = self.alnum(self.profile.doc_bytes.saturating_sub(64));
+        let doc_bytes = if self.profile.size_mix.is_empty() {
+            self.profile.doc_bytes
+        } else {
+            self.draw_doc_bytes()
+        };
+        let blob = self.alnum(doc_bytes.saturating_sub(64));
         format!("{{name: \"{name}\", age: {age}, score: {score}, blob: \"{blob}\"}}")
     }
 
@@ -510,6 +550,69 @@ mod tests {
         Generator::new(seed, Profile::p1_encrypted(), 4)
             .take(n)
             .collect()
+    }
+
+    fn plan_p0_size(seed: u64, n: usize) -> Vec<PlannedOp> {
+        Generator::new(seed, Profile::p0_size(), 2)
+            .take(n)
+            .collect()
+    }
+
+    #[test]
+    fn p0_size_draws_more_than_one_payload_length() {
+        let lens: std::collections::BTreeSet<usize> = plan_p0_size(42, 500)
+            .into_iter()
+            .filter(|op| op.kind == OpKind::Create)
+            .map(|op| op.payload.unwrap().len())
+            .collect();
+        assert!(
+            lens.len() >= 3,
+            "expected a spread of create payload sizes, got {lens:?}"
+        );
+        // age (1-2 digits) and score (4-7 chars) alone vary payload length by
+        // only a few bytes; a length this far past the 1200-byte bucket's
+        // ceiling (max realized length 1189) is reachable only by drawing the
+        // 16000 or 128000 byte buckets, so this fails if the size mix is not
+        // actually being exercised.
+        assert!(
+            lens.iter().any(|&l| l > 2000),
+            "expected a create payload only reachable via the 16000/128000 byte buckets, got {lens:?}"
+        );
+    }
+
+    #[test]
+    fn size_mix_is_empty_on_every_pre_existing_profile() {
+        for p in [
+            Profile::p0_crud(),
+            Profile::p1_encrypted(),
+            Profile::p1_unique(),
+            Profile::p2_acp(),
+        ] {
+            assert!(
+                p.size_mix.is_empty(),
+                "{} must not carry a size mix",
+                p.name
+            );
+        }
+    }
+
+    /// p0-size must not move: hash of the first 500 ops for seed 42, 2 nodes.
+    #[test]
+    fn p0_size_plan_is_frozen() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for op in plan_p0_size(42, 500) {
+            (
+                op.index,
+                op.virtual_ts_ms,
+                op.node,
+                op.kind as u8,
+                op.slot,
+                op.payload,
+            )
+                .hash(&mut h);
+        }
+        assert_eq!(h.finish(), 11674702909862144291);
     }
 
     #[test]

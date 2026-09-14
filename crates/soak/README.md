@@ -64,7 +64,7 @@ The nodes' data and logs are kept under the run directory (the driver points
 | Flag | Default | Meaning |
 |---|---|---|
 | `--seed N` | unix time | Master seed; both axes derive from it. |
-| `--profile NAME` | p0-crud | Workload profile: `p0-crud` (plaintext Users), `p1-encrypted` (Vault with encrypted secret/pin and an SE index on name; builds the cluster with encryption, dev mode, per-node identities and a shared SE key), `p1-unique` (p1 with a unique name per document instead of the 40-name pool, so an SE query matches exactly one document: it separates the searchable-encryption first-responder misses from the "many documents per name" query shape; run 307 remains the colliding-name result) or `p2-acp` (User under a local ACP policy with owner/reader identities, see "ACP profile"). |
+| `--profile NAME` | p0-crud | Workload profile: `p0-crud` (plaintext Users), `p0-size` (p0-crud with a within-run payload-size mix: 256/1,200/16,000/128,000 bytes weighted 40/30/20/10, to measure disk growth against payload size), `p1-encrypted` (Vault with encrypted secret/pin and an SE index on name; builds the cluster with encryption, dev mode, per-node identities and a shared SE key), `p1-unique` (p1 with a unique name per document instead of the 40-name pool, so an SE query matches exactly one document: it separates the searchable-encryption first-responder misses from the "many documents per name" query shape; run 307 remains the colliding-name result) or `p2-acp` (User under a local ACP policy with owner/reader identities, see "ACP profile"). |
 | `--create-nodes 0,1` | all nodes | Node indices that receive create ops (0,1 Rust; 2,3 Go); other ops still go to any node. Recorded in the manifest. |
 | `--ops N` | 200 | Ops to plan and execute. |
 | `--secs S` | none | Wall deadline; stops the workload first if hit. |
@@ -96,8 +96,9 @@ the tag: `docker build --platform linux/arm64 -f tools/defradb.containerfile
 also needs `DEFRA_RUST_BINARY` and the Go `defradb` on `PATH` as before
 (the driver's CLI calls run on the host against each container's published
 API port), and the docker CLI pointed at the host, e.g.
-`DOCKER_CONTEXT=orbstack`. Only `p0-crud` runs in
-containers for now; the encrypted and ACP profiles refuse the backend.
+`DOCKER_CONTEXT=orbstack`. The encrypted and ACP profiles refuse the
+backend; `p0-crud` and `p0-size` run in containers, but `p0-size`'s large
+payloads have never been exercised through the container path.
 
 ```sh
 export DOCKER_CONTEXT=orbstack

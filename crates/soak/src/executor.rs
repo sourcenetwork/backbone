@@ -34,6 +34,11 @@ pub struct OpRecord {
     pub actor: Option<Actor>,
     /// `"http"` (GraphQL) or `"cli"` (grants go through the node binary).
     pub path: &'static str,
+    /// Bytes of the GraphQL input this op sent; 0 for ops that send none
+    /// (queries, grants, deletes).
+    /// `#[serde(default)]` is a no-op today -- `OpRecord` only derives `Serialize` -- kept in case it gains `Deserialize`.
+    #[serde(default)]
+    pub payload_bytes: usize,
 }
 
 pub struct Executor {
@@ -189,6 +194,12 @@ impl Executor {
             latency_ms,
             actor: op.actor,
             path: "http",
+            // Create/update send `payload` as the mutation's input object;
+            // delete and plain query send no document payload.
+            payload_bytes: match op.kind {
+                OpKind::Create | OpKind::Update => payload.len(),
+                _ => 0,
+            },
         };
         self.write(&record)?;
         Ok(record)
@@ -257,6 +268,8 @@ impl Executor {
             latency_ms: started.elapsed().as_millis() as u64,
             actor: None,
             path: "http",
+            // Viewer query reads the victim by docID; it sends no document payload.
+            payload_bytes: 0,
         };
         self.write(&record)?;
         Ok(record)
@@ -327,6 +340,8 @@ impl Executor {
             latency_ms: started.elapsed().as_millis() as u64,
             actor: Some(Actor::Owner),
             path: "cli",
+            // Grant sends a relationship add via the CLI, not a document payload.
+            payload_bytes: 0,
         };
         self.write(&record)?;
         Ok(record)
@@ -498,6 +513,28 @@ mod tests {
         let err = out.expect_err("a 403 must not parse as Ok");
         assert!(err.starts_with("http 403"), "{err}");
         assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn op_record_carries_payload_bytes() {
+        let json = serde_json::to_value(OpRecord {
+            op_index: 0,
+            virtual_ts_ms: 0,
+            wall_ts_ms: 0,
+            node: "rust-0".into(),
+            kind: OpKind::Create,
+            collection: "Users".into(),
+            doc_id: None,
+            ok: true,
+            skipped: false,
+            error: None,
+            latency_ms: 0,
+            actor: None,
+            path: "http",
+            payload_bytes: 1234,
+        })
+        .unwrap();
+        assert_eq!(json["payload_bytes"], 1234);
     }
 
     #[test]

@@ -268,6 +268,8 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
             "node": node, "store": stores.get(node), "start_bytes": first, "end_bytes": last,
             "bytes_per_write_op": if writes_ok > 0 { (last.saturating_sub(*first)) as f64 / writes_ok as f64 } else { 0.0 },
         })).collect::<Vec<_>>(),
+        "payload_bytes": payload_summary(&ops),
+        "disk_fit": disk_fit(&ops, &du),
         "rss_max_bytes": rss_max,
         "rss_instrument": rss_instrument,
         "convergence_lag_ms": lag_groups.iter().map(|((dir, source), v)| json!({"direction": dir, "source": source, "stats": pct(v)})).collect::<Vec<_>>(),
@@ -309,6 +311,26 @@ fn mb(v: &Value) -> String {
     format!("{:.1}", v.as_f64().unwrap_or(0.0) / 1_048_576.0)
 }
 
+/// One kind's payload-size line. A run predating `payload_bytes` has `sum ==
+/// 0` for every op that carried a real payload; printing that as `sum 0 p50
+/// 0 p95 0` reads as "no bytes", when the true figure was just never
+/// recorded, so such a kind renders `not recorded` instead of the numbers.
+fn payload_line(p: &Value, kind: &str) -> String {
+    let field = &p["payload_bytes"][kind];
+    let n = field["n"].as_u64().unwrap_or(0);
+    if n > 0 && field["sum"].as_u64().unwrap_or(0) == 0 {
+        return format!("{kind} payload: n {n} not recorded");
+    }
+    if kind == "create" {
+        format!(
+            "{kind} payload: n {n} sum {} p50 {} p95 {}",
+            field["sum"], field["p50"], field["p95"],
+        )
+    } else {
+        format!("{kind} payload: n {n} p50 {}", field["p50"])
+    }
+}
+
 fn render(p: &Value, manifest: &Value) -> String {
     let mut out = String::new();
     let o = &p["ops"];
@@ -347,6 +369,29 @@ fn render(p: &Value, manifest: &Value) -> String {
             mb(&d["end_bytes"]),
             d["bytes_per_write_op"].as_f64().unwrap_or(0.0)
         );
+    }
+    out += &format!(
+        "\n{} · {}\n",
+        payload_line(p, "create"),
+        payload_line(p, "update"),
+    );
+    out += "\ndisk fit (per node, mesh-wide write/payload regressors against that node's own disk series):\n";
+    for f in p["disk_fit"].as_array().into_iter().flatten() {
+        if f["fitted"].as_bool() == Some(true) {
+            out += &format!(
+                "- {}: {:.0} bytes per write plus {:.2}x payload over {} samples\n",
+                f["node"].as_str().unwrap_or(""),
+                f["overhead_bytes_per_write"].as_f64().unwrap_or(0.0),
+                f["amplification_per_payload_byte"].as_f64().unwrap_or(0.0),
+                f["n_samples"],
+            );
+        } else {
+            out += &format!(
+                "- {}: not fitted ({})\n",
+                f["node"].as_str().unwrap_or(""),
+                f["reason"].as_str().unwrap_or("")
+            );
+        }
     }
     out += if p["rss_instrument"] == "docker_stats" {
         "\n## max memory (docker stats MemUsage, not process RSS) MB\n\n"
@@ -683,6 +728,178 @@ fn is_write(kind: &str) -> bool {
     !matches!(kind, "query" | "grant")
 }
 
+/// Per-kind payload sizes over successful ops. Failed ops are excluded so the
+/// figure matches the `writes_ok` denominator every disk number already uses.
+fn payload_summary(ops: &[Value]) -> Value {
+    let mut out = serde_json::Map::new();
+    for kind in ["create", "update"] {
+        let v: Vec<u64> = ops
+            .iter()
+            .filter(|o| s(o, "kind") == kind && o["ok"].as_bool() == Some(true))
+            .map(|o| o["payload_bytes"].as_u64().unwrap_or(0))
+            .collect();
+        let sum: u64 = v.iter().sum();
+        let stats = pct(&v);
+        out.insert(
+            kind.to_string(),
+            json!({"n": v.len(), "sum": sum, "p50": stats["p50"], "p95": stats["p95"]}),
+        );
+    }
+    Value::Object(out)
+}
+
+/// Two unknowns (overhead, amplification) are algebraically solvable from as
+/// few as two disk samples; that leaves no slack to tell a real fit from
+/// noise. Require several samples per fitted term before trusting one at
+/// all -- this is a floor on statistical power, not the collinearity check
+/// below.
+const MIN_DISK_SAMPLES: usize = 10;
+
+/// `det = sxx*syy - sxy^2 = sxx*syy*(1 - r^2)`, so `det / (sxx*syy)` -- the
+/// fitted-line "tolerance" -- is the dimensionless `1 - r^2`, unlike the raw
+/// determinant, which scales with the fourth power of the run's byte/write/
+/// payload magnitudes and so is never small at production scale even when
+/// the regressors are near-perfectly collinear. A tolerance below 0.1
+/// (equivalently VIF = 1/tolerance above 10) is the standard collinearity-
+/// diagnostic threshold in regression practice: below it the two regressors
+/// track each other too closely for least squares to split their effects.
+const MIN_TOLERANCE: f64 = 0.1;
+
+/// Split disk growth into fixed per-write overhead and per-payload-byte
+/// amplification, per node, by least squares over each node's own disk
+/// series against the mesh-wide write/payload regressors. A mixed mesh's
+/// nodes do not always agree on the fit (a store's on-disk layout is its
+/// own), so publishing one node's numbers under an unlabeled key would
+/// attribute one runtime's behaviour to the whole run.
+///
+/// Refuses to fit a node when payload was never recorded (every run before
+/// `payload_bytes` existed), when payload sizes do not vary, when that node
+/// has too few disk samples, when the two regressors are too collinear to
+/// separate, or when either fitted term comes out negative -- storing
+/// payload bytes cannot shrink the store, and per-write overhead cannot be
+/// negative, so a negative term means the collinearity gate above was too
+/// permissive rather than a value worth publishing.
+fn disk_fit(ops: &[Value], du: &[Value]) -> Value {
+    let mut nodes: Vec<String> = du.iter().map(|d| s(d, "node").to_string()).collect();
+    nodes.sort();
+    nodes.dedup();
+
+    let creates: Vec<u64> = ops
+        .iter()
+        .filter(|o| s(o, "kind") == "create" && o["ok"].as_bool() == Some(true))
+        .map(|o| o["payload_bytes"].as_u64().unwrap_or(0))
+        .collect();
+    let sizes: std::collections::BTreeSet<u64> = creates.iter().copied().collect();
+    let mesh_reason = if !creates.is_empty() && creates.iter().sum::<u64>() == 0 {
+        Some("payload was never recorded")
+    } else if sizes.len() < 2 {
+        Some("payload sizes do not vary")
+    } else {
+        None
+    };
+    if let Some(reason) = mesh_reason {
+        return Value::Array(
+            nodes
+                .iter()
+                .map(|node| json!({"node": node, "fitted": false, "reason": reason}))
+                .collect(),
+        );
+    }
+
+    let mut writes: Vec<(u64, u64)> = ops
+        .iter()
+        .filter(|o| o["ok"].as_bool() == Some(true) && is_write(s(o, "kind")))
+        .map(|o| {
+            (
+                o["wall_ts_ms"].as_u64().unwrap_or(0),
+                o["payload_bytes"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect();
+    writes.sort_unstable();
+
+    Value::Array(
+        nodes
+            .iter()
+            .map(|node| disk_fit_for_node(node, &writes, du))
+            .collect(),
+    )
+}
+
+/// One node's fit against the mesh-wide `writes` regressors; see `disk_fit`
+/// for what each gate refuses and why.
+fn disk_fit_for_node(node: &str, writes: &[(u64, u64)], du: &[Value]) -> Value {
+    let mut series: Vec<(u64, u64)> = du
+        .iter()
+        .filter(|d| s(d, "node") == node)
+        .map(|d| {
+            (
+                d["wall_ts_ms"].as_u64().unwrap_or(0),
+                d["bytes"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect();
+    series.sort_unstable();
+    if series.len() < MIN_DISK_SAMPLES {
+        return json!({"node": node, "fitted": false, "reason": format!("fewer than {MIN_DISK_SAMPLES} disk samples")});
+    }
+    let base = series[0].1;
+    // Cumulative writes/payload as of `t`. Regressors are taken relative to
+    // series[0]'s own cumulative counts (not zero), because `base` already
+    // absorbs whatever growth those counts caused; without this the terms
+    // are biased by however much had already been written before the first
+    // disk sample.
+    let cum_at = |t: u64| -> (f64, f64) {
+        let (mut w, mut p) = (0f64, 0f64);
+        for (wt, pay) in writes {
+            if *wt > t {
+                break;
+            }
+            w += 1.0;
+            p += *pay as f64;
+        }
+        (w, p)
+    };
+    let (w0, p0) = cum_at(series[0].0);
+
+    let (mut sxx, mut sxy, mut syy, mut sxz, mut syz) = (0f64, 0f64, 0f64, 0f64, 0f64);
+    let mut n = 0usize;
+    for (t, bytes) in &series {
+        let (w, p) = cum_at(*t);
+        let (w, p) = (w - w0, p - p0);
+        let g = bytes.saturating_sub(base) as f64;
+        sxx += w * w;
+        sxy += w * p;
+        syy += p * p;
+        sxz += w * g;
+        syz += p * g;
+        n += 1;
+    }
+    let scale = sxx * syy;
+    let tolerance = if scale > 0.0 {
+        1.0 - (sxy * sxy) / scale
+    } else {
+        0.0
+    };
+    if tolerance < MIN_TOLERANCE {
+        return json!({"node": node, "fitted": false, "reason": "regressors are collinear"});
+    }
+    let det = sxx * syy - sxy * sxy;
+    let overhead = (syy * sxz - sxy * syz) / det;
+    let amplification = (sxx * syz - sxy * sxz) / det;
+    if overhead < 0.0 || amplification < 0.0 {
+        return json!({"node": node, "fitted": false, "reason": "fitted term is negative"});
+    }
+    json!({
+        "node": node,
+        "fitted": true,
+        "reason": "",
+        "overhead_bytes_per_write": overhead,
+        "amplification_per_payload_byte": amplification,
+        "n_samples": n,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,5 +952,216 @@ mod tests {
         assert!(!is_write("grant"));
         assert!(!is_write("query"));
         assert!(is_write("update"));
+    }
+
+    #[test]
+    fn payload_summary_splits_creates_from_updates() {
+        let ops = vec![
+            json!({"kind":"create","ok":true,"payload_bytes":1000}),
+            json!({"kind":"create","ok":true,"payload_bytes":3000}),
+            json!({"kind":"update","ok":true,"payload_bytes":30}),
+            json!({"kind":"create","ok":false,"payload_bytes":9999}),
+        ];
+        let got = payload_summary(&ops);
+        assert_eq!(got["create"]["n"], 2);
+        assert_eq!(got["create"]["sum"], 4000);
+        assert_eq!(got["update"]["n"], 1);
+    }
+
+    #[test]
+    fn disk_fit_recovers_planted_terms() {
+        // growth = 500 bytes per write + 3x payload. Payload size shifts once
+        // partway through rather than alternating every write: alternating
+        // at a constant rate makes cumulative writes and cumulative payload
+        // asymptotically collinear as the sample count grows (the same
+        // pathology gate 2 exists to reject), so only a real regime shift
+        // keeps the two regressors separable here.
+        let mut ops = Vec::new();
+        let mut du = Vec::new();
+        let (mut w, mut pay) = (0u64, 0u64);
+        for i in 0..40u64 {
+            let bytes = if i < 20 { 1_000 } else { 9_000 };
+            ops.push(
+                json!({"kind":"create","ok":true,"wall_ts_ms": i*1000, "payload_bytes": bytes}),
+            );
+            w += 1;
+            pay += bytes;
+            du.push(json!({"node":"rust-0","wall_ts_ms": i*1000, "bytes": 500*w + 3*pay}));
+        }
+        let fit = &disk_fit(&ops, &du)[0];
+        assert_eq!(fit["node"], "rust-0");
+        assert!(fit["fitted"].as_bool().unwrap());
+        assert!((fit["overhead_bytes_per_write"].as_f64().unwrap() - 500.0).abs() < 1.0);
+        assert!((fit["amplification_per_payload_byte"].as_f64().unwrap() - 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn disk_fit_is_suppressed_on_a_fixed_size_run() {
+        let mut ops = Vec::new();
+        let mut du = Vec::new();
+        let (mut w, mut pay) = (0u64, 0u64);
+        for i in 0..40u64 {
+            ops.push(
+                json!({"kind":"create","ok":true,"wall_ts_ms": i*1000, "payload_bytes": 1_200}),
+            );
+            w += 1;
+            pay += 1_200;
+            du.push(json!({"node":"rust-0","wall_ts_ms": i*1000, "bytes": 500*w + 3*pay}));
+        }
+        let fit = &disk_fit(&ops, &du)[0];
+        assert!(
+            !fit["fitted"].as_bool().unwrap(),
+            "a single payload size must not produce a fit"
+        );
+        assert_eq!(fit["reason"], "payload sizes do not vary");
+    }
+
+    #[test]
+    fn disk_fit_requires_a_minimum_sample_count() {
+        let mut ops = Vec::new();
+        let mut du = Vec::new();
+        let (mut w, mut pay) = (0u64, 0u64);
+        for i in 0..5u64 {
+            let bytes = if i % 2 == 0 { 1_000 } else { 9_000 };
+            ops.push(
+                json!({"kind":"create","ok":true,"wall_ts_ms": i*1000, "payload_bytes": bytes}),
+            );
+            w += 1;
+            pay += bytes;
+            du.push(json!({"node":"rust-0","wall_ts_ms": i*1000, "bytes": 500*w + 3*pay}));
+        }
+        let fit = &disk_fit(&ops, &du)[0];
+        assert!(!fit["fitted"].as_bool().unwrap());
+        assert_eq!(
+            fit["reason"],
+            format!("fewer than {MIN_DISK_SAMPLES} disk samples")
+        );
+    }
+
+    #[test]
+    fn disk_fit_is_suppressed_when_regressors_are_collinear_at_scale() {
+        // Payload alternates between two close sizes (so the "sizes do not
+        // vary" gate does not fire), but cumulative writes and cumulative
+        // payload still move in near-lockstep over enough samples to clear
+        // the minimum-count gate: the raw determinant is enormous at this
+        // scale, but the two regressors remain unseparable.
+        let mut ops = Vec::new();
+        let mut du = Vec::new();
+        let (mut w, mut pay) = (0u64, 0u64);
+        for i in 0..20u64 {
+            let bytes = if i % 2 == 0 { 1_000_000 } else { 1_010_000 };
+            ops.push(
+                json!({"kind":"create","ok":true,"wall_ts_ms": i*1000, "payload_bytes": bytes}),
+            );
+            w += 1;
+            pay += bytes;
+            du.push(json!({"node":"rust-0","wall_ts_ms": i*1000, "bytes": 500*w + pay/1000}));
+        }
+        let fit = &disk_fit(&ops, &du)[0];
+        assert!(!fit["fitted"].as_bool().unwrap());
+        assert_eq!(fit["reason"], "regressors are collinear");
+    }
+
+    #[test]
+    fn disk_fit_rejects_a_borderline_tolerance_case() {
+        // Same planted terms as `disk_fit_recovers_planted_terms` (500/write
+        // + 3x payload), but the payload size shifts after 6 of 40 writes
+        // instead of 20. Computed tolerance ~= 0.0095 (still below
+        // MIN_TOLERANCE = 0.1, so this must stay suppressed). Nothing else
+        // in this file pins MIN_TOLERANCE's own value: dropping it from 0.1
+        // to 1e-7 leaves every other test green but would let this
+        // borderline case through to a fit.
+        let mut ops = Vec::new();
+        let mut du = Vec::new();
+        let (mut w, mut pay) = (0u64, 0u64);
+        for i in 0..40u64 {
+            let bytes = if i < 6 { 1_000 } else { 9_000 };
+            ops.push(
+                json!({"kind":"create","ok":true,"wall_ts_ms": i*1000, "payload_bytes": bytes}),
+            );
+            w += 1;
+            pay += bytes;
+            du.push(json!({"node":"rust-0","wall_ts_ms": i*1000, "bytes": 500*w + 3*pay}));
+        }
+        let fit = &disk_fit(&ops, &du)[0];
+        assert!(!fit["fitted"].as_bool().unwrap());
+        assert_eq!(fit["reason"], "regressors are collinear");
+    }
+
+    #[test]
+    fn disk_fit_rejects_a_negative_fitted_term() {
+        // growth = 6000 bytes per write - 1x payload: impossible, but the
+        // payload size shifts partway through the run (as in the recovered-
+        // terms test) so the regressors are not collinear, and gate 2 lets
+        // this through; only the non-negativity backstop catches it. Disk
+        // usage does not just grow here: it rises to ~1.10M by i=19, then
+        // the payload shift outpaces the fixed 6000/write term and it falls
+        // to ~1.04M by i=39 -- exactly the shape the negative amplification
+        // predicts, not a real du series, which is the point of the test.
+        let mut ops = Vec::new();
+        let mut du = Vec::new();
+        let (mut w, mut pay) = (0u64, 0u64);
+        for i in 0..40u64 {
+            let bytes = if i < 20 { 1_000 } else { 9_000 };
+            ops.push(
+                json!({"kind":"create","ok":true,"wall_ts_ms": i*1000, "payload_bytes": bytes}),
+            );
+            w += 1;
+            pay += bytes;
+            du.push(
+                json!({"node":"rust-0","wall_ts_ms": i*1000, "bytes": 1_000_000 + 6000*w - pay}),
+            );
+        }
+        let fit = &disk_fit(&ops, &du)[0];
+        assert!(!fit["fitted"].as_bool().unwrap());
+        assert_eq!(fit["reason"], "fitted term is negative");
+    }
+
+    #[test]
+    fn disk_fit_is_never_recorded_when_payload_bytes_is_always_zero() {
+        // Runs written before `payload_bytes` existed parse every op's
+        // missing field as 0, which must not be reported as "sizes do not
+        // vary" (a fixed-size profile): the honest reason is that payload
+        // was never recorded at all.
+        let mut ops = Vec::new();
+        let mut du = Vec::new();
+        for i in 0..20u64 {
+            ops.push(json!({"kind":"create","ok":true,"wall_ts_ms": i*1000}));
+            du.push(json!({"node":"rust-0","wall_ts_ms": i*1000, "bytes": 1_000 * i}));
+        }
+        let fit = &disk_fit(&ops, &du)[0];
+        assert!(!fit["fitted"].as_bool().unwrap());
+        assert_eq!(fit["reason"], "payload was never recorded");
+    }
+
+    #[test]
+    fn disk_fit_is_independent_per_node() {
+        // Same mesh-wide writes; rust-0's disk grows with the planted terms
+        // from `disk_fit_recovers_planted_terms`, go-0's with the impossible
+        // series from `disk_fit_rejects_a_negative_fitted_term`. A mixed
+        // mesh's nodes need not agree, so each must get its own verdict.
+        let mut ops = Vec::new();
+        let mut du = Vec::new();
+        let (mut w, mut pay) = (0u64, 0u64);
+        for i in 0..40u64 {
+            let bytes = if i < 20 { 1_000 } else { 9_000 };
+            ops.push(
+                json!({"kind":"create","ok":true,"wall_ts_ms": i*1000, "payload_bytes": bytes}),
+            );
+            w += 1;
+            pay += bytes;
+            du.push(json!({"node":"rust-0","wall_ts_ms": i*1000, "bytes": 500*w + 3*pay}));
+            du.push(json!({"node":"go-0","wall_ts_ms": i*1000, "bytes": 1_000_000 + 6000*w - pay}));
+        }
+        let fit = disk_fit(&ops, &du);
+        let by_node: HashMap<&str, &Value> = fit
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| (f["node"].as_str().unwrap(), f))
+            .collect();
+        assert!(by_node["rust-0"]["fitted"].as_bool().unwrap());
+        assert!(!by_node["go-0"]["fitted"].as_bool().unwrap());
+        assert_eq!(by_node["go-0"]["reason"], "fitted term is negative");
     }
 }

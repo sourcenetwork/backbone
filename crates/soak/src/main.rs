@@ -165,7 +165,7 @@ impl RunArgs {
         let profile_name = flag("profile").unwrap_or_else(|| "p0-crud".to_string());
         let mut profile = Profile::by_name(&profile_name).ok_or_else(|| {
             eyre!(
-                "unknown --profile {profile_name}; use p0-crud, p1-encrypted, p1-unique or p2-acp"
+                "unknown --profile {profile_name}; use p0-crud, p0-size, p1-encrypted, p1-unique or p2-acp"
             )
         })?;
         if let Some(rate) = flag("rate") {
