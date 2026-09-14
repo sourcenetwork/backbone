@@ -106,6 +106,34 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
         .iter()
         .map(|d| d["doc_ids"].as_array().map_or(0, Vec::len))
         .sum();
+    let mut record_tags: BTreeMap<String, u64> = BTreeMap::new();
+    for d in &divergences {
+        for t in d["doc_tags"].as_array().into_iter().flatten() {
+            *record_tags
+                .entry(t.as_str().unwrap_or("untagged").to_string())
+                .or_default() += 1;
+        }
+    }
+    let final_sweep_lines = read_jsonl(&run_dir.join("final_sweep.jsonl"));
+    let mut sweep_tags: BTreeMap<String, u64> = BTreeMap::new();
+    for f in &final_sweep_lines {
+        *sweep_tags
+            .entry(f["tag"].as_str().unwrap_or("untagged").to_string())
+            .or_default() += 1;
+    }
+    let mut records_by_pair: BTreeMap<String, u64> = BTreeMap::new();
+    for d in &divergences {
+        let pair = d["pair"]
+            .as_array()
+            .map(|p| {
+                p.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .unwrap_or_default();
+        *records_by_pair.entry(pair).or_default() += 1;
+    }
     let mut churn_kinds: BTreeMap<String, u64> = BTreeMap::new();
     let mut longest_outage_ms = 0u64;
     for t in &topology {
@@ -145,6 +173,9 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
         "checks": check_status,
         "divergence_records": divergences.len(),
         "diverged_docs": diverged_docs,
+        "records_by_pair": records_by_pair,
+        "record_doc_tags": record_tags,
+        "final_sweep_tags": sweep_tags,
         "final_sweep": final_check.map(|c| json!({"mismatches": c["mismatches"], "eligible": c["eligible"]})),
         "final_sweep_causes": causes,
         "churn": {"events": churn_kinds, "longest_outage_ms": longest_outage_ms},
@@ -217,8 +248,12 @@ fn render(p: &Value, manifest: &Value) -> String {
         );
     }
     out += &format!(
-        "\n## checks: {}; divergence records {} ({} docs); final sweep {}\n",
-        p["checks"], p["divergence_records"], p["diverged_docs"], p["final_sweep"]
+        "\n## checks: {}; divergence records {} ({} docs) by pair {}; final sweep {}\n",
+        p["checks"],
+        p["divergence_records"],
+        p["diverged_docs"],
+        p["records_by_pair"],
+        p["final_sweep"]
     );
     if let Some(causes) = p["final_sweep_causes"]
         .as_object()
@@ -291,8 +326,8 @@ pub fn compare(a: &Path, b: &Path) -> Result<Value> {
 const RECOVERY_WINDOW_MS: u64 = 30_000;
 
 /// For each final-sweep mismatch: what was the last successful write to
-/// that doc, and was the other node down, or either node freshly recovered,
-/// at that moment? Counts by
+/// that doc, and was a member of the pair down, or the writer or a member
+/// freshly recovered, at that moment? Counts by
 /// `"<mechanism> missing_on=<node>: last <kind> on <node> while <state>"`.
 fn classify_final_sweep(
     sweep: &[Value],
@@ -334,20 +369,21 @@ fn classify_final_sweep(
     for f in sweep {
         let mech = s(f, "mechanism");
         let missing_on = f["detail"]["missing_on"].as_str().unwrap_or("-");
+        let members: Vec<&str> = s(f, "pair").split('|').collect();
         let label = match last_write.get(s(f, "doc_id")) {
             None => format!("{mech} missing_on={missing_on}: no successful write on record"),
             Some(op) => {
                 let node = s(op, "node");
                 let wall = op["wall_ts_ms"].as_u64().unwrap_or(0);
+                let involved = |n: &str| n == node || members.contains(&n);
                 let state = if let Some((_, _, _, kind)) = windows
                     .iter()
-                    .find(|(n, a, b, _)| n != node && *a <= wall && wall <= *b)
+                    .find(|(n, a, b, _)| n != node && involved(n) && *a <= wall && wall <= *b)
                 {
                     format!("peer {kind}")
-                } else if let Some((n, _, _, _)) = windows
-                    .iter()
-                    .find(|(_, _, b, _)| *b <= wall && wall - *b <= RECOVERY_WINDOW_MS)
-                {
+                } else if let Some((n, _, _, _)) = windows.iter().find(|(n, _, b, _)| {
+                    involved(n) && *b <= wall && wall - *b <= RECOVERY_WINDOW_MS
+                }) {
                     if n == node {
                         "writer recovering (<30s up)".to_string()
                     } else {

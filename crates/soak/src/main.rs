@@ -37,6 +37,7 @@ mod executor;
 mod generator;
 mod meter;
 mod summary;
+mod tags;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -58,11 +59,12 @@ use meter::{Meter, MeterConfig};
 const SCHEMA: &str = "type Users { name: String age: Int score: Float blob: String }";
 const CONTROL: &str = "Control";
 const CONTROL_SCHEMA: &str = "type Control { v: Int }";
-const RUST: usize = 0;
-const GO: usize = 1;
+/// Node indices: the harness spawns Rust nodes first, then Go nodes.
+const RUST0: usize = 0;
+const GO0: usize = 2;
 /// Durable store per node index; the Rust cli has no other durable engine
 /// and Go has only badger.
-const STORES: [&str; 2] = ["regolith", "badger"];
+const STORES: [&str; 4] = ["regolith", "regolith", "badger", "badger"];
 
 /// Everything a run needs; `replay` rebuilds it from a manifest.
 struct RunArgs {
@@ -230,16 +232,17 @@ fn main() -> Result<()> {
 
 async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     let mut builder = TestCluster::builder()
-        .rust_nodes(1)
-        .go_nodes(1)
+        .rust_nodes(2)
+        .go_nodes(2)
         .with_p2p()
         // File keyrings so peer identities survive restarts: without one the
         // Rust node mints a new peer ID per start, and with only the Env
         // keyring so does the Go node; a replicator pointed at the old id
         // never reconnects.
-        .with_file_keyring()
-        .with_node_store(RUST, STORES[RUST])
-        .with_node_store(GO, STORES[GO]);
+        .with_file_keyring();
+    for (i, store) in STORES.iter().enumerate() {
+        builder = builder.with_node_store(i, *store);
+    }
     if let Some(intervals) = &a.retry_intervals {
         let flag = ["--replicator-retry-intervals", intervals.as_str()];
         builder = builder.with_extra_rust_args(flag).with_extra_go_args(flag);
@@ -249,15 +252,14 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         .build()
         .await
         .wrap_err("building the mixed cluster")?;
-    for i in [RUST, GO] {
+    for (i, store) in STORES.iter().enumerate() {
         println!(
-            "{} at {} ({})",
+            "{} at {} ({store})",
             cluster.nodes[i].name,
-            cluster.api_url(i),
-            STORES[i]
+            cluster.api_url(i)
         );
     }
-    wire_bidirectional(&cluster, &a.profile.collection)?;
+    wire_full_mesh(&cluster, &a.profile.collection)?;
     preflight(&cluster, &a.profile.collection).await?;
     let mut collections = vec![a.profile.collection.clone()];
     if a.control {
@@ -337,7 +339,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     let (stop_tx, stop_rx) = oneshot::channel();
     let (churn_stop_tx, churn_stop_rx) = oneshot::channel();
     let checker = Checker::new(
-        [nodes[RUST].clone(), nodes[GO].clone()],
+        nodes.clone(),
         collections,
         CheckerConfig {
             grace: a.grace,
@@ -475,6 +477,10 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
             "NOT eligible: a node was down or in grace"
         }
     );
+    println!(
+        "divergent docs: {} with a known-cause tag, {} UNTAGGED",
+        summary.tagged_docs, summary.untagged_docs
+    );
     if a.hold {
         println!("holding: nodes stay up for inspection, press Enter to stop");
         for (name, url) in &node_list {
@@ -491,6 +497,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         "checks": summary.checks, "unreachable": summary.unreachable,
         "divergence_records": summary.divergences, "unresolved": summary.unresolved,
         "final_mismatches": summary.final_mismatches, "final_eligible": summary.final_eligible,
+        "tagged_docs": summary.tagged_docs, "untagged_docs": summary.untagged_docs,
     });
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&m)?)?;
     drop(cluster);
@@ -499,71 +506,95 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     Ok(())
 }
 
-/// Both nodes replicate `collection` to each other over libp2p.
-/// Same call order as defradb.rs `p2p_interop_bench`, which is proven on
-/// mixed clusters.
-fn wire_bidirectional(cluster: &TestCluster, collection: &str) -> Result<()> {
-    let addr = [
-        extract_p2p_addr(cluster, RUST),
-        extract_p2p_addr(cluster, GO),
-    ];
-    for i in [RUST, GO] {
+/// Every node replicates `collection` to every other over libp2p: connect
+/// to all peers, subscribe the collection, one replicator per directed
+/// pair. Same call order as defradb.rs `p2p_interop_bench`, which is
+/// proven on mixed clusters.
+fn wire_full_mesh(cluster: &TestCluster, collection: &str) -> Result<()> {
+    let n = cluster.len();
+    let addrs: Vec<String> = (0..n).map(|i| extract_p2p_addr(cluster, i)).collect();
+    for i in 0..n {
         cluster.client(i).schema_add(SCHEMA)?;
     }
-    cluster.client(RUST).p2p_connect(&[addr[GO].as_str()])?;
-    for i in [RUST, GO] {
+    for i in 0..n {
+        let others: Vec<&str> = (0..n)
+            .filter(|j| *j != i)
+            .map(|j| addrs[j].as_str())
+            .collect();
+        cluster.client(i).p2p_connect(&others)?;
+    }
+    for i in 0..n {
         cluster.client(i).p2p_collection_add(&[collection])?;
     }
-    cluster
-        .client(RUST)
-        .p2p_replicator_set(&[collection], &addr[GO])?;
-    cluster
-        .client(GO)
-        .p2p_replicator_set(&[collection], &addr[RUST])?;
+    for i in 0..n {
+        for j in (0..n).filter(|j| *j != i) {
+            cluster
+                .client(i)
+                .p2p_replicator_set(&[collection], &addrs[j])?;
+        }
+    }
     Ok(())
 }
 
-/// T0 check: a doc created on Go must show up on Rust over HTTP GraphQL
-/// before any workload runs, so a miswired mesh fails fast.
+/// T0 check: a doc created on each node must show up on every other node
+/// over HTTP GraphQL before any workload runs, so a miswired mesh fails fast.
 async fn preflight(cluster: &TestCluster, collection: &str) -> Result<()> {
-    cluster
-        .client(GO)
-        .collection_create(collection, r#"{"name": "preflight", "age": 1}"#)
-        .wrap_err("creating the preflight doc on go-0")?;
+    let n = cluster.len();
+    for i in 0..n {
+        let doc = format!(
+            r#"{{"name": "preflight-{}", "age": 1}}"#,
+            cluster.nodes[i].name
+        );
+        cluster
+            .client(i)
+            .collection_create(collection, &doc)
+            .wrap_err_with(|| format!("creating the preflight doc on {}", cluster.nodes[i].name))?;
+    }
     let http = reqwest::Client::new();
-    let query =
-        format!("{{ {collection}(filter: {{name: {{_eq: \"preflight\"}}}}) {{ _docID }} }}");
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(90);
     loop {
-        let data = gql(&http, cluster.api_url(RUST), &query)
-            .await
-            .map_err(eyre::Report::msg)?;
-        if data[collection].as_array().map_or(0, Vec::len) == 1 {
-            println!("preflight ok: go-0 -> rust-0 replication works");
+        let mut missing = Vec::new();
+        for creator in 0..n {
+            let name = &cluster.nodes[creator].name;
+            let query = format!(
+                "{{ {collection}(filter: {{name: {{_eq: \"preflight-{name}\"}}}}) {{ _docID }} }}"
+            );
+            for viewer in (0..n).filter(|v| *v != creator) {
+                let data = gql(&http, cluster.api_url(viewer), &query)
+                    .await
+                    .map_err(eyre::Report::msg)?;
+                if data[collection].as_array().map_or(0, Vec::len) != 1 {
+                    missing.push(format!("{name} -> {}", cluster.nodes[viewer].name));
+                }
+            }
+        }
+        if missing.is_empty() {
+            println!("preflight ok: every node's doc reached every other node");
             return Ok(());
         }
         eyre::ensure!(
             Instant::now() < deadline,
-            "preflight doc did not replicate go-0 -> rust-0 within 60s"
+            "preflight docs did not replicate within 90s: {}",
+            missing.join(", ")
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
-/// Positive control: `Control` replicates Rust -> Go only. A doc created on
-/// Go never reaches Rust (M1), and a Rust-created doc updated on Go has
-/// different heads on the two sides (M3).
+/// Positive control: `Control` exists on every node but replicates rust-0 ->
+/// go-0 only. A doc created on go-0 never reaches the others (M1), and a
+/// rust-0-created doc updated on go-0 has different heads on the two (M3).
 async fn wire_control(cluster: &TestCluster) -> Result<()> {
-    for i in [RUST, GO] {
+    for i in 0..cluster.len() {
         cluster.client(i).schema_add(CONTROL_SCHEMA)?;
     }
-    let go_addr = extract_p2p_addr(cluster, GO);
+    let go_addr = extract_p2p_addr(cluster, GO0);
     cluster
-        .client(RUST)
+        .client(RUST0)
         .p2p_replicator_set(&[CONTROL], &go_addr)?;
     let http = reqwest::Client::new();
-    let go_url = cluster.api_url(GO);
-    let rust_url = cluster.api_url(RUST);
+    let go_url = cluster.api_url(GO0);
+    let rust_url = cluster.api_url(RUST0);
     let create = |v: u32| format!("mutation {{ add_{CONTROL}(input: [{{v: {v}}}]) {{ _docID }} }}");
     gql(&http, go_url, &create(1))
         .await

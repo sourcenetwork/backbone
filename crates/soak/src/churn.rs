@@ -34,6 +34,8 @@ pub enum ChurnKind {
     Restart,
     /// SIGKILL, stay dead for `down_ms` of virtual time, respawn.
     CrashKill,
+    /// SIGTERM, stay stopped for `down_ms` with the ports held, start again.
+    GracefulLeave,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -42,7 +44,7 @@ pub struct ChurnEvent {
     pub virtual_ts_ms: u64,
     pub node: usize,
     pub kind: ChurnKind,
-    /// CrashKill only.
+    /// CrashKill and GracefulLeave only.
     pub down_ms: u64,
 }
 
@@ -52,7 +54,7 @@ pub struct ChurnConfig {
     pub spacing_ms: u64,
     /// Minimum virtual time from one event's end to the next on that node.
     pub cooldown_ms: u64,
-    /// Crash down-time bounds, inclusive.
+    /// Crash and leave down-time bounds, inclusive.
     pub down_ms: (u64, u64),
 }
 
@@ -80,13 +82,15 @@ pub fn schedule(seed: u64, nodes: usize, horizon_ms: u64, cfg: &ChurnConfig) -> 
             return events;
         }
         let node = rng.gen_range(0..nodes);
-        let kind = if rng.gen_bool(0.5) {
-            ChurnKind::Restart
-        } else {
-            ChurnKind::CrashKill
+        let kind = match rng.gen_range(0..3) {
+            0 => ChurnKind::Restart,
+            1 => ChurnKind::CrashKill,
+            _ => ChurnKind::GracefulLeave,
         };
         let down_ms = match kind {
-            ChurnKind::CrashKill => rng.gen_range(cfg.down_ms.0..=cfg.down_ms.1),
+            ChurnKind::CrashKill | ChurnKind::GracefulLeave => {
+                rng.gen_range(cfg.down_ms.0..=cfg.down_ms.1)
+            }
             ChurnKind::Restart => 0,
         };
         if last_end[node].is_some_and(|end| t < end + cfg.cooldown_ms) {
@@ -103,11 +107,13 @@ pub fn schedule(seed: u64, nodes: usize, horizon_ms: u64, cfg: &ChurnConfig) -> 
     }
 }
 
-/// A node went down or came back; the checker uses it for eligibility.
+/// A node went down or came back; the checker uses it for eligibility and
+/// for the known-cause tags.
 #[derive(Clone, Copy, Debug)]
 pub struct Transition {
     pub node: usize,
     pub up: bool,
+    pub wall_ts_ms: u64,
 }
 
 /// Virtual time of the workload: ops issued so far over the profile rate.
@@ -181,6 +187,7 @@ async fn fire(
     let _ = transitions.send(Transition {
         node: event.node,
         up: false,
+        wall_ts_ms: now_ms(),
     });
     log_phase(log, event, &name, "down", vnow(), 0, None)?;
     println!(
@@ -192,17 +199,7 @@ async fn fire(
     );
     match event.kind {
         ChurnKind::Restart => {
-            // The harness truncates stdout.log on every spawn; keep the old
-            // process's log so the artifact holds the whole history.
-            let log_dir = cluster.nodes[event.node].process.log_dir().to_path_buf();
-            for file in ["stdout.log", "stderr.log"] {
-                let from = log_dir.join(file);
-                let to = log_dir.join(format!("{file}.before-event-{}", event.index));
-                if from.exists() {
-                    std::fs::rename(&from, &to)
-                        .wrap_err_with(|| format!("{name}: rotating {}", from.display()))?;
-                }
-            }
+            rotate_logs(cluster, event)?;
             cluster
                 .restart_node(event.node, Duration::from_secs(60))
                 .await
@@ -216,6 +213,18 @@ async fn fire(
                 .respawn()
                 .wrap_err_with(|| format!("{name}: respawn"))?;
         }
+        ChurnKind::GracefulLeave => {
+            rotate_logs(cluster, event)?;
+            let stopped = cluster
+                .stop_node(event.node)
+                .await
+                .wrap_err_with(|| format!("{name}: stop"))?;
+            tokio::time::sleep(Duration::from_millis(event.down_ms)).await;
+            cluster
+                .start_stopped_node(stopped, Duration::from_secs(60))
+                .await
+                .wrap_err_with(|| format!("{name}: start after leave"))?;
+        }
     }
     wait_healthy(http, &url, collection, Duration::from_secs(60))
         .await
@@ -223,6 +232,7 @@ async fn fire(
     let _ = transitions.send(Transition {
         node: event.node,
         up: true,
+        wall_ts_ms: now_ms(),
     });
     let pid = peer_id(http, &url).await;
     log_phase(
@@ -267,6 +277,22 @@ fn find_peer_id(v: &Value) -> Option<String> {
         Value::Object(o) => o.values().find_map(find_peer_id),
         _ => None,
     }
+}
+
+/// The harness truncates stdout.log on every spawn; keep the old process's
+/// log so the artifact holds the whole history.
+fn rotate_logs(cluster: &TestCluster, event: &ChurnEvent) -> Result<()> {
+    let name = &cluster.nodes[event.node].name;
+    let log_dir = cluster.nodes[event.node].process.log_dir().to_path_buf();
+    for file in ["stdout.log", "stderr.log"] {
+        let from = log_dir.join(file);
+        let to = log_dir.join(format!("{file}.before-event-{}", event.index));
+        if from.exists() {
+            std::fs::rename(&from, &to)
+                .wrap_err_with(|| format!("{name}: rotating {}", from.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn log_phase(
@@ -356,16 +382,24 @@ mod tests {
     }
 
     #[test]
-    fn kill_down_time_within_bounds() {
+    fn down_time_within_bounds_and_all_kinds_drawn() {
         let cfg = ChurnConfig::default();
-        let kills: Vec<_> = plan(3)
-            .into_iter()
-            .filter(|e| e.kind == ChurnKind::CrashKill)
-            .collect();
-        assert!(!kills.is_empty());
-        for k in &kills {
-            assert!((cfg.down_ms.0..=cfg.down_ms.1).contains(&k.down_ms));
+        let events = plan(3);
+        for kind in [
+            ChurnKind::Restart,
+            ChurnKind::CrashKill,
+            ChurnKind::GracefulLeave,
+        ] {
+            assert!(
+                events.iter().any(|e| e.kind == kind),
+                "{kind:?} never drawn"
+            );
         }
-        assert!(plan(3).iter().any(|e| e.kind == ChurnKind::Restart));
+        for e in &events {
+            match e.kind {
+                ChurnKind::Restart => assert_eq!(e.down_ms, 0),
+                _ => assert!((cfg.down_ms.0..=cfg.down_ms.1).contains(&e.down_ms)),
+            }
+        }
     }
 }
