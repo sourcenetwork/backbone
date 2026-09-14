@@ -24,6 +24,9 @@ pub struct OpRecord {
     pub collection: String,
     pub doc_id: Option<String>,
     pub ok: bool,
+    /// The victim's create failed (its node was down), so there was nothing
+    /// to update or delete; not an error of this op.
+    pub skipped: bool,
     pub error: Option<String>,
     pub latency_ms: u64,
 }
@@ -74,9 +77,10 @@ impl Executor {
 
         let wall_ts_ms = now_ms();
         let started = Instant::now();
+        let skipped = query.is_none();
         let outcome = match query {
             Some(q) => gql(&self.http, url, &q).await,
-            None => Err("victim docID unknown (its create failed)".to_string()),
+            None => Err("orphan: this slot's create failed".to_string()),
         };
         let latency_ms = started.elapsed().as_millis() as u64;
 
@@ -111,6 +115,7 @@ impl Executor {
             collection: col.clone(),
             doc_id,
             ok,
+            skipped,
             error,
             latency_ms,
         };

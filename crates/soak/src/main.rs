@@ -5,15 +5,17 @@
 //! run artifact under `runs/<unix-secs>-<seed>/`.
 //!
 //! ```text
-//! soak [--seed N] [--ops N] [--rate OPS_PER_SEC] [--settle SECS] [--control]
+//! soak [--seed N] [--ops N] [--rate OPS_PER_SEC] [--settle SECS] [--grace SECS] [--control]\n//!      [--churn [--churn-spacing SECS]]
 //! ```
 //! `--control` adds a `Control` collection replicated Rust -> Go only and
 //! writes to the Go side, so the checker must report M1 and M3 divergences
-//! on it (the positive control).
+//! on it (the positive control). `--churn` enables the seeded restart /
+//! crash-kill schedule; `--churn-spacing` sets its mean spacing and cooldown.
 //! Env: `DEFRA_RUST_BINARY` (built `defra`), Go `defradb` on PATH with
 //! `DEFRA_GO_COMPAT_COMMIT` set.
 
 mod checker;
+mod churn;
 mod confirm;
 mod executor;
 mod generator;
@@ -29,6 +31,7 @@ use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
 use checker::{Checker, CheckerConfig};
+use churn::ChurnConfig;
 use executor::{gql, Executor};
 use generator::{Generator, Profile};
 
@@ -63,6 +66,17 @@ fn main() -> Result<()> {
     std::env::set_var("DEFRA_WORKSPACE_ROOT", &run_dir);
     std::env::set_var("DEFRA_E2E_KEEP", "1");
     let control = std::env::args().any(|a| a == "--control");
+    let mut churn_cfg = std::env::args()
+        .any(|a| a == "--churn")
+        .then(ChurnConfig::default);
+    if let (Some(cfg), Some(secs)) = (churn_cfg.as_mut(), flag("churn-spacing")) {
+        let ms = secs
+            .parse::<u64>()
+            .wrap_err("--churn-spacing must be seconds")?
+            * 1000;
+        cfg.spacing_ms = ms;
+        cfg.cooldown_ms = ms;
+    }
     let mut checker_cfg = CheckerConfig::default();
     if let Some(secs) = flag("settle") {
         checker_cfg.settle =
@@ -76,9 +90,11 @@ fn main() -> Result<()> {
         ops,
         control,
         checker_cfg,
+        churn_cfg,
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     run_dir: &Path,
     seed: u64,
@@ -86,11 +102,17 @@ async fn run(
     ops: usize,
     control: bool,
     checker_cfg: CheckerConfig,
+    churn_cfg: Option<ChurnConfig>,
 ) -> Result<()> {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .go_nodes(1)
         .with_p2p()
+        // File keyrings so peer identities survive restarts: without one the
+        // Rust node mints a new peer ID per start, and with only the Env
+        // keyring so does the Go node; a replicator pointed at the old id
+        // never reconnects.
+        .with_file_keyring()
         .with_node_store(RUST, STORES[RUST])
         .with_node_store(GO, STORES[GO])
         .build()
@@ -120,15 +142,38 @@ async fn run(
             )
         })
         .collect();
+    let http = reqwest::Client::new();
+    let mut peer_ids = Vec::new();
+    for (name, url) in &nodes {
+        let pid = churn::peer_id(&http, url).await;
+        println!("{name} peer id: {}", pid.as_deref().unwrap_or("?"));
+        peer_ids.push(pid);
+    }
+    let horizon_ms = churn::virtual_ms(ops as u64, profile.rate);
+    let churn_events = churn_cfg
+        .as_ref()
+        .map(|cfg| churn::schedule(seed, nodes.len(), horizon_ms, cfg))
+        .unwrap_or_default();
+    for e in &churn_events {
+        println!(
+            "churn plan #{} at {}s: {:?} {} (down {}ms)",
+            e.index,
+            e.virtual_ts_ms / 1000,
+            e.kind,
+            nodes[e.node].0,
+            e.down_ms
+        );
+    }
     let manifest = json!({
         "seed": seed,
         "ops": ops,
         "profile": profile,
-        "nodes": nodes.iter().zip(STORES).map(|((name, url), store)| {
-            json!({"name": name, "api_url": url, "store": store})
+        "nodes": nodes.iter().zip(STORES).zip(&peer_ids).map(|(((name, url), store), pid)| {
+            json!({"name": name, "api_url": url, "store": store, "peer_id": pid})
         }).collect::<Vec<_>>(),
         "rust_binary": std::env::var("DEFRA_RUST_BINARY").unwrap_or_default(),
         "go_compat_commit": std::env::var("DEFRA_GO_COMPAT_COMMIT").unwrap_or_default(),
+        "churn": churn_cfg.as_ref().map(|cfg| json!({"config": cfg, "schedule": churn_events})),
     });
     std::fs::write(
         run_dir.join("manifest.json"),
@@ -137,7 +182,9 @@ async fn run(
 
     let op_index = Arc::new(AtomicU64::new(0));
     let (touched_tx, touched_rx) = mpsc::unbounded_channel();
+    let (transitions_tx, transitions_rx) = mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = oneshot::channel();
+    let (churn_stop_tx, churn_stop_rx) = oneshot::channel();
     let run_id = run_dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -151,44 +198,77 @@ async fn run(
         Arc::clone(&op_index),
         run_dir,
     )?;
-    let checker_task = tokio::spawn(checker.run(touched_rx, stop_rx));
+    let checker_task = tokio::spawn(checker.run(touched_rx, transitions_rx, stop_rx));
 
     let mut generator = Generator::new(seed, profile.clone(), nodes.len());
     let mut executor = Executor::new(nodes, &profile.collection, &run_dir.join("ops.jsonl"))?;
     let mut tick = tokio::time::interval(Duration::from_secs_f64(1.0 / profile.rate));
-    let (mut ok, mut failed) = (0usize, 0usize);
-    let started = Instant::now();
-    for op in generator.by_ref().take(ops) {
-        tick.tick().await;
-        let record = executor.execute(&op).await?;
-        op_index.store(op.index + 1, Ordering::Relaxed);
-        if record.ok {
-            ok += 1;
-            if let Some(id) = &record.doc_id {
-                let _ = touched_tx.send(id.clone());
+    let workload = async {
+        let (mut ok, mut failed, mut skipped) = (0usize, 0usize, 0usize);
+        let started = Instant::now();
+        for op in generator.by_ref().take(ops) {
+            tick.tick().await;
+            let record = executor.execute(&op).await?;
+            op_index.store(op.index + 1, Ordering::Relaxed);
+            if record.ok {
+                ok += 1;
+                if let Some(id) = &record.doc_id {
+                    let _ = touched_tx.send(id.clone());
+                }
+            } else if record.skipped {
+                skipped += 1;
+            } else {
+                failed += 1;
+                println!(
+                    "op {} {:?} on {} failed: {}",
+                    op.index,
+                    op.kind,
+                    record.node,
+                    record.error.unwrap_or_default()
+                );
             }
-        } else {
-            failed += 1;
-            println!(
-                "op {} {:?} on {} failed: {}",
-                op.index,
-                op.kind,
-                record.node,
-                record.error.unwrap_or_default()
-            );
         }
-    }
-    println!(
-        "done: {ok} ok, {failed} failed, {:.1} ops/s over {:.1}s",
-        ops as f64 / started.elapsed().as_secs_f64(),
-        started.elapsed().as_secs_f64()
+        println!(
+            "done: {ok} ok, {failed} failed, {skipped} skipped (orphans), {:.1} ops/s over {:.1}s",
+            ops as f64 / started.elapsed().as_secs_f64(),
+            started.elapsed().as_secs_f64()
+        );
+        let _ = churn_stop_tx.send(());
+        Ok::<(), eyre::Report>(())
+    };
+    // The churner owns the cluster from here and shares this task with the
+    // workload: the harness restart future is not Send, so it cannot be
+    // spawned. With no schedule it only waits for stop and hands the
+    // cluster back.
+    let churner = churn::run(
+        cluster,
+        churn_events,
+        profile.rate,
+        profile.collection.clone(),
+        Arc::clone(&op_index),
+        transitions_tx,
+        run_dir.join("topology.jsonl"),
+        churn_stop_rx,
     );
+    let (workload_result, cluster) = tokio::join!(workload, churner);
+    workload_result?;
+    let cluster = cluster.wrap_err("churner")?;
     let _ = stop_tx.send(());
     let summary = checker_task.await?.wrap_err("checker")?;
     println!(
         "checks: {} ({} unreachable), divergence records: {}, still present at final sweep: {}",
         summary.checks, summary.unreachable, summary.divergences, summary.unresolved
     );
+    println!(
+        "final sweep: {} mismatches ({})",
+        summary.final_mismatches,
+        if summary.final_eligible {
+            "eligible"
+        } else {
+            "NOT eligible: a node was down or in grace"
+        }
+    );
+    drop(cluster);
     Ok(())
 }
 

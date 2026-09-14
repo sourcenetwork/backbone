@@ -23,6 +23,7 @@ use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::churn::Transition;
 use crate::confirm::{Confirmer, Key};
 use crate::executor::{gql, now_ms};
 
@@ -32,6 +33,8 @@ type Confirmed = (Key, Value, u32);
 pub struct CheckerConfig {
     pub interval: Duration,
     /// A mismatch younger than this is "sync in flight", never a divergence.
+    /// Both runtimes retry a failed push after 30s then 60s, so a doc whose
+    /// push failed twice lands at ~90s; the default covers that.
     pub grace: Duration,
     pub confirmations: u32,
     /// Untouched shared docs to head-check per interval check.
@@ -47,7 +50,7 @@ impl Default for CheckerConfig {
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(10),
-            grace: Duration::from_secs(15),
+            grace: Duration::from_secs(120),
             confirmations: 3,
             cold_sample: 50,
             batch: 100,
@@ -64,6 +67,10 @@ pub struct Summary {
     pub divergences: u64,
     /// Confirmed mismatches still present at the final sweep.
     pub unresolved: usize,
+    /// Mismatches in the final full sweep, whatever their eligibility.
+    pub final_mismatches: usize,
+    /// Whether the final sweep was eligible (no node down or in grace).
+    pub final_eligible: bool,
 }
 
 pub struct Checker {
@@ -81,8 +88,15 @@ pub struct Checker {
     /// Op index at the last check with zero mismatches; the record's
     /// event window starts here.
     last_clear_op: u64,
+    /// Nodes currently down per the churner.
+    down: HashSet<usize>,
+    /// Mismatches before this instant are expected (a node came back less
+    /// than `grace` ago).
+    eligible_at: Instant,
     checks: BufWriter<File>,
     divergences: BufWriter<File>,
+    /// Every mismatch of the final sweep, confirmed or not.
+    final_sweep: BufWriter<File>,
     summary: Summary,
 }
 
@@ -114,18 +128,22 @@ impl Checker {
             seed,
             op_index,
             last_clear_op: 0,
+            down: HashSet::new(),
+            eligible_at: Instant::now(),
             checks: open("checks.jsonl")?,
             divergences: open("divergences.jsonl")?,
+            final_sweep: open("final_sweep.jsonl")?,
             summary: Summary::default(),
         })
     }
 
     /// Check every `interval` until `stop` fires, then settle and run the
     /// full sweep. `touched` feeds docIDs the workload wrote since the last
-    /// check.
+    /// check; `transitions` feeds node down/up events from the churner.
     pub async fn run(
         mut self,
         mut touched: mpsc::UnboundedReceiver<String>,
+        mut transitions: mpsc::UnboundedReceiver<Transition>,
         mut stop: oneshot::Receiver<()>,
     ) -> Result<Summary> {
         let mut tick = tokio::time::interval(self.cfg.interval);
@@ -137,21 +155,26 @@ impl Checker {
                     while let Ok(id) = touched.try_recv() {
                         recent.insert(id);
                     }
-                    self.check(std::mem::take(&mut recent), false).await?;
+                    self.check(std::mem::take(&mut recent), &mut transitions, false)
+                        .await?;
                 }
                 _ = &mut stop => {
+                    // Settle: keep checking until a clear, eligible check or
+                    // the budget runs out, then sweep everything.
                     let deadline = Instant::now() + self.cfg.settle;
                     loop {
                         while let Ok(id) = touched.try_recv() {
                             recent.insert(id);
                         }
-                        let clear = self.check(std::mem::take(&mut recent), false).await?;
-                        if clear || Instant::now() >= deadline {
+                        let (clear, eligible) = self
+                            .check(std::mem::take(&mut recent), &mut transitions, false)
+                            .await?;
+                        if (clear && eligible) || Instant::now() >= deadline {
                             break;
                         }
                         tokio::time::sleep(self.cfg.interval).await;
                     }
-                    self.check(HashSet::new(), true).await?;
+                    self.check(HashSet::new(), &mut transitions, true).await?;
                     self.summary.unresolved = self.confirmer.unresolved();
                     return Ok(self.summary);
                 }
@@ -159,14 +182,29 @@ impl Checker {
         }
     }
 
-    /// One check; returns whether it was clear. `Err` only for log I/O; an
+    /// One check; returns (clear, eligible). `Err` only for log I/O; an
     /// unreachable node is logged and leaves the confirmer untouched, so
-    /// pending mismatches survive it.
-    async fn check(&mut self, recent: HashSet<String>, full: bool) -> Result<bool> {
+    /// pending mismatches survive it. While a node is down, or for `grace`
+    /// after it came back, mismatches are expected and skip the confirmer.
+    async fn check(
+        &mut self,
+        recent: HashSet<String>,
+        transitions: &mut mpsc::UnboundedReceiver<Transition>,
+        full: bool,
+    ) -> Result<(bool, bool)> {
         let now = Instant::now();
+        while let Ok(t) = transitions.try_recv() {
+            if t.up {
+                self.down.remove(&t.node);
+                self.eligible_at = now + self.cfg.grace;
+            } else {
+                self.down.insert(t.node);
+            }
+        }
+        let eligible = self.down.is_empty() && now >= self.eligible_at;
         let op_index = self.op_index.load(Ordering::Relaxed);
         let mut line = json!({
-            "wall_ts_ms": now_ms(), "op_index": op_index, "full": full,
+            "wall_ts_ms": now_ms(), "op_index": op_index, "full": full, "eligible": eligible,
         });
         self.summary.checks += 1;
         let mut clear = false;
@@ -178,23 +216,40 @@ impl Checker {
             }
             Ok((mismatches, m3_docs)) => {
                 let n = mismatches.len();
-                let confirmed = self.confirmer.observe(now, mismatches);
-                self.record(&confirmed, op_index)?;
-                if n == 0 {
+                if full {
+                    self.summary.final_mismatches = n;
+                    self.summary.final_eligible = eligible;
+                    for ((col, mech, id), detail) in &mismatches {
+                        let line = json!({
+                            "collection": col, "mechanism": mech, "doc_id": id, "detail": detail,
+                        });
+                        serde_json::to_writer(&mut self.final_sweep, &line)?;
+                        self.final_sweep.write_all(b"\n")?;
+                    }
+                    self.final_sweep.flush()?;
+                }
+                let (status, confirmed) = if n == 0 {
                     self.last_clear_op = op_index;
                     clear = true;
-                }
-                line["status"] = json!(if n == 0 { "clear" } else { "mismatch" });
+                    ("clear", 0)
+                } else if !eligible {
+                    ("expected", 0)
+                } else {
+                    let confirmed = self.confirmer.observe(now, mismatches);
+                    self.record(&confirmed, op_index)?;
+                    ("mismatch", confirmed.len())
+                };
+                line["status"] = json!(status);
                 line["m3_docs"] = json!(m3_docs);
                 line["mismatches"] = json!(n);
                 line["pending"] = json!(self.confirmer.pending());
-                line["confirmed"] = json!(confirmed.len());
+                line["confirmed"] = json!(confirmed);
             }
         }
         serde_json::to_writer(&mut self.checks, &line)?;
         self.checks.write_all(b"\n")?;
         self.checks.flush()?;
-        Ok(clear)
+        Ok((clear, eligible))
     }
 
     /// M1 + M3 over all collections. Returns the mismatches and how many
