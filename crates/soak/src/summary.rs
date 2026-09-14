@@ -52,7 +52,7 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
         let is_ok = op["ok"].as_bool().unwrap_or(false);
         if is_ok {
             ok += 1;
-            if s(op, "kind") != "query" {
+            if is_write(s(op, "kind")) {
                 writes_ok += 1;
             }
             latency
@@ -388,7 +388,7 @@ fn classify_final_sweep(
         .collect();
     let mut last_write: HashMap<&str, &Value> = HashMap::new();
     for op in ops {
-        if op["ok"].as_bool() == Some(true) && s(op, "kind") != "query" {
+        if op["ok"].as_bool() == Some(true) && is_write(s(op, "kind")) {
             if let Some(id) = op["doc_id"].as_str() {
                 last_write.insert(id, op);
             }
@@ -400,7 +400,13 @@ fn classify_final_sweep(
         let missing_on = f["detail"]["missing_on"]
             .as_str()
             .or_else(|| f["detail"]["undecryptable_on"].as_str())
-            .unwrap_or("-");
+            .map(String::from)
+            .or_else(|| {
+                f["detail"]["viewer"]
+                    .as_str()
+                    .map(|v| format!("viewer={v}"))
+            })
+            .unwrap_or_else(|| "-".to_string());
         let members: Vec<&str> = s(f, "pair").split('|').collect();
         let label = match last_write.get(s(f, "doc_id")) {
             None => format!("{mech} missing_on={missing_on}: no successful write on record"),
@@ -433,4 +439,21 @@ fn classify_final_sweep(
         *out.entry(label).or_default() += 1;
     }
     out
+}
+
+/// Grants change relationships, not documents, so they are not writes.
+fn is_write(kind: &str) -> bool {
+    !matches!(kind, "query" | "grant")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grants_and_queries_are_not_writes() {
+        assert!(!is_write("grant"));
+        assert!(!is_write("query"));
+        assert!(is_write("update"));
+    }
 }

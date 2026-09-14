@@ -30,6 +30,7 @@
 //! contract: planned op fields and the churn schedule, plus docIDs where
 //! both runs have one; outcomes and timing are not part of it.
 
+mod auth;
 mod checker;
 mod churn;
 mod confirm;
@@ -51,10 +52,11 @@ use eyre::{eyre, Result, WrapErr};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
+use auth::{auth_token, Identities, Identity};
 use checker::{Checker, CheckerConfig, Touch};
 use churn::ChurnConfig;
-use executor::{gql, http_client, now_ms, Executor};
-use generator::{Generator, OpKind, Profile};
+use executor::{gql, gql_as, http_client, now_ms, Executor};
+use generator::{Actor, Generator, OpKind, Profile};
 use meter::{Meter, MeterConfig};
 
 const SCHEMA: &str = "type Users { name: String age: Int score: Float blob: String }";
@@ -69,6 +71,33 @@ fn schema_for(profile: &Profile) -> &'static str {
     } else {
         SCHEMA
     }
+}
+
+/// The p2-acp collection, bound to the policy added at setup.
+fn acp_schema(policy_id: &str) -> String {
+    format!(
+        "type User @policy(id: \"{policy_id}\", resource: \"users\") {{ name: String age: Int score: Float blob: String }}"
+    )
+}
+
+/// Node binary per index: the Rust `defra` before `GO0`, Go `defradb` after.
+fn binaries() -> Result<Vec<PathBuf>> {
+    let rust = PathBuf::from(
+        std::env::var("DEFRA_RUST_BINARY").wrap_err("DEFRA_RUST_BINARY must be set")?,
+    );
+    let go = PathBuf::from("defradb");
+    Ok((0..STORES.len())
+        .map(|i| if i < GO0 { rust.clone() } else { go.clone() })
+        .collect())
+}
+
+fn generate_identity(bin: &Path, what: &str) -> Result<Identity> {
+    let id = defra_harness::identity::generate_identity(bin)
+        .wrap_err_with(|| format!("generating the {what} identity"))?;
+    Ok(Identity {
+        key_hex: id.private_key_hex,
+        did: id.did,
+    })
 }
 const CONTROL: &str = "Control";
 const CONTROL_SCHEMA: &str = "type Control { v: Int }";
@@ -105,7 +134,7 @@ impl RunArgs {
     fn from_flags() -> Result<Self> {
         let profile_name = flag("profile").unwrap_or_else(|| "p0-crud".to_string());
         let mut profile = Profile::by_name(&profile_name).ok_or_else(|| {
-            eyre!("unknown --profile {profile_name}; use p0-crud or p1-encrypted")
+            eyre!("unknown --profile {profile_name}; use p0-crud, p1-encrypted or p2-acp")
         })?;
         if let Some(rate) = flag("rate") {
             profile.rate = rate.parse().wrap_err("--rate must be a number")?;
@@ -282,21 +311,18 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         // Recipe configuration (spec 62, D1): dev mode so Go's KMS has a node
         // identity under --no-keyring, an explicit identity per node, and one
         // SE key seeded into every file keyring.
-        let rust_bin = PathBuf::from(
-            std::env::var("DEFRA_RUST_BINARY").wrap_err("DEFRA_RUST_BINARY must be set")?,
-        );
-        let go_bin = PathBuf::from("defradb");
         builder = builder
             .with_encryption()
             .with_development()
             .with_shared_searchable_encryption_key(SE_KEY);
-        for i in 0..STORES.len() {
-            let bin = if i < GO0 { &rust_bin } else { &go_bin };
-            let identity = defra_harness::identity::generate_identity(bin)
-                .wrap_err_with(|| format!("generating the node identity for node {i}"))?;
-            builder = builder.with_node_identity(i, identity.private_key_hex);
+        for (i, bin) in binaries()?.iter().enumerate() {
+            let identity = generate_identity(bin, &format!("node {i}"))?;
+            builder = builder.with_node_identity(i, identity.key_hex);
         }
         println!("encrypted profile: encryption + dev mode + per-node identities + shared SE key");
+    }
+    if a.profile.is_acp() {
+        builder = builder.with_acp_local();
     }
     if let Some(intervals) = &a.retry_intervals {
         let flag = ["--replicator-retry-intervals", intervals.as_str()];
@@ -314,8 +340,25 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
             cluster.api_url(i)
         );
     }
-    wire_full_mesh(&cluster, &a.profile)?;
+    let identities = if a.profile.is_acp() {
+        let rust = &binaries()?[RUST0];
+        let ids = Identities {
+            owner: generate_identity(rust, "owner")?,
+            reader: generate_identity(rust, "reader")?,
+        };
+        println!(
+            "acp profile: local ACP, owner {} reader {}",
+            ids.owner.did, ids.reader.did
+        );
+        Some(ids)
+    } else {
+        None
+    };
+    wire_full_mesh(&cluster, &a.profile, identities.as_ref())?;
     preflight(&cluster, &a.profile.collection).await?;
+    if let Some(ids) = &identities {
+        token_probe(&cluster, &a.profile.collection, &ids.owner).await?;
+    }
     let mut collections = vec![a.profile.collection.clone()];
     if a.control {
         wire_control(&cluster).await?;
@@ -367,6 +410,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         "secs": a.secs,
         "profile": a.profile,
         "control": a.control,
+        "identities": identities,
         "nodes": nodes.iter().zip(STORES).zip(&peer_ids).map(|(((name, url), store), pid)| {
             json!({"name": name, "api_url": url, "store": store, "peer_id": pid})
         }).collect::<Vec<_>>(),
@@ -416,6 +460,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
             grace: a.grace,
             settle: a.settle,
             encrypted_fields: a.profile.encrypt_fields.clone(),
+            acp: identities.clone(),
             ..CheckerConfig::default()
         },
         a.seed,
@@ -441,7 +486,13 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
 
     let node_list = nodes.clone();
     let mut generator = Generator::new(a.seed, a.profile.clone(), nodes.len());
-    let mut executor = Executor::new(nodes, &a.profile, &run_dir.join("ops.jsonl"))?;
+    let mut executor = Executor::new(
+        nodes,
+        &a.profile,
+        identities.clone(),
+        binaries()?,
+        &run_dir.join("ops.jsonl"),
+    )?;
     let workload = async {
         let mut current_rate = a.profile.rate;
         let mut tick = tokio::time::interval(Duration::from_secs_f64(1.0 / current_rate));
@@ -478,12 +529,18 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
             executed = op.index + 1;
             if record.ok {
                 ok += 1;
-                if let Some(id) = &record.doc_id {
+                // Grants change relationships, not documents; nothing replicates.
+                if let Some(id) = record.doc_id.as_ref().filter(|_| op.kind != OpKind::Grant) {
                     let _ = touched_tx.send(Touch {
                         doc_id: id.clone(),
                         node: record.node.clone(),
                         wall_ts_ms: record.wall_ts_ms,
                         create: op.kind == OpKind::Create,
+                        protected: match (op.kind, op.actor) {
+                            (OpKind::Create, Some(Actor::Owner)) => Some(true),
+                            (OpKind::Create, Some(Actor::Anon)) => Some(false),
+                            _ => None,
+                        },
                     });
                 }
             } else if record.skipped {
@@ -550,6 +607,12 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     if summary.m5_docs > 0 {
         println!("m5 docs compared: {}", summary.m5_docs);
     }
+    if summary.m6_docs + summary.m6_by_design > 0 {
+        println!(
+            "m6 docs compared: {} (by design skipped: {})",
+            summary.m6_docs, summary.m6_by_design
+        );
+    }
     println!(
         "final sweep: {} mismatches ({})",
         summary.final_mismatches,
@@ -582,6 +645,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         "tagged_docs": summary.tagged_docs, "untagged_docs": summary.untagged_docs,
         "sse_events": summary.sse_events, "quiet_checks": summary.quiet_checks,
         "m5_docs": summary.m5_docs,
+        "m6_docs": summary.m6_docs, "m6_by_design": summary.m6_by_design,
     });
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&m)?)?;
     drop(cluster);
@@ -593,13 +657,45 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
 /// Every node replicates `collection` to every other over libp2p: connect
 /// to all peers, subscribe the collection, one replicator per directed
 /// pair. Same call order as defradb.rs `p2p_interop_bench`, which is
-/// proven on mixed clusters.
-fn wire_full_mesh(cluster: &TestCluster, profile: &Profile) -> Result<()> {
+/// proven on mixed clusters. On ACP the owner adds the policy on every
+/// node (ids must agree, the schema references one) and adds the schema.
+fn wire_full_mesh(
+    cluster: &TestCluster,
+    profile: &Profile,
+    identities: Option<&Identities>,
+) -> Result<()> {
     let collection = profile.collection.as_str();
     let n = cluster.len();
     let addrs: Vec<String> = (0..n).map(|i| extract_p2p_addr(cluster, i)).collect();
-    for i in 0..n {
-        cluster.client(i).schema_add(schema_for(profile))?;
+    if let Some(ids) = identities {
+        let mut policy_ids = Vec::new();
+        for i in 0..n {
+            let name = &cluster.nodes[i].name;
+            let out = cluster
+                .client(i)
+                .acp_policy_add(defra_harness::USER_ACP_POLICY, &ids.owner.key_hex)
+                .wrap_err_with(|| format!("adding the policy on {name}"))?;
+            let id = out["PolicyID"]
+                .as_str()
+                .or(out["policyID"].as_str())
+                .ok_or_else(|| eyre!("policy id missing on {name}: {out}"))?;
+            policy_ids.push(id.to_string());
+        }
+        eyre::ensure!(
+            policy_ids.iter().all(|x| x == &policy_ids[0]),
+            "policy ids differ across nodes: {policy_ids:?}"
+        );
+        println!("policy {} on every node", policy_ids[0]);
+        for i in 0..n {
+            cluster
+                .client(i)
+                .schema_add_with_identity(&acp_schema(&policy_ids[0]), &ids.owner.key_hex)
+                .wrap_err_with(|| format!("adding the schema on {}", cluster.nodes[i].name))?;
+        }
+    } else {
+        for i in 0..n {
+            cluster.client(i).schema_add(schema_for(profile))?;
+        }
     }
     for i in 0..n {
         let others: Vec<&str> = (0..n)
@@ -669,6 +765,23 @@ async fn preflight(cluster: &TestCluster, collection: &str) -> Result<()> {
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+/// A bearer token minted for the owner must be accepted by one node of each
+/// runtime (audience = host:port), or every identity-scoped op would fail.
+async fn token_probe(cluster: &TestCluster, collection: &str, owner: &Identity) -> Result<()> {
+    let http = http_client(Duration::from_secs(30));
+    let query = format!("{{ {collection}(limit: 1) {{ _docID }} }}");
+    for i in [RUST0, GO0] {
+        let name = &cluster.nodes[i].name;
+        let url = cluster.api_url(i);
+        let token = auth_token(&owner.key_hex, url)?;
+        gql_as(&http, url, &query, Some(&token))
+            .await
+            .map_err(|e| eyre!("bearer token rejected by {name}: {e}"))?;
+    }
+    println!("token probe ok: owner bearer accepted by rust-0 and go-0");
+    Ok(())
 }
 
 /// Positive control: `Control` exists on every node but replicates rust-0 ->
@@ -782,6 +895,16 @@ mod tests {
     fn schema_follows_profile() {
         assert_eq!(schema_for(&Profile::p0_crud()), SCHEMA);
         assert_eq!(schema_for(&Profile::p1_encrypted()), VAULT_SCHEMA);
+        // The ACP path uses `acp_schema` instead; pin what `schema_for` returns.
+        assert_eq!(schema_for(&Profile::p2_acp()), SCHEMA);
         assert!(VAULT_SCHEMA.contains("type Vault") && VAULT_SCHEMA.contains("secret: String"));
+    }
+
+    #[test]
+    fn acp_schema_carries_policy_id() {
+        assert_eq!(
+            acp_schema("abc"),
+            "type User @policy(id: \"abc\", resource: \"users\") { name: String age: Int score: Float blob: String }"
+        );
     }
 }

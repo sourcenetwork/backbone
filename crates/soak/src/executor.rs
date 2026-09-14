@@ -2,14 +2,15 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eyre::{Result, WrapErr};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::generator::{OpKind, PlannedOp, Profile};
+use crate::auth::{host_port, Identities, TokenCache};
+use crate::generator::{Actor, OpKind, PlannedOp, Profile};
 
 /// One executed op. `wall_ts_ms`, `latency_ms` and `error` (runtime text,
 /// e.g. Go's "did you mean" list is unordered) are the only fields a replay
@@ -29,6 +30,10 @@ pub struct OpRecord {
     pub skipped: bool,
     pub error: Option<String>,
     pub latency_ms: u64,
+    /// Identity the request was sent as (`None` = anonymous / pre-ACP record).
+    pub actor: Option<Actor>,
+    /// `"http"` (GraphQL) or `"cli"` (grants go through the node binary).
+    pub path: &'static str,
 }
 
 pub struct Executor {
@@ -40,11 +45,22 @@ pub struct Executor {
     se_field: Option<String>,
     /// Slot -> docID learned from the create response.
     slots: Vec<Option<String>>,
+    /// Bearer tokens per actor; `None` when the profile has no identities.
+    tokens: Option<TokenCache>,
+    /// Node binary per node index, for CLI-only ops (grants).
+    binaries: Vec<PathBuf>,
+    acp: bool,
     log: BufWriter<File>,
 }
 
 impl Executor {
-    pub fn new(nodes: Vec<(String, String)>, profile: &Profile, log_path: &Path) -> Result<Self> {
+    pub fn new(
+        nodes: Vec<(String, String)>,
+        profile: &Profile,
+        identities: Option<Identities>,
+        binaries: Vec<PathBuf>,
+        log_path: &Path,
+    ) -> Result<Self> {
         let log =
             File::create(log_path).wrap_err_with(|| format!("creating {}", log_path.display()))?;
         Ok(Self {
@@ -54,12 +70,21 @@ impl Executor {
             encrypt_fields: profile.encrypt_fields.clone(),
             se_field: profile.se_field.clone(),
             slots: Vec::new(),
+            tokens: identities.map(TokenCache::new),
+            binaries,
+            acp: profile.is_acp(),
             log: BufWriter::new(log),
         })
     }
 
     /// Run one op against its node and log the record. `Err` only for log I/O.
     pub async fn execute(&mut self, op: &PlannedOp) -> Result<OpRecord> {
+        if self.acp && op.kind == OpKind::Query {
+            return self.viewer_query(op).await;
+        }
+        if op.kind == OpKind::Grant {
+            return self.grant(op).await;
+        }
         let (name, url) = &self.nodes[op.node];
         let col = &self.collection;
         let payload = op.payload.as_deref().unwrap_or("{}");
@@ -83,14 +108,20 @@ impl Executor {
                 Some(field) => se_query(col, field, payload),
                 None => format!("{{ {payload} }}"),
             }),
+            OpKind::Grant => unreachable!("grants return early"),
+        };
+        let bearer = match (op.actor, self.tokens.as_mut()) {
+            (Some(a), Some(t)) => t.bearer(a, url).map_err(|e| e.to_string()),
+            _ => Ok(None),
         };
 
         let wall_ts_ms = now_ms();
         let started = Instant::now();
         let skipped = query.is_none();
-        let outcome = match query {
-            Some(q) => gql(&self.http, url, &q).await,
-            None => Err("orphan: this slot's create failed".to_string()),
+        let outcome = match (query, bearer) {
+            (Some(q), Ok(b)) => gql_as(&self.http, url, &q, b.as_deref()).await,
+            (Some(_), Err(e)) => Err(e),
+            (None, _) => Err("orphan: this slot's create failed".to_string()),
         };
         let latency_ms = started.elapsed().as_millis() as u64;
 
@@ -139,6 +170,7 @@ impl Executor {
                     Some(_) => se_verdict(&data, col, &expected),
                     None => (true, None),
                 },
+                OpKind::Grant => unreachable!("grants return early"),
             },
             Err(e) => (false, Some(e)),
         };
@@ -155,12 +187,165 @@ impl Executor {
             skipped,
             error,
             latency_ms,
+            actor: op.actor,
+            path: "http",
         };
-        serde_json::to_writer(&mut self.log, &record)?;
-        self.log.write_all(b"\n")?;
-        self.log.flush()?;
+        self.write(&record)?;
         Ok(record)
     }
+
+    /// Read the victim as owner, reader and anonymous on `op.node`; ok iff every
+    /// read answered (the visibility itself is the checker's judgement). On
+    /// success `error` carries the observed views so `ops.jsonl` records them.
+    async fn viewer_query(&mut self, op: &PlannedOp) -> Result<OpRecord> {
+        let (name, url) = self.nodes[op.node].clone();
+        let wall_ts_ms = now_ms();
+        let started = Instant::now();
+        let victim = op.slot.and_then(|s| self.slots.get(s).cloned().flatten());
+        let (ok, skipped, error) = match (&victim, self.tokens.as_mut()) {
+            (None, _) => (
+                false,
+                true,
+                Some("orphan: this slot's create failed".to_string()),
+            ),
+            (_, None) => (
+                false,
+                false,
+                Some("viewer query without identities".to_string()),
+            ),
+            (Some(id), Some(tokens)) => {
+                let q = format!(
+                    "{{ {}(filter: {{_docID: {{_eq: \"{id}\"}}}}) {{ _docID }} }}",
+                    self.collection
+                );
+                let mut seen = Vec::new();
+                let mut err = None;
+                for actor in [Actor::Owner, Actor::Reader, Actor::Anon] {
+                    match tokens.bearer(actor, &url).map_err(|e| e.to_string()) {
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                        Ok(b) => match gql_as(&self.http, &url, &q, b.as_deref()).await {
+                            Ok(data) => {
+                                seen.push(data[&self.collection].as_array().map_or(0, Vec::len) > 0)
+                            }
+                            Err(e) => {
+                                err = Some(format!("{actor:?}: {e}"));
+                                break;
+                            }
+                        },
+                    }
+                }
+                match err {
+                    Some(e) => (false, false, Some(e)),
+                    None => (true, false, Some(views_line(&seen))),
+                }
+            }
+        };
+        let record = OpRecord {
+            op_index: op.index,
+            virtual_ts_ms: op.virtual_ts_ms,
+            wall_ts_ms,
+            node: name,
+            kind: op.kind,
+            collection: self.collection.clone(),
+            doc_id: victim,
+            ok,
+            skipped,
+            error,
+            latency_ms: started.elapsed().as_millis() as u64,
+            actor: None,
+            path: "http",
+        };
+        self.write(&record)?;
+        Ok(record)
+    }
+
+    /// `acp document relationship add` through the node's CLI (no HTTP route in the harness).
+    async fn grant(&mut self, op: &PlannedOp) -> Result<OpRecord> {
+        let (name, url) = self.nodes[op.node].clone();
+        let wall_ts_ms = now_ms();
+        let started = Instant::now();
+        let victim = op.slot.and_then(|s| self.slots.get(s).cloned().flatten());
+        let ids = self.tokens.as_ref().map(|t| t.identities().clone());
+        let (ok, skipped, error) = match (&victim, ids) {
+            (None, _) => (
+                false,
+                true,
+                Some("orphan: this slot's create failed".to_string()),
+            ),
+            (_, None) => (false, false, Some("grant without identities".to_string())),
+            (Some(id), Some(ids)) => {
+                let out = tokio::process::Command::new(&self.binaries[op.node])
+                    .args([
+                        "--url",
+                        host_port(&url),
+                        "client",
+                        "-i",
+                        &ids.owner.key_hex,
+                        "acp",
+                        "document",
+                        "relationship",
+                        "add",
+                        "-c",
+                        &self.collection,
+                        "--docID",
+                        id,
+                        "-r",
+                        "reader",
+                        "-a",
+                        &ids.reader.did,
+                    ])
+                    .output()
+                    .await;
+                match out {
+                    Ok(o) if o.status.success() => (true, false, None),
+                    Ok(o) => (
+                        false,
+                        false,
+                        Some(format!(
+                            "cli: {}",
+                            String::from_utf8_lossy(&o.stderr).trim()
+                        )),
+                    ),
+                    Err(e) => (false, false, Some(format!("cli spawn: {e}"))),
+                }
+            }
+        };
+        let record = OpRecord {
+            op_index: op.index,
+            virtual_ts_ms: op.virtual_ts_ms,
+            wall_ts_ms,
+            node: name,
+            kind: op.kind,
+            collection: self.collection.clone(),
+            doc_id: victim,
+            ok,
+            skipped,
+            error,
+            latency_ms: started.elapsed().as_millis() as u64,
+            actor: Some(Actor::Owner),
+            path: "cli",
+        };
+        self.write(&record)?;
+        Ok(record)
+    }
+
+    fn write(&mut self, record: &OpRecord) -> Result<()> {
+        serde_json::to_writer(&mut self.log, record)?;
+        self.log.write_all(b"\n")?;
+        self.log.flush()?;
+        Ok(())
+    }
+}
+
+/// The `error` text of a successful viewer query: `[owner, reader, anon]` saw the doc.
+pub fn views_line(seen: &[bool]) -> String {
+    format!(
+        "views owner={} reader={} anon={}",
+        seen[0], seen[1], seen[2]
+    )
 }
 
 /// `add_<col>` with the profile's `encryptFields:` list (unquoted names).
@@ -230,15 +415,30 @@ pub(crate) fn http_client(timeout: Duration) -> reqwest::Client {
 /// POST a GraphQL document to a node; transport and GraphQL errors become
 /// a message so the caller can record them instead of failing the run.
 pub async fn gql(http: &reqwest::Client, url: &str, query: &str) -> Result<Value, String> {
-    let body: Value = http
+    gql_as(http, url, query, None).await
+}
+
+/// `gql` with an optional bearer token (identity-scoped request).
+pub async fn gql_as(
+    http: &reqwest::Client,
+    url: &str,
+    query: &str,
+    bearer: Option<&str>,
+) -> Result<Value, String> {
+    let mut req = http
         .post(format!("{url}/api/v0/graphql"))
-        .json(&json!({ "query": query }))
-        .send()
-        .await
-        .map_err(|e| format!("http: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("bad json: {e}"))?;
+        .json(&json!({ "query": query }));
+    if let Some(b) = bearer {
+        req = req.bearer_auth(b);
+    }
+    let resp = req.send().await.map_err(|e| format!("http: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| format!("http body: {e}"))?;
+    if !status.is_success() {
+        let snippet: String = text.chars().take(200).collect();
+        return Err(format!("http {status}: {snippet}"));
+    }
+    let body: Value = serde_json::from_str(&text).map_err(|e| format!("bad json: {e}"))?;
     if let Some(errors) = body
         .get("errors")
         .and_then(Value::as_array)
@@ -270,6 +470,42 @@ mod tests {
         let err = out.expect_err("a request nobody answers must fail");
         assert!(err.starts_with("http:"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn gql_as_reports_non_success_status() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf);
+            let body = r#"{"error":"nope"}"#;
+            let resp = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).unwrap();
+        });
+        let http = http_client(Duration::from_secs(5));
+        let out = tokio::runtime::Runtime::new().unwrap().block_on(gql_as(
+            &http,
+            &url,
+            "{ __typename }",
+            Some("bad"),
+        ));
+        let err = out.expect_err("a 403 must not parse as Ok");
+        assert!(err.starts_with("http 403"), "{err}");
+        assert!(err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn views_line_format() {
+        assert_eq!(
+            views_line(&[true, false, false]),
+            "views owner=true reader=false anon=false"
+        );
     }
 
     #[test]

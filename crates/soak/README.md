@@ -17,13 +17,34 @@ roadmap live in the agent-ops vault under `Worklogs/cross-defra/soak-harness/`.
 - The Go `defradb` built at `GO_COMPAT_COMMIT` (see
   `crates/defra-version/src/lib.rs` in defradb.rs) on `PATH`, with
   `DEFRA_GO_COMPAT_COMMIT` set to that commit.
-- `identity new` is run on both binaries at setup for `--profile p1-encrypted`.
+- `identity new` is run on both binaries at setup for `--profile p1-encrypted`,
+  and on the Rust binary for the owner/reader of `--profile p2-acp`.
 
 ```sh
 export DEFRA_RUST_BINARY=~/Repos/Source/defradb.rs/target/release/defra
 export PATH=~/.cache/defra-harness/53f0e76a3:$PATH DEFRA_GO_COMPAT_COMMIT=53f0e76a3
 cargo run -p soak -- run --seed 42 --ops 1800 --rate 3 --churn
 ```
+
+### ACP profile
+
+`--profile p2-acp` builds the cluster with local document ACP. Setup
+generates two identities (`owner`, `reader`) with the Rust binary and
+records them (key hex and DID) under `identities` in the manifest, so a
+p2-acp `manifest.json` holds the two private keys in cleartext (throwaway
+per-run identities, but do not paste a p2-acp manifest into an issue or
+chat); the owner adds `USER_ACP_POLICY` on every node (the policy ids must agree
+across runtimes or setup fails) and then the `User` schema bound to it,
+and a bearer-token probe against rust-0 and go-0 must pass before the
+workload starts. Creates of protected docs and all queries go over HTTP
+with a bearer token for the op's actor; `grant` ops run the origin node's
+own CLI (`--url host:port client -i <owner> acp document relationship add
+... -r reader`) because the HTTP API has no relationship endpoint. Query
+ops read the doc as owner, reader and anonymous and record the result as
+`views owner= reader= anon=` in `ops.jsonl`. The checker sweeps as the
+owner, and M6 compares the three views of every protected doc across each
+node pair; a pair where exactly one side is the doc's origin node is
+skipped and counted as `m6_by_design` (local ACP gates only there).
 
 Both nodes get a file keyring so their peer identities survive restarts.
 The nodes' data and logs are kept under the run directory (the driver points
@@ -43,7 +64,7 @@ The nodes' data and logs are kept under the run directory (the driver points
 | Flag | Default | Meaning |
 |---|---|---|
 | `--seed N` | unix time | Master seed; both axes derive from it. |
-| `--profile NAME` | p0-crud | Workload profile: `p0-crud` (plaintext Users) or `p1-encrypted` (Vault with encrypted secret/pin and an SE index on name; builds the cluster with encryption, dev mode, per-node identities and a shared SE key). |
+| `--profile NAME` | p0-crud | Workload profile: `p0-crud` (plaintext Users), `p1-encrypted` (Vault with encrypted secret/pin and an SE index on name; builds the cluster with encryption, dev mode, per-node identities and a shared SE key) or `p2-acp` (User under a local ACP policy with owner/reader identities, see "ACP profile"). |
 | `--create-nodes 0,1` | all nodes | Node indices that receive create ops (0,1 Rust; 2,3 Go); other ops still go to any node. Recorded in the manifest. |
 | `--ops N` | 200 | Ops to plan and execute. |
 | `--secs S` | none | Wall deadline; stops the workload first if hit. |
@@ -199,7 +220,7 @@ Known runtime behaviours met while building M0 (Rust `ba6dac661`, Go
 
 ## Not yet
 
-Containers, a second machine, network partitions, ACP / relations /
+Containers, a second machine, network partitions, relations /
 secondary indexes / lens, node-internal telemetry (otel), a
 concurrent executor, M1 sweep scoping, tag rules for anything but the
 outage loss.

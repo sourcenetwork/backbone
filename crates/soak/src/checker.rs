@@ -26,9 +26,11 @@ use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::auth::{Identities, TokenCache};
 use crate::churn::Transition;
 use crate::confirm::{Confirmer, Key};
-use crate::executor::{gql, http_client, now_ms};
+use crate::executor::{gql_as, http_client, now_ms};
+use crate::generator::Actor;
 use crate::sse::Arrival;
 use crate::tags::{tag, Outage, Tag};
 
@@ -47,6 +49,9 @@ pub struct Touch {
     pub node: String,
     pub wall_ts_ms: u64,
     pub create: bool,
+    /// Creates on ACP profiles: whether the doc got a policy (owner-created).
+    /// None on p0/p1 and on non-creates.
+    pub protected: Option<bool>,
 }
 
 /// Forget a create still unseen somewhere after this long; by then it is a
@@ -95,6 +100,42 @@ fn short(v: &Option<String>) -> String {
     v.as_deref().unwrap_or("").chars().take(8).collect()
 }
 
+/// docID -> visible to [owner, reader, anon].
+pub type ViewMap = HashMap<String, [bool; 3]>;
+const VIEWERS: [&str; 3] = ["owner", "reader", "anon"];
+const VIEWER_ACTORS: [Actor; 3] = [Actor::Owner, Actor::Reader, Actor::Anon];
+
+/// M6: the three views of a protected doc must agree across a pair unless
+/// exactly one side is the doc's origin node (local ACP gates only there).
+pub fn m6_compare(
+    a: &ViewMap,
+    b: &ViewMap,
+    names: &[String],
+    idx_a: usize,
+    idx_b: usize,
+    origin: &HashMap<String, usize>,
+    targets: &[String],
+) -> (Vec<(String, Value)>, usize) {
+    let mut out = Vec::new();
+    let mut by_design = 0;
+    for id in targets {
+        let (Some(x), Some(y), Some(o)) = (a.get(id), b.get(id), origin.get(id)) else {
+            continue;
+        };
+        if (*o == idx_a) != (*o == idx_b) {
+            by_design += 1;
+            continue;
+        }
+        if let Some(i) = (0..3).find(|i| x[*i] != y[*i]) {
+            out.push((
+                id.clone(),
+                json!({ "viewer": VIEWERS[i], "a": x[i], "b": y[i], "origin": names[*o] }),
+            ));
+        }
+    }
+    (out, by_design)
+}
+
 pub struct CheckerConfig {
     pub interval: Duration,
     /// A mismatch younger than this is "sync in flight", never a divergence.
@@ -111,6 +152,8 @@ pub struct CheckerConfig {
     pub settle: Duration,
     /// Encrypted fields to compare as plaintext (M5); empty = off.
     pub encrypted_fields: Vec<String>,
+    /// Owner/reader identities for the access-parity views (M6); None = off.
+    pub acp: Option<Identities>,
 }
 
 impl Default for CheckerConfig {
@@ -123,6 +166,7 @@ impl Default for CheckerConfig {
             batch: 100,
             settle: Duration::from_secs(120),
             encrypted_fields: Vec::new(),
+            acp: None,
         }
     }
 }
@@ -150,6 +194,10 @@ pub struct Summary {
     /// Docs whose plaintext was compared on both sides of a pair (M5), summed
     /// over checks; zero means M5 never compared anything.
     pub m5_docs: u64,
+    /// Protected docs whose three views were compared across a pair (M6),
+    /// and those skipped because one side was the doc's origin node.
+    pub m6_docs: u64,
+    pub m6_by_design: u64,
 }
 
 /// What one comparison pass found.
@@ -161,6 +209,8 @@ struct Compared {
     m3_docs: usize,
     /// Docs present in both maps of a pair and so actually compared by M5.
     m5_docs: usize,
+    m6_docs: usize,
+    m6_by_design: usize,
     unreachable: Vec<usize>,
 }
 
@@ -172,6 +222,8 @@ pub struct Checker {
     pairs: Vec<(usize, usize, String)>,
     collections: Vec<String>,
     cfg: CheckerConfig,
+    /// Bearer tokens for the M6 views; None off ACP profiles.
+    tokens: Option<TokenCache>,
     rng: StdRng,
     confirmer: Confirmer,
     run_id: String,
@@ -192,6 +244,8 @@ pub struct Checker {
     outages: Vec<Outage>,
     /// Last successful write per doc: (node, wall ms).
     last_write: HashMap<String, (usize, u64)>,
+    /// Per created doc: (origin node index, protected), from creates.
+    doc_meta: HashMap<String, (usize, bool)>,
     checks: BufWriter<File>,
     divergences: BufWriter<File>,
     /// Every mismatch of the final sweep, confirmed or not.
@@ -232,6 +286,7 @@ impl Checker {
             pairs,
             collections,
             confirmer: Confirmer::new(cfg.confirmations, cfg.grace),
+            tokens: cfg.acp.clone().map(TokenCache::new),
             cfg,
             rng: StdRng::seed_from_u64(seed),
             run_id,
@@ -242,6 +297,7 @@ impl Checker {
             window_events: Vec::new(),
             outages: Vec::new(),
             last_write: HashMap::new(),
+            doc_meta: HashMap::new(),
             checks: open("checks.jsonl")?,
             divergences: open("divergences.jsonl")?,
             final_sweep: open("final_sweep.jsonl")?,
@@ -327,6 +383,9 @@ impl Checker {
             if t.create {
                 self.awaiting
                     .insert(t.doc_id.clone(), (node, t.wall_ts_ms, HashSet::new()));
+                if let Some(protected) = t.protected {
+                    self.doc_meta.insert(t.doc_id.clone(), (node, protected));
+                }
             }
             self.last_write
                 .insert(t.doc_id.clone(), (node, t.wall_ts_ms));
@@ -416,6 +475,8 @@ impl Checker {
 
         let compared = self.compare(&recent, full, &mut node_ok).await?;
         self.summary.m5_docs += compared.m5_docs as u64;
+        self.summary.m6_docs += compared.m6_docs as u64;
+        self.summary.m6_by_design += compared.m6_by_design as u64;
         let eligible_pairs = self
             .pairs
             .iter()
@@ -469,6 +530,7 @@ impl Checker {
             "eligible": all_eligible, "eligible_pairs": eligible_pairs,
             "unreachable_nodes": compared.unreachable.iter().map(|n| &self.nodes[*n].0).collect::<Vec<_>>(),
             "status": status, "m3_docs": compared.m3_docs, "m5_docs": compared.m5_docs, "mismatches": n, "expected": expected,
+            "m6_docs": compared.m6_docs, "m6_by_design": compared.m6_by_design,
             "pending": self.confirmer.pending(), "confirmed": confirmed.len(),
             "duration_ms": now.elapsed().as_millis() as u64,
         });
@@ -478,7 +540,10 @@ impl Checker {
         Ok(clear)
     }
 
-    /// M1 + M3 (+ M5 for encrypted profiles) over all collections and pairs.
+    /// M1 + M3 (+ M5 for encrypted, M6 for ACP profiles) over all collections
+    /// and pairs. On ACP profiles the sweeps and fetches read as the owner so
+    /// protected documents are in scope; only the reader and anonymous views
+    /// of M6 use their own identities.
     /// A node whose queries fail is added to `unreachable` and cleared in
     /// `node_ok`.
     async fn compare(
@@ -492,6 +557,8 @@ impl Checker {
             all: Vec::new(),
             m3_docs: 0,
             m5_docs: 0,
+            m6_docs: 0,
+            m6_by_design: 0,
             unreachable: Vec::new(),
         };
         for col in self.collections.clone() {
@@ -665,6 +732,68 @@ impl Checker {
                     }
                 }
             }
+            // M6: access parity on the protected subset, only for ACP profiles.
+            if self.cfg.acp.is_some() {
+                let protected: Vec<String> = targets
+                    .iter()
+                    .filter(|id| self.doc_meta.get(*id).is_some_and(|m| m.1))
+                    .cloned()
+                    .collect();
+                let origin: HashMap<String, usize> = protected
+                    .iter()
+                    .map(|id| (id.clone(), self.doc_meta[id].0))
+                    .collect();
+                let mut views: Vec<Option<ViewMap>> = Vec::new();
+                for (n, set) in ids.iter().enumerate() {
+                    let Some(set) = set else {
+                        views.push(None);
+                        continue;
+                    };
+                    let mine: Vec<String> = protected
+                        .iter()
+                        .filter(|t| set.contains(*t))
+                        .cloned()
+                        .collect();
+                    let mut map = ViewMap::new();
+                    let mut failed = false;
+                    for chunk in mine.chunks(self.cfg.batch) {
+                        match self.views(n, &col, chunk).await {
+                            Ok(part) => map.extend(part),
+                            Err(_) => {
+                                failed = true;
+                                break;
+                            }
+                        }
+                    }
+                    if failed {
+                        views.push(None);
+                        if !out.unreachable.contains(&n) {
+                            out.unreachable.push(n);
+                        }
+                        node_ok[n] = false;
+                    } else {
+                        views.push(Some(map));
+                    }
+                }
+                let names: Vec<String> = self.nodes.iter().map(|(n, _)| n.clone()).collect();
+                for (a, b, key) in &self.pairs {
+                    let (Some(va), Some(vb)) = (&views[*a], &views[*b]) else {
+                        continue;
+                    };
+                    let eligible = node_ok[*a] && node_ok[*b];
+                    let (found, by_design) =
+                        m6_compare(va, vb, &names, *a, *b, &origin, &protected);
+                    out.m6_docs += va.keys().filter(|id| vb.contains_key(*id)).count() - by_design;
+                    out.m6_by_design += by_design;
+                    for (id, detail) in found {
+                        let entry = ((key.clone(), col.clone(), "M6", id), detail);
+                        if eligible {
+                            out.mismatches.push(entry.clone());
+                        }
+                        out.all.push(entry);
+                    }
+                }
+            }
         }
         Ok(out)
     }
@@ -755,9 +884,20 @@ impl Checker {
         Ok(())
     }
 
-    async fn doc_ids(&self, node: usize, col: &str) -> Result<HashSet<String>> {
-        let (name, url) = &self.nodes[node];
-        let data = gql(&self.http, url, &format!("{{ {col} {{ _docID }} }}"))
+    /// The owner bearer when ACP is configured (protected docs are invisible
+    /// to an anonymous read on their origin node), else none.
+    fn sweep_bearer(&mut self, url: &str) -> Result<Option<String>> {
+        match &mut self.tokens {
+            Some(t) => t.bearer(Actor::Owner, url),
+            None => Ok(None),
+        }
+    }
+
+    async fn doc_ids(&mut self, node: usize, col: &str) -> Result<HashSet<String>> {
+        let (name, url) = self.nodes[node].clone();
+        let bearer = self.sweep_bearer(&url)?;
+        let query = format!("{{ {col} {{ _docID }} }}");
+        let data = gql_as(&self.http, &url, &query, bearer.as_deref())
             .await
             .map_err(|e| eyre!("{name}: docID sweep of {col}: {e}"))?;
         Ok(data[col]
@@ -769,17 +909,19 @@ impl Checker {
     }
 
     /// Sorted head CIDs per docID, one POST for the whole chunk.
-    async fn heads(&self, node: usize, ids: &[String]) -> Result<HashMap<String, Vec<String>>> {
+    async fn heads(&mut self, node: usize, ids: &[String]) -> Result<HashMap<String, Vec<String>>> {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let (name, url) = &self.nodes[node];
+        let (name, url) = self.nodes[node].clone();
+        let bearer = self.sweep_bearer(&url)?;
         let selections: Vec<String> = ids
             .iter()
             .enumerate()
             .map(|(i, id)| format!("d{i}: _commits(docID: \"{id}\", depth: 1) {{ cid }}"))
             .collect();
-        let data = gql(&self.http, url, &format!("{{ {} }}", selections.join(" ")))
+        let query = format!("{{ {} }}", selections.join(" "));
+        let data = gql_as(&self.http, &url, &query, bearer.as_deref())
             .await
             .map_err(|e| eyre!("{name}: head query for {} docs: {e}", ids.len()))?;
         Ok(ids
@@ -799,18 +941,24 @@ impl Checker {
     }
 
     /// The configured encrypted fields for `ids`, one POST per chunk.
-    async fn encrypted_fields(&self, node: usize, col: &str, ids: &[String]) -> Result<FieldMap> {
+    async fn encrypted_fields(
+        &mut self,
+        node: usize,
+        col: &str,
+        ids: &[String],
+    ) -> Result<FieldMap> {
         if ids.is_empty() {
             return Ok(FieldMap::new());
         }
-        let (name, url) = &self.nodes[node];
+        let (name, url) = self.nodes[node].clone();
+        let bearer = self.sweep_bearer(&url)?;
         let fields = self.cfg.encrypted_fields.join(" ");
         let list: Vec<String> = ids.iter().map(|id| format!("\"{id}\"")).collect();
         let query = format!(
             "{{ {col}(filter: {{_docID: {{_in: [{}]}}}}) {{ _docID {fields} }} }}",
             list.join(", ")
         );
-        let data = gql(&self.http, url, &query)
+        let data = gql_as(&self.http, &url, &query, bearer.as_deref())
             .await
             .map_err(|e| eyre!("{name}: encrypted-field read of {} docs: {e}", ids.len()))?;
         Ok(data[col]
@@ -828,6 +976,36 @@ impl Checker {
                 Some((id, vals))
             })
             .collect())
+    }
+
+    /// Presence of `ids` as seen by owner, reader and anon: one POST per
+    /// viewer per chunk. A doc a viewer cannot see is simply absent.
+    async fn views(&mut self, node: usize, col: &str, ids: &[String]) -> Result<ViewMap> {
+        if ids.is_empty() {
+            return Ok(ViewMap::new());
+        }
+        let (name, url) = self.nodes[node].clone();
+        let list: Vec<String> = ids.iter().map(|id| format!("\"{id}\"")).collect();
+        let query = format!(
+            "{{ {col}(filter: {{_docID: {{_in: [{}]}}}}) {{ _docID }} }}",
+            list.join(", ")
+        );
+        let mut map: ViewMap = ids.iter().map(|id| (id.clone(), [false; 3])).collect();
+        for (i, actor) in VIEWER_ACTORS.iter().enumerate() {
+            let bearer = match &mut self.tokens {
+                Some(t) => t.bearer(*actor, &url)?,
+                None => None,
+            };
+            let data = gql_as(&self.http, &url, &query, bearer.as_deref())
+                .await
+                .map_err(|e| eyre!("{name}: {} view of {} docs: {e}", VIEWERS[i], ids.len()))?;
+            for d in data[col].as_array().into_iter().flatten() {
+                if let Some(seen) = d["_docID"].as_str().and_then(|id| map.get_mut(id)) {
+                    seen[i] = true;
+                }
+            }
+        }
+        Ok(map)
     }
 }
 
@@ -874,6 +1052,40 @@ mod tests {
         assert_eq!(
             out[1].1,
             json!({ "undecryptable_on": "go-0", "field": "secret" })
+        );
+    }
+
+    #[test]
+    fn m6_peer_pairs_compare_and_origin_pairs_are_by_design() {
+        let mut a = ViewMap::new();
+        let mut b = ViewMap::new();
+        a.insert("d1".into(), [true, true, false]);
+        b.insert("d1".into(), [true, true, false]); // equal
+        a.insert("d2".into(), [true, false, false]);
+        b.insert("d2".into(), [true, true, false]); // reader differs
+        a.insert("d3".into(), [true, false, false]);
+        b.insert("d3".into(), [true, true, true]); // origin vs peer
+        let mut origin = HashMap::new();
+        origin.insert("d1".to_string(), 3usize);
+        origin.insert("d2".to_string(), 3);
+        origin.insert("d3".to_string(), 0);
+        let targets = [
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+        ];
+        let names: Vec<String> = ["rust-0", "rust-1", "go-0", "go-1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (out, by_design) = m6_compare(&a, &b, &names, 0, 2, &origin, &targets);
+        assert_eq!(by_design, 1, "d3: rust-0 is its origin, go-0 a peer");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "d2");
+        assert_eq!(
+            out[0].1,
+            json!({ "viewer": "reader", "a": false, "b": true, "origin": "go-1" })
         );
     }
 }

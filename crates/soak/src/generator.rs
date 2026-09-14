@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize};
 /// Stream derivation constant for the data axis (topology gets its own).
 const DATA_AXIS: u64 = 0x5eed_da7a_0000_0001;
 
+/// Access-control profile: share of creates that are protected (owned by the
+/// owner identity) and share of protected docs that get a reader grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcpProfile {
+    pub protected_pct: u32,
+    pub grant_pct: u32,
+}
+
 /// Weight table over op kinds plus shape parameters. Weights, not percents.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Profile {
@@ -33,6 +41,8 @@ pub struct Profile {
     /// Node indices that receive create ops; `None` = any node. Other ops are unaffected.
     #[serde(default)]
     pub create_nodes: Option<Vec<usize>>,
+    #[serde(default)]
+    pub acp: Option<AcpProfile>,
 }
 
 impl Profile {
@@ -50,6 +60,7 @@ impl Profile {
             encrypt_fields: Vec::new(),
             se_field: None,
             create_nodes: None,
+            acp: None,
         }
     }
 
@@ -64,12 +75,31 @@ impl Profile {
         }
     }
 
+    /// M1b V2: local document ACP, protected + public docs, reader grants (spec 64).
+    pub fn p2_acp() -> Self {
+        Self {
+            name: "p2-acp".into(),
+            collection: "User".into(),
+            acp: Some(AcpProfile {
+                protected_pct: 60,
+                grant_pct: 30,
+            }),
+            ..Self::p0_crud()
+        }
+    }
+
     pub fn by_name(name: &str) -> Option<Self> {
         match name {
             "p0-crud" => Some(Self::p0_crud()),
             "p1-encrypted" => Some(Self::p1_encrypted()),
+            "p2-acp" => Some(Self::p2_acp()),
             _ => None,
         }
+    }
+
+    /// Needs the ACP-enabled cluster (local ACP, owner/reader identities).
+    pub fn is_acp(&self) -> bool {
+        self.acp.is_some()
     }
 
     /// Needs the encryption-enabled cluster (dev mode, identities, SE key).
@@ -85,6 +115,16 @@ pub enum OpKind {
     Update,
     Delete,
     Query,
+    Grant,
+}
+
+/// Who issues an op on an ACP profile. `None` = the op has no identity (p0/p1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Actor {
+    Owner,
+    Reader,
+    Anon,
 }
 
 /// One planned op.
@@ -103,6 +143,8 @@ pub struct PlannedOp {
     /// time; the executor resolves them to docIDs. Empty otherwise.
     #[serde(default)]
     pub expect_slots: Vec<usize>,
+    #[serde(default)]
+    pub actor: Option<Actor>,
 }
 
 pub const NAME_POOL: usize = 40;
@@ -118,6 +160,14 @@ pub struct Generator {
     live: Vec<usize>,
     /// Name per slot (creation order); only filled for encrypted profiles.
     names: Vec<String>,
+    /// Creator per slot (creation order); only filled for ACP profiles.
+    owner_of: Vec<Actor>,
+    /// Create node per slot (creation order); only filled for ACP profiles.
+    /// Grants go there: the local DAC state lives on the node that served
+    /// the relationship add.
+    create_node: Vec<usize>,
+    /// Protected slots that already received a reader grant.
+    granted: std::collections::HashSet<usize>,
 }
 
 impl Generator {
@@ -130,6 +180,9 @@ impl Generator {
             created: 0,
             live: Vec::new(),
             names: Vec::new(),
+            owner_of: Vec::new(),
+            create_node: Vec::new(),
+            granted: std::collections::HashSet::new(),
         }
     }
 
@@ -141,30 +194,48 @@ impl Generator {
             self.profile.query,
             self.profile.rate,
         );
+        let acp = self.profile.acp;
         let r = self.rng.gen_range(0..c + u + d + q);
         let mut kind = if r < c {
             OpKind::Create
         } else if r < c + u {
-            OpKind::Update
+            // On ACP profiles the first `grant_pct` percent of the update band are grants.
+            match acp {
+                Some(a) if (r - c) * 100 < u * a.grant_pct => OpKind::Grant,
+                _ => OpKind::Update,
+            }
         } else if r < c + u + d {
             OpKind::Delete
         } else {
             OpKind::Query
         };
+        let grant_candidates: Vec<usize> = if kind == OpKind::Grant {
+            self.live
+                .iter()
+                .copied()
+                .filter(|s| {
+                    self.owner_of.get(*s) == Some(&Actor::Owner) && !self.granted.contains(s)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // A victim op with nothing live becomes a create; still seed-determined.
-        if (matches!(kind, OpKind::Update | OpKind::Delete)
-            || (kind == OpKind::Query && self.profile.se_field.is_some()))
-            && self.live.is_empty()
+        if ((matches!(kind, OpKind::Update | OpKind::Delete)
+            || (kind == OpKind::Query && (self.profile.se_field.is_some() || acp.is_some())))
+            && self.live.is_empty())
+            || (kind == OpKind::Grant && grant_candidates.is_empty())
         {
             kind = OpKind::Create;
         }
-        let node = match (&kind, &self.profile.create_nodes) {
+        let mut node = match (&kind, &self.profile.create_nodes) {
             (OpKind::Create, Some(allowed)) if !allowed.is_empty() => {
                 allowed[self.rng.gen_range(0..allowed.len())]
             }
             _ => self.rng.gen_range(0..self.nodes),
         };
         let mut expect_slots = Vec::new();
+        let mut actor = None;
         let (slot, payload) = match kind {
             OpKind::Create => {
                 let slot = self.created;
@@ -177,6 +248,13 @@ impl Generator {
                 } else {
                     self.create_input()
                 };
+                if let Some(a) = acp {
+                    let protected = self.rng.gen_range(0..100) < a.protected_pct;
+                    let who = if protected { Actor::Owner } else { Actor::Anon };
+                    self.owner_of.push(who);
+                    self.create_node.push(node);
+                    actor = Some(who);
+                }
                 (Some(slot), Some(payload))
             }
             OpKind::Update => {
@@ -186,11 +264,30 @@ impl Generator {
                 } else {
                     self.update_input()
                 };
+                if acp.is_some() {
+                    actor = Some(self.owner_of[self.live[pos]]);
+                }
                 (Some(self.live[pos]), Some(payload))
             }
             OpKind::Delete => {
                 let pos = self.rng.gen_range(0..self.live.len());
-                (Some(self.live.swap_remove(pos)), None)
+                let slot = self.live.swap_remove(pos);
+                if acp.is_some() {
+                    actor = Some(self.owner_of[slot]);
+                }
+                (Some(slot), None)
+            }
+            OpKind::Grant => {
+                let slot = grant_candidates[self.rng.gen_range(0..grant_candidates.len())];
+                self.granted.insert(slot);
+                node = self.create_node[slot];
+                actor = Some(Actor::Owner);
+                (Some(slot), None)
+            }
+            // ACP query: the executor reads the slot as owner, reader and anon.
+            OpKind::Query if acp.is_some() => {
+                let pos = self.rng.gen_range(0..self.live.len());
+                (Some(self.live[pos]), None)
             }
             OpKind::Query if self.profile.se_field.is_some() => {
                 let pos = self.rng.gen_range(0..self.live.len());
@@ -215,6 +312,7 @@ impl Generator {
             slot,
             payload,
             expect_slots,
+            actor,
         }
     }
 
@@ -317,6 +415,7 @@ mod tests {
                     }
                 }
                 OpKind::Query => assert_eq!(op.slot, None),
+                OpKind::Grant => panic!("p0 plans no grants"),
             }
         }
         assert!(
@@ -440,6 +539,7 @@ mod tests {
                     assert!(!got.is_empty());
                 }
                 OpKind::Update => {}
+                OpKind::Grant => panic!("p1 plans no grants"),
             }
         }
         assert!(queries > 50, "profile must exercise SE queries");
@@ -482,5 +582,126 @@ mod tests {
                       "doc_bytes":1200,"rate":5.0,"collection":"Users"}"#;
         let p: Profile = serde_json::from_str(old).unwrap();
         assert_eq!(p.create_nodes, None);
+    }
+
+    fn plan_p1_frozen_input() -> Vec<PlannedOp> {
+        Generator::new(42, Profile::p1_encrypted(), 4)
+            .take(500)
+            .collect()
+    }
+
+    /// p1 must not move either: hash of the first 500 ops for seed 42, 4 nodes.
+    #[test]
+    fn p1_plan_is_frozen() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for op in plan_p1_frozen_input() {
+            (
+                op.index,
+                op.virtual_ts_ms,
+                op.node,
+                op.kind as u8,
+                op.slot,
+                op.payload,
+                op.expect_slots,
+            )
+                .hash(&mut h);
+        }
+        assert_eq!(h.finish(), 133609464861947189);
+    }
+
+    #[test]
+    fn old_manifest_profile_has_no_acp() {
+        let old = r#"{"name":"p1-encrypted","create":30,"update":40,"delete":5,"query":25,"doc_bytes":1200,
+                      "rate":3.0,"collection":"Vault","encrypt_fields":["secret","pin"],"se_field":"name"}"#;
+        let p: Profile = serde_json::from_str(old).unwrap();
+        assert!(p.acp.is_none() && !p.is_acp());
+    }
+
+    #[test]
+    fn p2_acp_shape() {
+        let p = Profile::p2_acp();
+        assert_eq!(p.collection, "User");
+        assert_eq!(
+            p.acp,
+            Some(AcpProfile {
+                protected_pct: 60,
+                grant_pct: 30
+            })
+        );
+        assert!(p.is_acp() && !p.is_encrypted());
+        assert_eq!(Profile::by_name("p2-acp"), Some(p.clone()));
+        let back: Profile = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn planned_op_actor_defaults_to_none() {
+        let v = serde_json::json!({"index":0,"virtual_ts_ms":0,"node":0,"kind":"create","slot":0,"payload":"{}"});
+        let op: PlannedOp = serde_json::from_value(v).unwrap();
+        assert_eq!(op.actor, None);
+        assert_eq!(
+            serde_json::to_value(Actor::Reader).unwrap(),
+            serde_json::json!("reader")
+        );
+        assert_eq!(
+            serde_json::to_value(OpKind::Grant).unwrap(),
+            serde_json::json!("grant")
+        );
+    }
+
+    fn plan_p2(seed: u64, n: usize) -> Vec<PlannedOp> {
+        Generator::new(seed, Profile::p2_acp(), 4).take(n).collect()
+    }
+
+    #[test]
+    fn p2_actors_and_grants() {
+        let ops = plan_p2(5, 3000);
+        let mut owner: std::collections::HashMap<usize, Actor> = Default::default();
+        let mut create_node: std::collections::HashMap<usize, usize> = Default::default();
+        let mut granted = std::collections::HashSet::new();
+        let (mut prot, mut pub_, mut grants, mut queries) = (0, 0, 0, 0);
+        for op in &ops {
+            match op.kind {
+                OpKind::Create => {
+                    let a = op.actor.expect("create has an actor");
+                    assert!(matches!(a, Actor::Owner | Actor::Anon));
+                    if a == Actor::Owner {
+                        prot += 1
+                    } else {
+                        pub_ += 1
+                    }
+                    owner.insert(op.slot.unwrap(), a);
+                    create_node.insert(op.slot.unwrap(), op.node);
+                    assert!(op.payload.as_deref().unwrap().starts_with("{name: \""));
+                }
+                OpKind::Update | OpKind::Delete => {
+                    assert_eq!(op.actor, Some(owner[&op.slot.unwrap()]), "op {}", op.index);
+                }
+                OpKind::Grant => {
+                    grants += 1;
+                    let s = op.slot.unwrap();
+                    assert_eq!(owner[&s], Actor::Owner, "grants only on protected docs");
+                    assert!(granted.insert(s), "slot {s} granted twice");
+                    assert_eq!(op.actor, Some(Actor::Owner));
+                    assert_eq!(op.node, create_node[&s], "grant on the origin node");
+                }
+                OpKind::Query => {
+                    queries += 1;
+                    assert!(op.slot.is_some() && op.actor.is_none() && op.payload.is_none());
+                }
+            }
+        }
+        let share = prot as f64 / (prot + pub_) as f64;
+        assert!((0.5..0.7).contains(&share), "protected share {share}");
+        assert!(grants > 20 && queries > 100);
+    }
+
+    #[test]
+    fn p0_and_p1_have_no_actor() {
+        assert!(plan(42, 300)
+            .iter()
+            .all(|o| o.actor.is_none() && o.kind != OpKind::Grant));
+        assert!(plan_p1_frozen_input().iter().all(|o| o.actor.is_none()));
     }
 }
