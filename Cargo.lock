@@ -5050,6 +5050,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "soak"
+version = "0.1.0"
+dependencies = [
+ "defra-harness",
+ "eyre",
+ "rand 0.8.5",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "socket2"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
