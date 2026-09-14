@@ -15,11 +15,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use defra_harness::TestCluster;
 use eyre::{Result, WrapErr};
 use serde_json::json;
 
 use crate::executor::now_ms;
+use crate::nodes::Nodes;
 
 /// Rate that spends `remaining_bytes` over `remaining_secs` at
 /// `bytes_per_op` (mesh-wide growth per executed op), clamped to
@@ -106,34 +106,38 @@ impl Meter {
     }
 
     /// Sample if the interval elapsed (always on the first call).
-    pub fn maybe_sample(&mut self, cluster: &TestCluster) -> Result<()> {
+    pub async fn maybe_sample(&mut self, nodes: &Nodes) -> Result<()> {
         if self
             .last_sample
             .is_some_and(|t| t.elapsed() < self.cfg.interval)
         {
             return Ok(());
         }
-        self.sample(cluster)
+        self.sample(nodes).await
     }
 
     // ponytail: `du` and `ps` run synchronously on the task the workload
     // shares, stalling op dispatch for the sample's duration (ms now,
     // seconds near a 120 GiB ceiling); move to spawn_blocking when it shows.
-    pub fn sample(&mut self, cluster: &TestCluster) -> Result<()> {
+    pub async fn sample(&mut self, nodes: &Nodes) -> Result<()> {
         self.last_sample = Some(Instant::now());
         let wall = now_ms();
         let op_index = self.op_index.load(Ordering::Relaxed);
         let mut total = 0u64;
-        for node in &cluster.nodes {
-            let bytes = du_bytes(&node.rootdir)?;
+        for i in 0..nodes.len() {
+            let name = nodes.name(i);
+            let bytes = du_bytes(&nodes.rootdir(i))?;
             total += bytes;
-            let line = json!({"wall_ts_ms": wall, "op_index": op_index, "node": node.name, "bytes": bytes});
+            let line =
+                json!({"wall_ts_ms": wall, "op_index": op_index, "node": name, "bytes": bytes});
             serde_json::to_writer(&mut self.du, &line)?;
             self.du.write_all(b"\n")?;
-            if let Some(pid) = node.process.id() {
+            let pid = nodes.pid(i);
+            let rss = nodes.rss_bytes(i).await;
+            if pid.is_some() || rss.is_some() {
                 let line = json!({
-                    "wall_ts_ms": wall, "op_index": op_index, "node": node.name, "pid": pid,
-                    "rss_bytes": rss_bytes(pid),
+                    "wall_ts_ms": wall, "op_index": op_index, "node": name, "pid": pid,
+                    "rss_bytes": rss,
                 });
                 serde_json::to_writer(&mut self.rss, &line)?;
                 self.rss.write_all(b"\n")?;
@@ -206,7 +210,7 @@ fn du_bytes(path: &Path) -> Result<u64> {
     Ok(kb * 1024)
 }
 
-fn rss_bytes(pid: u32) -> Option<u64> {
+pub fn rss_bytes(pid: u32) -> Option<u64> {
     let out = Command::new("ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()

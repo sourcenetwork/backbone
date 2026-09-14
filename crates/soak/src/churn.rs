@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use defra_harness::TestCluster;
 use eyre::{Result, WrapErr};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -23,6 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::executor::{gql, now_ms};
 use crate::meter::Meter;
+use crate::nodes::Nodes;
 
 /// Stream derivation constant for the topology axis.
 const TOPO_AXIS: u64 = 0x7090_10c4_0000_0002;
@@ -121,12 +121,12 @@ pub fn virtual_ms(op_index: u64, rate: f64) -> u64 {
     (op_index as f64 * 1000.0 / rate) as u64
 }
 
-/// Fires `events` on virtual time until `stop`, then hands the cluster back
-/// with every node up. Each down/up phase appends a line to the log. The
-/// meter samples from here too, since this task holds the cluster.
+/// Fires `events` on virtual time until `stop`, then returns with every
+/// node up. Each down/up phase appends a line to the log. The meter samples
+/// from here too, since this task holds the nodes.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
-    mut cluster: TestCluster,
+    nodes: &mut Nodes,
     events: Vec<ChurnEvent>,
     rate: f64,
     collection: String,
@@ -135,19 +135,19 @@ pub async fn run(
     log_path: PathBuf,
     mut meter: Meter,
     mut stop: oneshot::Receiver<()>,
-) -> Result<TestCluster> {
+) -> Result<()> {
     let mut log = BufWriter::new(
         File::create(&log_path).wrap_err_with(|| format!("creating {}", log_path.display()))?,
     );
     let http = reqwest::Client::new();
     let mut pending = events.into_iter().peekable();
     loop {
-        meter.maybe_sample(&cluster)?;
+        meter.maybe_sample(nodes).await?;
         let vnow = virtual_ms(op_index.load(Ordering::Relaxed), rate);
         if pending.peek().is_some_and(|e| e.virtual_ts_ms <= vnow) {
             let event = pending.next().expect("peeked");
             fire(
-                &mut cluster,
+                nodes,
                 &event,
                 &http,
                 &collection,
@@ -162,8 +162,8 @@ pub async fn run(
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(250)) => {}
             _ = &mut stop => {
-                meter.sample(&cluster)?;
-                return Ok(cluster);
+                meter.sample(nodes).await?;
+                return Ok(());
             }
         }
     }
@@ -171,7 +171,7 @@ pub async fn run(
 
 #[allow(clippy::too_many_arguments)]
 async fn fire(
-    cluster: &mut TestCluster,
+    nodes: &mut Nodes,
     event: &ChurnEvent,
     http: &reqwest::Client,
     collection: &str,
@@ -180,8 +180,8 @@ async fn fire(
     transitions: &mpsc::UnboundedSender<Transition>,
     log: &mut BufWriter<File>,
 ) -> Result<()> {
-    let name = cluster.nodes[event.node].name.clone();
-    let url = cluster.api_url(event.node).to_string();
+    let name = nodes.name(event.node).to_string();
+    let url = nodes.api_url(event.node);
     let started = Instant::now();
     let vnow = || virtual_ms(op_index.load(Ordering::Relaxed), rate);
     let _ = transitions.send(Transition {
@@ -199,29 +199,32 @@ async fn fire(
     );
     match event.kind {
         ChurnKind::Restart => {
-            rotate_logs(cluster, event)?;
-            cluster
-                .restart_node(event.node, Duration::from_secs(60))
+            rotate_logs(nodes, event).await?;
+            nodes
+                .restart(event.node)
                 .await
                 .wrap_err_with(|| format!("{name}: restart"))?
         }
         ChurnKind::CrashKill => {
-            cluster.nodes[event.node].process.kill();
+            nodes
+                .kill(event.node)
+                .await
+                .wrap_err_with(|| format!("{name}: kill"))?;
             tokio::time::sleep(Duration::from_millis(event.down_ms)).await;
-            cluster.nodes[event.node]
-                .process
-                .respawn()
+            nodes
+                .respawn(event.node)
+                .await
                 .wrap_err_with(|| format!("{name}: respawn"))?;
         }
         ChurnKind::GracefulLeave => {
-            rotate_logs(cluster, event)?;
-            let stopped = cluster
-                .stop_node(event.node)
+            rotate_logs(nodes, event).await?;
+            nodes
+                .stop(event.node)
                 .await
                 .wrap_err_with(|| format!("{name}: stop"))?;
             tokio::time::sleep(Duration::from_millis(event.down_ms)).await;
-            cluster
-                .start_stopped_node(stopped, Duration::from_secs(60))
+            nodes
+                .start_stopped(event.node)
                 .await
                 .wrap_err_with(|| format!("{name}: start after leave"))?;
         }
@@ -280,10 +283,12 @@ fn find_peer_id(v: &Value) -> Option<String> {
 }
 
 /// The harness truncates stdout.log on every spawn; keep the old process's
-/// log so the artifact holds the whole history.
-fn rotate_logs(cluster: &TestCluster, event: &ChurnEvent) -> Result<()> {
-    let name = &cluster.nodes[event.node].name;
-    let log_dir = cluster.nodes[event.node].process.log_dir().to_path_buf();
+/// log so the artifact holds the whole history. A container's output is
+/// flushed to the same files first.
+async fn rotate_logs(nodes: &mut Nodes, event: &ChurnEvent) -> Result<()> {
+    nodes.dump_logs(event.node).await?;
+    let name = nodes.name(event.node).to_string();
+    let log_dir = nodes.log_dir(event.node);
     for file in ["stdout.log", "stderr.log"] {
         let from = log_dir.join(file);
         let to = log_dir.join(format!("{file}.before-event-{}", event.index));

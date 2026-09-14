@@ -9,6 +9,7 @@
 //!          [--churn [--churn-spacing SECS]] [--grace SECS] [--settle SECS]
 //!          [--ceiling-mb MB] [--floor-rate R] [--meter-secs S]
 //!          [--retry-intervals 5,10,20,40] [--sse-go] [--until-op N] [--hold]
+//!          [--nodes process|docker] [--reuse-network]
 //! soak replay --manifest <run>/manifest.json [--until-op N] [--hold]
 //!             [--grace SECS] [--settle SECS]
 //! soak summarize <run dir>
@@ -29,6 +30,10 @@
 //! test. `compare` checks two runs against the replay
 //! contract: planned op fields and the churn schedule, plus docIDs where
 //! both runs have one; outcomes and timing are not part of it.
+//!
+//! `--nodes docker` runs the M2 six-node topology as containers on a
+//! `soak-<run_id>` network instead of harness processes (p0-crud only);
+//! the backend is recorded in the manifest and honoured by `replay`.
 
 mod auth;
 mod checker;
@@ -37,18 +42,20 @@ mod confirm;
 mod executor;
 mod generator;
 mod meter;
+mod nodes;
 mod sse;
 mod summary;
 mod tags;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use defra_harness::{extract_p2p_addr, TestCluster};
-use eyre::{eyre, Result, WrapErr};
+use defra_harness::TestCluster;
+use eyre::{bail, eyre, Result, WrapErr};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
@@ -58,6 +65,7 @@ use churn::ChurnConfig;
 use executor::{gql, gql_as, http_client, now_ms, Executor};
 use generator::{Actor, Generator, OpKind, Profile};
 use meter::{Meter, MeterConfig};
+use nodes::{DockerNodes, Nodes};
 
 const SCHEMA: &str = "type Users { name: String age: Int score: Float blob: String }";
 const VAULT_SCHEMA: &str =
@@ -107,6 +115,9 @@ const GO0: usize = 2;
 /// Durable store per node index; the Rust cli has no other durable engine
 /// and Go has only badger.
 const STORES: [&str; 4] = ["regolith", "regolith", "badger", "badger"];
+/// Container images for `--nodes docker`, tagged by the commit they hold.
+const RUST_IMAGE: &str = "soak-defra:8d8bb299f";
+const GO_IMAGE: &str = "soak-defradb:53f0e76a3";
 
 /// Everything a run needs; `replay` rebuilds it from a manifest.
 struct RunArgs {
@@ -128,6 +139,10 @@ struct RunArgs {
     retry_intervals: Option<String>,
     /// Also subscribe on Go nodes (reproduces the memory growth).
     sse_go: bool,
+    /// Containers on a `soak-<run_id>` network instead of harness processes.
+    docker: bool,
+    /// Start even if a `soak-*` network is left over from an earlier run.
+    reuse_network: bool,
 }
 
 impl RunArgs {
@@ -139,6 +154,16 @@ impl RunArgs {
         if let Some(rate) = flag("rate") {
             profile.rate = rate.parse().wrap_err("--rate must be a number")?;
         }
+        let docker = match flag("nodes").as_deref() {
+            None | Some("process") => false,
+            Some("docker") => true,
+            Some(other) => bail!("unknown --nodes {other}; use process or docker"),
+        };
+        let node_count = if docker {
+            nodes::m2_specs().len()
+        } else {
+            STORES.len()
+        };
         if let Some(list) = flag("create-nodes") {
             let nodes: Vec<usize> = list
                 .split(',')
@@ -149,7 +174,7 @@ impl RunArgs {
                 })
                 .collect::<Result<_>>()?;
             eyre::ensure!(
-                nodes.iter().all(|n| *n < STORES.len()),
+                nodes.iter().all(|n| *n < node_count),
                 "--create-nodes: index out of range"
             );
             profile.create_nodes = Some(nodes);
@@ -181,6 +206,8 @@ impl RunArgs {
             replay_of: None,
             retry_intervals: flag("retry-intervals"),
             sse_go: has_flag("sse-go"),
+            docker,
+            reuse_network: has_flag("reuse-network"),
         })
     }
 
@@ -224,6 +251,8 @@ impl RunArgs {
             replay_of: m["run_id"].as_str().map(String::from),
             retry_intervals: caps["retry_intervals"].as_str().map(String::from),
             sse_go: has_flag("sse-go") || caps["sse_go"].as_bool().unwrap_or(false),
+            docker: m["nodes"][0]["backend"] == json!("docker"),
+            reuse_network: has_flag("reuse-network"),
         })
     }
 }
@@ -295,6 +324,47 @@ fn main() -> Result<()> {
 }
 
 async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
+    let mut nodes = start_nodes(run_dir, &a).await?;
+    let result = drive(run_dir, &a, &mut nodes).await;
+    let shutdown = nodes.shutdown().await;
+    result?;
+    shutdown?;
+    summary::write_profile(run_dir)?;
+    println!("profile: {}", run_dir.join("profile.md").display());
+    Ok(())
+}
+
+/// Harness processes, or the M2 six-node topology as containers.
+async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
+    if a.docker {
+        eyre::ensure!(
+            !a.profile.is_encrypted() && !a.profile.is_acp(),
+            "docker backend supports p0-crud only in M2 stage one"
+        );
+        eyre::ensure!(
+            a.retry_intervals.is_none(),
+            "--retry-intervals is not supported by the docker backend"
+        );
+        // The host CLIs must resolve before any container exists: a panic
+        // in `client()` would skip the teardown.
+        binaries()?;
+        let leftover = nodes::existing_networks().await?;
+        eyre::ensure!(
+            leftover.is_empty() || a.reuse_network,
+            "soak networks exist: {}; remove them (docker network rm) or pass --reuse-network",
+            leftover.join(", ")
+        );
+        let run_id = run_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let images = (RUST_IMAGE, GO_IMAGE);
+        let docker = DockerNodes::start(&run_id, run_dir, nodes::m2_specs(), images)
+            .await
+            .wrap_err("starting the docker cluster")?;
+        println!("docker backend: {RUST_IMAGE} + {GO_IMAGE} on soak-{run_id}");
+        return Ok(Nodes::Docker(docker));
+    }
     let mut builder = TestCluster::builder()
         .rust_nodes(2)
         .go_nodes(2)
@@ -333,11 +403,21 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         .build()
         .await
         .wrap_err("building the mixed cluster")?;
-    for (i, store) in STORES.iter().enumerate() {
+    Ok(Nodes::Process {
+        cluster,
+        stopped: HashMap::new(),
+    })
+}
+
+/// Everything between the nodes coming up and the final manifest; the
+/// caller shuts the nodes down whether or not this succeeds.
+async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
+    for i in 0..nodes.len() {
         println!(
-            "{} at {} ({store})",
-            cluster.nodes[i].name,
-            cluster.api_url(i)
+            "{} at {} ({})",
+            nodes.name(i),
+            nodes.api_url(i),
+            nodes.store(i)
         );
     }
     let identities = if a.profile.is_acp() {
@@ -354,28 +434,23 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     } else {
         None
     };
-    wire_full_mesh(&cluster, &a.profile, identities.as_ref())?;
-    preflight(&cluster, &a.profile.collection).await?;
+    wire_full_mesh(nodes, &a.profile, identities.as_ref())?;
+    preflight(nodes, &a.profile.collection).await?;
     if let Some(ids) = &identities {
-        token_probe(&cluster, &a.profile.collection, &ids.owner).await?;
+        token_probe(nodes, &a.profile.collection, &ids.owner).await?;
     }
     let mut collections = vec![a.profile.collection.clone()];
     if a.control {
-        wire_control(&cluster).await?;
+        wire_control(nodes).await?;
         collections.push(CONTROL.to_string());
     }
 
-    let nodes: Vec<(String, String)> = (0..cluster.len())
-        .map(|i| {
-            (
-                cluster.nodes[i].name.clone(),
-                cluster.api_url(i).to_string(),
-            )
-        })
+    let endpoints: Vec<(String, String)> = (0..nodes.len())
+        .map(|i| (nodes.name(i).to_string(), nodes.api_url(i)))
         .collect();
     let http = http_client(Duration::from_secs(30));
     let mut peer_ids = Vec::new();
-    for (name, url) in &nodes {
+    for (name, url) in &endpoints {
         let pid = churn::peer_id(&http, url).await;
         println!("{name} peer id: {}", pid.as_deref().unwrap_or("?"));
         peer_ids.push(pid);
@@ -384,7 +459,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     let churn_events = a
         .churn
         .as_ref()
-        .map(|cfg| churn::schedule(a.seed, nodes.len(), horizon_ms, cfg))
+        .map(|cfg| churn::schedule(a.seed, endpoints.len(), horizon_ms, cfg))
         .unwrap_or_default();
     for e in &churn_events {
         println!(
@@ -392,7 +467,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
             e.index,
             e.virtual_ts_ms / 1000,
             e.kind,
-            nodes[e.node].0,
+            endpoints[e.node].0,
             e.down_ms
         );
     }
@@ -401,6 +476,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let rust_binary = std::env::var("DEFRA_RUST_BINARY").unwrap_or_default();
+    let backend = if a.docker { "docker" } else { "process" };
     let manifest_path = run_dir.join("manifest.json");
     let manifest = json!({
         "run_id": run_id,
@@ -411,8 +487,13 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         "profile": a.profile,
         "control": a.control,
         "identities": identities,
-        "nodes": nodes.iter().zip(STORES).zip(&peer_ids).map(|(((name, url), store), pid)| {
-            json!({"name": name, "api_url": url, "store": store, "peer_id": pid})
+        "nodes": endpoints.iter().zip(&peer_ids).enumerate().map(|(i, ((name, url), pid))| {
+            let c = nodes.container(i);
+            json!({
+                "name": name, "api_url": url, "store": nodes.store(i), "peer_id": pid,
+                "backend": backend, "image": c.map(|c| &c.image),
+                "ip": c.and_then(|c| c.ip.as_deref()), "host": c.map(|c| c.spec.host),
+            })
         }).collect::<Vec<_>>(),
         "rust_binary": rust_binary,
         "rust_version": version_json(&rust_binary),
@@ -437,7 +518,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     let (transitions_tx, transitions_rx) = mpsc::unbounded_channel();
     let (arrivals_tx, arrivals_rx) = mpsc::unbounded_channel();
     let subscription = format!("subscription {{ {} {{ _docID }} }}", a.profile.collection);
-    let subscriptions: Vec<_> = nodes
+    let subscriptions: Vec<_> = endpoints
         .iter()
         .enumerate()
         .filter(|(_, (name, _))| a.sse_go || name.starts_with("rust"))
@@ -454,7 +535,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     let (stop_tx, stop_rx) = oneshot::channel();
     let (churn_stop_tx, churn_stop_rx) = oneshot::channel();
     let checker = Checker::new(
-        nodes.clone(),
+        endpoints.clone(),
         collections,
         CheckerConfig {
             grace: a.grace,
@@ -484,13 +565,12 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         Arc::clone(&op_index),
     )?;
 
-    let node_list = nodes.clone();
-    let mut generator = Generator::new(a.seed, a.profile.clone(), nodes.len());
+    let mut generator = Generator::new(a.seed, a.profile.clone(), endpoints.len());
     let mut executor = Executor::new(
-        nodes,
+        endpoints.clone(),
         &a.profile,
         identities.clone(),
-        binaries()?,
+        nodes.binaries()?,
         &run_dir.join("ops.jsonl"),
     )?;
     let workload = async {
@@ -564,11 +644,11 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         let _ = churn_stop_tx.send(());
         Ok::<_, eyre::Report>((executed, stopped_by))
     };
-    // The churner owns the cluster from here and shares this task with the
+    // The churner borrows the nodes from here and shares this task with the
     // workload: the harness restart future is not Send, so it cannot be
     // spawned. With no schedule it only meters and waits for stop.
     let churner = churn::run(
-        cluster,
+        nodes,
         churn_events,
         a.profile.rate,
         a.profile.collection.clone(),
@@ -578,8 +658,8 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         meter,
         churn_stop_rx,
     );
-    // A churner failure drops the cluster; stop the workload within a tick
-    // instead of letting it run for hours against a dead mesh.
+    // After a churner failure the mesh is not what the run planned; stop the
+    // workload within a tick instead of letting it run for hours against it.
     let churner = async {
         let result = churner.await;
         if result.is_err() {
@@ -588,8 +668,8 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         }
         result
     };
-    let (workload_result, cluster) = tokio::join!(workload, churner);
-    let cluster = cluster.wrap_err("churner")?;
+    let (workload_result, churner_result) = tokio::join!(workload, churner);
+    churner_result.wrap_err("churner")?;
     let (executed, stopped_by) = workload_result?;
     let _ = stop_tx.send(());
     let summary = checker_task.await?.wrap_err("checker")?;
@@ -628,7 +708,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     );
     if a.hold {
         println!("holding: nodes stay up for inspection, press Enter to stop");
-        for (name, url) in &node_list {
+        for (name, url) in &endpoints {
             println!("  {name}: {url}/api/v0/graphql");
         }
         let _ = std::io::stdin().read_line(&mut String::new());
@@ -648,9 +728,6 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         "m6_docs": summary.m6_docs, "m6_by_design": summary.m6_by_design,
     });
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&m)?)?;
-    drop(cluster);
-    summary::write_profile(run_dir)?;
-    println!("profile: {}", run_dir.join("profile.md").display());
     Ok(())
 }
 
@@ -659,19 +736,15 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
 /// pair. Same call order as defradb.rs `p2p_interop_bench`, which is
 /// proven on mixed clusters. On ACP the owner adds the policy on every
 /// node (ids must agree, the schema references one) and adds the schema.
-fn wire_full_mesh(
-    cluster: &TestCluster,
-    profile: &Profile,
-    identities: Option<&Identities>,
-) -> Result<()> {
+fn wire_full_mesh(nodes: &Nodes, profile: &Profile, identities: Option<&Identities>) -> Result<()> {
     let collection = profile.collection.as_str();
-    let n = cluster.len();
-    let addrs: Vec<String> = (0..n).map(|i| extract_p2p_addr(cluster, i)).collect();
+    let n = nodes.len();
+    let addrs: Vec<String> = (0..n).map(|i| nodes.p2p_addr(i)).collect();
     if let Some(ids) = identities {
         let mut policy_ids = Vec::new();
         for i in 0..n {
-            let name = &cluster.nodes[i].name;
-            let out = cluster
+            let name = nodes.name(i);
+            let out = nodes
                 .client(i)
                 .acp_policy_add(defra_harness::USER_ACP_POLICY, &ids.owner.key_hex)
                 .wrap_err_with(|| format!("adding the policy on {name}"))?;
@@ -687,14 +760,14 @@ fn wire_full_mesh(
         );
         println!("policy {} on every node", policy_ids[0]);
         for i in 0..n {
-            cluster
+            nodes
                 .client(i)
                 .schema_add_with_identity(&acp_schema(&policy_ids[0]), &ids.owner.key_hex)
-                .wrap_err_with(|| format!("adding the schema on {}", cluster.nodes[i].name))?;
+                .wrap_err_with(|| format!("adding the schema on {}", nodes.name(i)))?;
         }
     } else {
         for i in 0..n {
-            cluster.client(i).schema_add(schema_for(profile))?;
+            nodes.client(i).schema_add(schema_for(profile))?;
         }
     }
     for i in 0..n {
@@ -702,24 +775,24 @@ fn wire_full_mesh(
             .filter(|j| *j != i)
             .map(|j| addrs[j].as_str())
             .collect();
-        cluster.client(i).p2p_connect(&others)?;
+        nodes.client(i).p2p_connect(&others)?;
     }
     for i in 0..n {
-        cluster.client(i).p2p_collection_add(&[collection])?;
+        nodes.client(i).p2p_collection_add(&[collection])?;
     }
     for i in 0..n {
         for j in (0..n).filter(|j| *j != i) {
-            cluster
+            nodes
                 .client(i)
                 .p2p_replicator_set(&[collection], &addrs[j])?;
         }
     }
     if let Some(field) = &profile.se_field {
         for i in 0..n {
-            cluster
+            nodes
                 .client(i)
                 .encrypted_index_add(collection, field)
-                .wrap_err_with(|| format!("encrypted index on {}", cluster.nodes[i].name))?;
+                .wrap_err_with(|| format!("encrypted index on {}", nodes.name(i)))?;
         }
     }
     Ok(())
@@ -727,30 +800,30 @@ fn wire_full_mesh(
 
 /// T0 check: a doc created on each node must show up on every other node
 /// over HTTP GraphQL before any workload runs, so a miswired mesh fails fast.
-async fn preflight(cluster: &TestCluster, collection: &str) -> Result<()> {
-    let n = cluster.len();
+async fn preflight(nodes: &Nodes, collection: &str) -> Result<()> {
+    let n = nodes.len();
     for i in 0..n {
-        let doc = format!(r#"{{"name": "preflight-{}"}}"#, cluster.nodes[i].name);
-        cluster
+        let doc = format!(r#"{{"name": "preflight-{}"}}"#, nodes.name(i));
+        nodes
             .client(i)
             .collection_create(collection, &doc)
-            .wrap_err_with(|| format!("creating the preflight doc on {}", cluster.nodes[i].name))?;
+            .wrap_err_with(|| format!("creating the preflight doc on {}", nodes.name(i)))?;
     }
     let http = http_client(Duration::from_secs(30));
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let mut missing = Vec::new();
         for creator in 0..n {
-            let name = &cluster.nodes[creator].name;
+            let name = nodes.name(creator);
             let query = format!(
                 "{{ {collection}(filter: {{name: {{_eq: \"preflight-{name}\"}}}}) {{ _docID }} }}"
             );
             for viewer in (0..n).filter(|v| *v != creator) {
-                let data = gql(&http, cluster.api_url(viewer), &query)
+                let data = gql(&http, &nodes.api_url(viewer), &query)
                     .await
                     .map_err(eyre::Report::msg)?;
                 if data[collection].as_array().map_or(0, Vec::len) != 1 {
-                    missing.push(format!("{name} -> {}", cluster.nodes[viewer].name));
+                    missing.push(format!("{name} -> {}", nodes.name(viewer)));
                 }
             }
         }
@@ -769,14 +842,14 @@ async fn preflight(cluster: &TestCluster, collection: &str) -> Result<()> {
 
 /// A bearer token minted for the owner must be accepted by one node of each
 /// runtime (audience = host:port), or every identity-scoped op would fail.
-async fn token_probe(cluster: &TestCluster, collection: &str, owner: &Identity) -> Result<()> {
+async fn token_probe(nodes: &Nodes, collection: &str, owner: &Identity) -> Result<()> {
     let http = http_client(Duration::from_secs(30));
     let query = format!("{{ {collection}(limit: 1) {{ _docID }} }}");
     for i in [RUST0, GO0] {
-        let name = &cluster.nodes[i].name;
-        let url = cluster.api_url(i);
-        let token = auth_token(&owner.key_hex, url)?;
-        gql_as(&http, url, &query, Some(&token))
+        let name = nodes.name(i);
+        let url = nodes.api_url(i);
+        let token = auth_token(&owner.key_hex, &url)?;
+        gql_as(&http, &url, &query, Some(&token))
             .await
             .map_err(|e| eyre!("bearer token rejected by {name}: {e}"))?;
     }
@@ -787,17 +860,17 @@ async fn token_probe(cluster: &TestCluster, collection: &str, owner: &Identity) 
 /// Positive control: `Control` exists on every node but replicates rust-0 ->
 /// go-0 only. A doc created on go-0 never reaches the others (M1), and a
 /// rust-0-created doc updated on go-0 has different heads on the two (M3).
-async fn wire_control(cluster: &TestCluster) -> Result<()> {
-    for i in 0..cluster.len() {
-        cluster.client(i).schema_add(CONTROL_SCHEMA)?;
+async fn wire_control(nodes: &Nodes) -> Result<()> {
+    for i in 0..nodes.len() {
+        nodes.client(i).schema_add(CONTROL_SCHEMA)?;
     }
-    let go_addr = extract_p2p_addr(cluster, GO0);
-    cluster
+    let go_addr = nodes.p2p_addr(GO0);
+    nodes
         .client(RUST0)
         .p2p_replicator_set(&[CONTROL], &go_addr)?;
     let http = http_client(Duration::from_secs(30));
-    let go_url = cluster.api_url(GO0);
-    let rust_url = cluster.api_url(RUST0);
+    let go_url = &nodes.api_url(GO0);
+    let rust_url = &nodes.api_url(RUST0);
     let create = |v: u32| format!("mutation {{ add_{CONTROL}(input: [{{v: {v}}}]) {{ _docID }} }}");
     gql(&http, go_url, &create(1))
         .await

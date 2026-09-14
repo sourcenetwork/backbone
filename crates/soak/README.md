@@ -79,12 +79,37 @@ The nodes' data and logs are kept under the run directory (the driver points
 | `--control` | off | Positive control: a `Control` collection replicated rust-0 -> go-0 only, written on go-0, must produce divergences on the pairs that predicts and nothing on `Users`. |
 | `--retry-intervals 5,10,20,40` | runtime default | Both runtimes' `--replicator-retry-intervals`; recorded in the manifest since it changes the system under test. |
 | `--sse-go` | off | Open subscriptions on Go nodes too (reproduces the Go memory growth). |
+| `--nodes process\|docker` | process | `docker` runs the M2 six-node topology (rust-0, rust-1, go-0 on host A; rust-2, go-1, go-2 on host B) as containers on a `soak-<run_id>` network, see "Docker backend". Recorded per node in the manifest (`backend`) and honoured by `replay`. |
+| `--reuse-network` | off | Start even though a `soak-*` network is left over from an earlier run. |
+
+### Docker backend
+
+`--nodes docker` needs the images `soak-defra:8d8bb299f` (Rust) and
+`soak-defradb:53f0e76a3` (Go) on the docker host, `DEFRA_RUST_BINARY` and
+the Go `defradb` on `PATH` as before (the driver's CLI calls run on the
+host against each container's published API port), and the docker CLI
+pointed at the host, e.g. `DOCKER_CONTEXT=orbstack`. Only `p0-crud` runs in
+containers for now; the encrypted and ACP profiles refuse the backend.
+
+```sh
+export DOCKER_CONTEXT=orbstack
+cargo run -p soak -- run --nodes docker --seed 611 --ops 300 --rate 3
+```
+
+Each container mounts `<run dir>/target/docker/<name>` at `/data`, so the
+node data stay in the artifact and `docker logs` are flushed to
+`<name>/logs/{stdout,stderr}.log` before every log rotation. The run
+removes its containers and network at the end, on error too. A run that
+was killed leaves them behind, and the next `soak run` refuses to start
+while any `soak-*` network exists: remove them (`docker rm -f $(docker ps
+-aq --filter name=soak-)`, then `docker network rm soak-<run_id>`) or pass
+`--reuse-network`.
 
 ## Artifact
 
 ```
 runs/<unix-secs>-<seed>/
-  manifest.json      seed, profile, ops, nodes (store, peer id), both binaries' version
+  manifest.json      seed, profile, ops, nodes (store, peer id, backend, image, ip, host), both binaries' version
                      JSON, churn config + planned schedule, caps; at the end ops_executed,
                      stopped_by (ops | secs | budget | until_op) and the checker totals
   ops.jsonl          one record per executed op
@@ -98,6 +123,7 @@ runs/<unix-secs>-<seed>/
   profile.json/.md   the per-runtime behaviour profile
   target/e2e/<stamp>/{rust-0,rust-1,go-0,go-1}/{data,logs}   node data dirs and stdout/stderr
                      (logs rotated to *.before-event-N before a restart)
+  target/docker/<name>/{data,logs}   the same for --nodes docker
 ```
 
 ## How it works
@@ -220,7 +246,7 @@ Known runtime behaviours met while building M0 (Rust `ba6dac661`, Go
 
 ## Not yet
 
-Containers, a second machine, network partitions, relations /
+A second machine, network partitions, relations /
 secondary indexes / lens, node-internal telemetry (otel), a
 concurrent executor, M1 sweep scoping, tag rules for anything but the
 outage loss.
