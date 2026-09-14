@@ -5,9 +5,9 @@ drives a seeded workload against it, keeps checking that the runtimes
 converge, injects restarts and crashes on a seeded schedule, meters disk and
 memory, and writes one replayable artifact directory per run.
 
-Status: M0 skeleton (one Rust node on regolith + one Go node on badger, on
-this host, as processes). The design and roadmap live in the agent-ops vault
-under `Worklogs/cross-defra/soak-harness/`.
+Status: M1a (two Rust nodes on regolith + two Go nodes on badger, on this
+host, as processes, in a full replicator mesh). The design and roadmap live
+in the agent-ops vault under `Worklogs/cross-defra/soak-harness/`.
 
 ## Prerequisites
 
@@ -44,14 +44,16 @@ The nodes' data and logs are kept under the run directory (the driver points
 | `--ops N` | 200 | Ops to plan and execute. |
 | `--secs S` | none | Wall deadline; stops the workload first if hit. |
 | `--rate R` | 20 | Profile rate, ops/s mesh-wide, and the virtual clock (`virtual_ts = index / rate`). ~3 is sustainable for 1R+1G on a MacBook. |
-| `--churn` | off | Enable the seeded restart / crash-kill schedule. |
+| `--churn` | off | Enable the seeded restart / crash-kill / graceful-leave schedule. |
 | `--churn-spacing S` | 120 | Mean seconds between events and per-node cooldown. |
 | `--grace S` | 120 | Mismatches younger than this, or within this long after a node came back, are in-flight sync, not divergence. Covers two failed pushes on the runtimes' 30/60/120s retry ladder. |
 | `--settle S` | 120 | After the workload, keep checking this long for an eligible clear check before the final sweep. |
 | `--ceiling-mb MB` | 122880 | Disk ceiling over all node data dirs; hard stop at 95%. |
 | `--floor-rate R` | 0.5 | The governor never throttles below this. |
 | `--meter-secs S` | 60 | du / RSS sampling and governor interval. |
-| `--control` | off | Positive control: a `Control` collection replicated Rust -> Go only, written on Go, must produce one M1 and one M3 divergence. |
+| `--control` | off | Positive control: a `Control` collection replicated rust-0 -> go-0 only, written on go-0, must produce divergences on the pairs that predicts and nothing on `Users`. |
+| `--retry-intervals 5,10,20,40` | runtime default | Both runtimes' `--replicator-retry-intervals`; recorded in the manifest since it changes the system under test. |
+| `--sse-go` | off | Open subscriptions on Go nodes too (reproduces the Go memory growth). |
 
 ## Artifact
 
@@ -64,12 +66,12 @@ runs/<unix-secs>-<seed>/
   topology.jsonl     churn events as executed: down/up per event, planned vs actual
                      virtual time, wall time, peer id after recovery
   checks.jsonl       every checker pass: status, mismatch/pending/confirmed counts, eligibility
-  divergences.jsonl  confirmed divergences (see below)
-  final_sweep.jsonl  every mismatch of the final full sweep, confirmed or not
-  lag.jsonl          convergence lag samples per create, by direction
+  divergences.jsonl  confirmed divergences (see below), with the pair and per-doc tags
+  final_sweep.jsonl  every mismatch of the final full sweep, confirmed or not, with its tag
+  lag.jsonl          convergence lag samples per create, by directed pair; source sse or poll
   du.jsonl rss.jsonl budget.jsonl   meter samples and governor decisions
   profile.json/.md   the per-runtime behaviour profile
-  target/e2e/<stamp>/{rust-0,go-0}/{data,logs}   node data dirs and stdout/stderr
+  target/e2e/<stamp>/{rust-0,rust-1,go-0,go-1}/{data,logs}   node data dirs and stdout/stderr
                      (logs rotated to *.before-event-N before a restart)
 ```
 
@@ -91,16 +93,23 @@ executor is sequential, so throughput is capped at 1 / (average latency);
 Rust writes take ~250 ms on regolith, so ~3 ops/s is the practical ceiling
 for one Rust node today.
 
-**Checker.** One task per node pair. Every `interval` (10 s): M1 docID-set
-diff over each collection (one POST per node), then M3 head-CID diff via
-alias-batched `_commits(docID: ..., depth: 1)` over docs touched since the
-last check plus a cold sample of 50. A mismatch becomes a divergence record
-only after it persisted across 3 consecutive checks spanning at least
-`grace`; the record's `event_window` carries the op range and the node
-down/up transitions since the last clear check. While a node is down, or for `grace` after it came back, mismatches
-are logged as `expected` and skip confirmation. After the workload the
-checker settles (checks until an eligible clear check or `--settle` runs
-out), then sweeps M3 over every shared doc. The summary reports records
+**Checker.** One task for the whole mesh. Every `interval` (10 s): each
+collection's docID set is fetched once per node and diffed for every pair
+(M1); head CIDs via alias-batched `_commits(docID: ..., depth: 1)` are
+fetched once per node over docs touched since the last check plus a cold
+sample of 50 and diffed per pair (M3). A mismatch becomes a divergence
+record only after it persisted across 3 consecutive checks spanning at
+least `grace`; the record names the pair and carries the op range and node
+down/up transitions since the last clear check. A pair is eligible when
+both members are up and past `grace` since their last recovery; mismatches
+on ineligible pairs are logged as `expected` and their pending state is
+frozen, neither counted nor cleared. Each divergent doc gets a known-cause
+tag when its last write happened while a pair member was down
+(`write-during-outage`) or within 30 s of the writer's or a member's
+recovery (`write-during-recovery`); the summary's alarm line is the
+count of untagged docs. After the workload the
+checker settles (checks until a fully clear, fully eligible check or
+`--settle` runs out), then sweeps M3 over every shared doc. The summary reports records
 written, how many are still present at the final sweep, and the final
 sweep's own mismatch count, so a backlog that drains is distinguishable
 from a real split.
@@ -126,6 +135,15 @@ rate), clamped to `[floor, profile rate]`, and raises the hard stop at 95%
 of the ceiling; the stop is evaluated per sample, so it can overshoot by one
 interval's growth.
 
+**Subscriptions.** One `subscription { Users { _docID } }` is kept open per
+Rust node over the GraphQL POST endpoint with `Accept: text/event-stream`,
+reconnecting after a restart (`--sse-go` opens them on Go nodes too). Arrivals mark docs recent for M3, give lag
+samples at event time (`source: sse`), and 5 s of silence after any event
+triggers a check ahead of the clock. Go's subscription fires only for the
+node's own mutations, not for remote merges, so event-time lag exists only
+into Rust nodes and quiescence triggering is partial; the clock is the
+trigger that matters.
+
 **Replay contract.** What `compare` checks: for each op index the planned
 fields (`virtual_ts_ms`, `node`, `kind`, `collection`) are identical, the
 churn schedules are identical, and docIDs agree wherever both runs learned
@@ -141,7 +159,10 @@ succeed in the other.
   lag, not a split. Look at `checks.jsonl` for the backlog shape and at
   `lag.jsonl` for the direction.
 - A non-zero final sweep with `eligible` is the headline; `final_sweep.jsonl`
-  names the docs and sides.
+  names the docs, pairs, sides and tags, and `profile.md` classifies each by
+  the last write versus the outage windows.
+- `divergent docs: N tagged, M UNTAGGED` is the alarm line: tagged docs are
+  the known write-during-outage loss; untagged ones need a look.
 - `NOT eligible` on the final sweep means a node was down or in grace at the
   end; lengthen `--settle`.
 
@@ -159,10 +180,19 @@ Known runtime behaviours met while building M0 (Rust `ba6dac661`, Go
 - Without a file keyring a Go node comes back from every restart as a new
   peer ID and the Rust replicator never reconnects to it; the driver uses
   `TestClusterBuilder::with_file_keyring()`.
+- A create, update or delete made on either node while its peer is
+  crash-killed, or within seconds of a node's recovery, is never replicated
+  afterwards (the write-during-outage tag). Unchanged by the retry ladder.
+- With four nodes in a full mesh, every direction converges in 4-8 s median;
+  the 55 s Go-to-Rust median of a single pair does not appear.
+- Go's GraphQL subscriptions do not fire for remote merges, and a Go node
+  with one open grows by roughly 200 MB of resident memory per minute at
+  3 ops/s until it restarts (7.8 GB after 30 minutes); Rust nodes do not.
+  That is why the driver subscribes on Rust nodes only.
 
-## Not in M0
+## Not yet
 
-Containers, a second machine, network partitions, subscriptions and SSE
-quiescence, encryption / ACP / relations / indexes / lens, node-internal
-telemetry, known-issue tag rules (the `tags` field is always empty), a
-concurrent executor, M1 sweep scoping, more than one pair.
+Containers, a second machine, network partitions, encryption / ACP /
+relations / secondary indexes / lens, node-internal telemetry (otel), a
+concurrent executor, M1 sweep scoping, tag rules for anything but the
+outage loss.

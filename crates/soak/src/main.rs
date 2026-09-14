@@ -8,7 +8,7 @@
 //! soak run [--seed N] [--ops N] [--secs S] [--rate OPS_PER_SEC] [--control]
 //!          [--churn [--churn-spacing SECS]] [--grace SECS] [--settle SECS]
 //!          [--ceiling-mb MB] [--floor-rate R] [--meter-secs S]
-//!          [--retry-intervals 5,10,20,40] [--until-op N] [--hold]
+//!          [--retry-intervals 5,10,20,40] [--sse-go] [--until-op N] [--hold]
 //! soak replay --manifest <run>/manifest.json [--until-op N] [--hold]
 //!             [--grace SECS] [--settle SECS]
 //! soak summarize <run dir>
@@ -36,6 +36,7 @@ mod confirm;
 mod executor;
 mod generator;
 mod meter;
+mod sse;
 mod summary;
 mod tags;
 
@@ -84,6 +85,8 @@ struct RunArgs {
     replay_of: Option<String>,
     /// Comma-separated seconds for both nodes' replicator retry ladder.
     retry_intervals: Option<String>,
+    /// Also subscribe on Go nodes (reproduces the memory growth).
+    sse_go: bool,
 }
 
 impl RunArgs {
@@ -118,6 +121,7 @@ impl RunArgs {
             hold: has_flag("hold"),
             replay_of: None,
             retry_intervals: flag("retry-intervals"),
+            sse_go: has_flag("sse-go"),
         })
     }
 
@@ -160,6 +164,7 @@ impl RunArgs {
             hold: has_flag("hold"),
             replay_of: m["run_id"].as_str().map(String::from),
             retry_intervals: caps["retry_intervals"].as_str().map(String::from),
+            sse_go: has_flag("sse-go") || caps["sse_go"].as_bool().unwrap_or(false),
         })
     }
 }
@@ -324,7 +329,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
             "ceiling_bytes": a.ceiling_bytes, "floor_rate": a.floor_rate,
             "meter_secs": a.meter_interval.as_secs(), "grace_secs": a.grace.as_secs(),
             "settle_secs": a.settle.as_secs(), "until_op": a.until_op,
-            "retry_intervals": a.retry_intervals,
+            "retry_intervals": a.retry_intervals, "sse_go": a.sse_go,
         },
         "started_wall_ts_ms": now_ms(),
     });
@@ -336,6 +341,22 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     let churn_failed = Arc::new(AtomicBool::new(false));
     let (touched_tx, touched_rx) = mpsc::unbounded_channel();
     let (transitions_tx, transitions_rx) = mpsc::unbounded_channel();
+    let (arrivals_tx, arrivals_rx) = mpsc::unbounded_channel();
+    let subscription = format!("subscription {{ {} {{ _docID }} }}", a.profile.collection);
+    let subscriptions: Vec<_> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| a.sse_go || name.starts_with("rust"))
+        .map(|(i, (_, url))| {
+            tokio::spawn(sse::subscribe(
+                i,
+                url.clone(),
+                subscription.clone(),
+                arrivals_tx.clone(),
+            ))
+        })
+        .collect();
+    drop(arrivals_tx);
     let (stop_tx, stop_rx) = oneshot::channel();
     let (churn_stop_tx, churn_stop_rx) = oneshot::channel();
     let checker = Checker::new(
@@ -351,7 +372,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         Arc::clone(&op_index),
         run_dir,
     )?;
-    let checker_task = tokio::spawn(checker.run(touched_rx, transitions_rx, stop_rx));
+    let checker_task = tokio::spawn(checker.run(touched_rx, transitions_rx, arrivals_rx, stop_rx));
     let meter = Meter::new(
         MeterConfig {
             interval: a.meter_interval,
@@ -464,6 +485,13 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     let (executed, stopped_by) = workload_result?;
     let _ = stop_tx.send(());
     let summary = checker_task.await?.wrap_err("checker")?;
+    for task in &subscriptions {
+        task.abort();
+    }
+    println!(
+        "subscription events per node: {:?}; checks triggered by quiescence: {}",
+        summary.sse_events, summary.quiet_checks
+    );
     println!(
         "checks: {} ({} unreachable), divergence records: {}, still present at final sweep: {}",
         summary.checks, summary.unreachable, summary.divergences, summary.unresolved
@@ -498,6 +526,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         "divergence_records": summary.divergences, "unresolved": summary.unresolved,
         "final_mismatches": summary.final_mismatches, "final_eligible": summary.final_eligible,
         "tagged_docs": summary.tagged_docs, "untagged_docs": summary.untagged_docs,
+        "sse_events": summary.sse_events, "quiet_checks": summary.quiet_checks,
     });
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&m)?)?;
     drop(cluster);

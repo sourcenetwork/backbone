@@ -87,8 +87,12 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
         let e = rss_max.entry(s(r, "node").to_string()).or_default();
         *e = (*e).max(b);
     }
+    let mut lag_sources: BTreeMap<String, u64> = BTreeMap::new();
     let mut lag_by_dir: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for l in &lag {
+        *lag_sources
+            .entry(l["source"].as_str().unwrap_or("poll").to_string())
+            .or_default() += 1;
         lag_by_dir
             .entry(format!("{}->{}", s(l, "from"), s(l, "to")))
             .or_default()
@@ -120,6 +124,21 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
         *sweep_tags
             .entry(f["tag"].as_str().unwrap_or("untagged").to_string())
             .or_default() += 1;
+    }
+    let sweep_docs: std::collections::HashSet<&str> = final_sweep_lines
+        .iter()
+        .filter_map(|f| f["doc_id"].as_str())
+        .collect();
+    let mut record_docs_healed = 0u64;
+    let mut record_docs_persistent = 0u64;
+    for d in &divergences {
+        for id in d["doc_ids"].as_array().into_iter().flatten() {
+            if sweep_docs.contains(id.as_str().unwrap_or("")) {
+                record_docs_persistent += 1;
+            } else {
+                record_docs_healed += 1;
+            }
+        }
     }
     let mut records_by_pair: BTreeMap<String, u64> = BTreeMap::new();
     for d in &divergences {
@@ -170,11 +189,14 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
         })).collect::<Vec<_>>(),
         "rss_max_bytes": rss_max,
         "convergence_lag_ms": lag_by_dir.iter().map(|(dir, v)| json!({"direction": dir, "stats": pct(v)})).collect::<Vec<_>>(),
+        "lag_sources": lag_sources,
         "checks": check_status,
         "divergence_records": divergences.len(),
         "diverged_docs": diverged_docs,
         "records_by_pair": records_by_pair,
         "record_doc_tags": record_tags,
+        "record_docs_healed_by_sweep": record_docs_healed,
+        "record_docs_persistent": record_docs_persistent,
         "final_sweep_tags": sweep_tags,
         "final_sweep": final_check.map(|c| json!({"mismatches": c["mismatches"], "eligible": c["eligible"]})),
         "final_sweep_causes": causes,
@@ -234,7 +256,10 @@ fn render(p: &Value, manifest: &Value) -> String {
     for (node, b) in p["rss_max_bytes"].as_object().into_iter().flatten() {
         out += &format!("- {node}: {}\n", mb(b));
     }
-    out += "\n## convergence lag s (create first seen on the other side; resolution = check interval)\n\n| direction | n | p50 | p95 | max |\n|---|---|---|---|---|\n";
+    out += &format!(
+        "\n## convergence lag s (create first seen on the other side; sources {})\n\n| direction | n | p50 | p95 | max |\n|---|---|---|---|---|\n",
+        p["lag_sources"]
+    );
     for l in p["convergence_lag_ms"].as_array().into_iter().flatten() {
         let st = &l["stats"];
         let sec = |v: &Value| format!("{:.0}", v.as_f64().unwrap_or(0.0) / 1000.0);
@@ -254,6 +279,10 @@ fn render(p: &Value, manifest: &Value) -> String {
         p["diverged_docs"],
         p["records_by_pair"],
         p["final_sweep"]
+    );
+    out += &format!(
+        "\n## known-cause tags: record docs {} ({} healed by the sweep, {} still present); final sweep {}\n",
+        p["record_doc_tags"], p["record_docs_healed_by_sweep"], p["record_docs_persistent"], p["final_sweep_tags"]
     );
     if let Some(causes) = p["final_sweep_causes"]
         .as_object()

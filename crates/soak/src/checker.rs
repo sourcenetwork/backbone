@@ -29,7 +29,12 @@ use tokio::sync::{mpsc, oneshot};
 use crate::churn::Transition;
 use crate::confirm::{Confirmer, Key};
 use crate::executor::{gql, now_ms};
+use crate::sse::Arrival;
 use crate::tags::{tag, Outage, Tag};
+
+/// After the last subscription event, this much silence triggers a check
+/// ahead of the clock.
+const QUIET: Duration = Duration::from_secs(5);
 
 /// A confirmed mismatch: key, detail, checks it persisted across.
 type Confirmed = (Key, Value, u32);
@@ -93,6 +98,10 @@ pub struct Summary {
     /// Divergent docs in records with a known-cause tag, and without one.
     pub tagged_docs: u64,
     pub untagged_docs: u64,
+    /// Subscription events received per node.
+    pub sse_events: Vec<u64>,
+    /// Checks triggered by quiescence rather than the clock.
+    pub quiet_checks: u64,
 }
 
 /// What one comparison pass found.
@@ -199,12 +208,21 @@ impl Checker {
         mut self,
         mut touched: mpsc::UnboundedReceiver<Touch>,
         mut transitions: mpsc::UnboundedReceiver<Transition>,
+        mut arrivals: mpsc::UnboundedReceiver<Arrival>,
         mut stop: oneshot::Receiver<()>,
     ) -> Result<Summary> {
+        self.summary.sse_events = vec![0; self.nodes.len()];
         let mut tick = tokio::time::interval(self.cfg.interval);
         tick.tick().await; // the immediate first tick
         let mut recent = HashSet::new();
+        let mut quiet_until: Option<tokio::time::Instant> = None;
         loop {
+            let quiet = async {
+                match quiet_until {
+                    Some(t) => tokio::time::sleep_until(t).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
             tokio::select! {
                 _ = tick.tick() => {
                     while let Ok(t) = touched.try_recv() {
@@ -213,6 +231,20 @@ impl Checker {
                     self.check(std::mem::take(&mut recent), &mut transitions, false)
                         .await?;
                 }
+                Some(a) = arrivals.recv() => {
+                    self.arrival(a, &mut recent)?;
+                    quiet_until = Some(tokio::time::Instant::now() + QUIET);
+                }
+                _ = quiet => {
+                    quiet_until = None;
+                    self.summary.quiet_checks += 1;
+                    while let Ok(t) = touched.try_recv() {
+                        self.note(t, &mut recent);
+                    }
+                    self.check(std::mem::take(&mut recent), &mut transitions, false)
+                        .await?;
+                    tick.reset();
+                }
                 _ = &mut stop => {
                     // Settle: keep checking until a fully clear, eligible
                     // check or the budget runs out, then sweep everything.
@@ -220,6 +252,9 @@ impl Checker {
                     loop {
                         while let Ok(t) = touched.try_recv() {
                             self.note(t, &mut recent);
+                        }
+                        while let Ok(a) = arrivals.try_recv() {
+                            self.arrival(a, &mut recent)?;
                         }
                         let clear = self
                             .check(std::mem::take(&mut recent), &mut transitions, false)
@@ -247,6 +282,35 @@ impl Checker {
                 .insert(t.doc_id.clone(), (node, t.wall_ts_ms));
         }
         recent.insert(t.doc_id);
+    }
+
+    /// A subscription event: the doc is recent for M3, and if it is a create
+    /// still awaited on that node, a lag sample with event-time resolution.
+    fn arrival(&mut self, a: Arrival, recent: &mut HashSet<String>) -> Result<()> {
+        if let Some(c) = self.summary.sse_events.get_mut(a.node) {
+            *c += 1;
+        }
+        let total = self.nodes.len();
+        let mut line = None;
+        if let Some((origin, created, seen)) = self.awaiting.get_mut(&a.doc_id) {
+            if *origin != a.node && seen.insert(a.node) {
+                line = Some(json!({
+                    "wall_ts_ms": a.wall_ts_ms, "op_index": self.op_index.load(Ordering::Relaxed),
+                    "doc_id": a.doc_id, "from": self.nodes[*origin].0, "to": self.nodes[a.node].0,
+                    "lag_ms": a.wall_ts_ms.saturating_sub(*created), "source": "sse",
+                }));
+                if seen.len() >= total - 1 {
+                    self.awaiting.remove(&a.doc_id);
+                }
+            }
+        }
+        if let Some(line) = line {
+            serde_json::to_writer(&mut self.lag, &line)?;
+            self.lag.write_all(b"\n")?;
+            self.lag.flush()?;
+        }
+        recent.insert(a.doc_id);
+        Ok(())
     }
 
     /// Known-cause tag for `doc` diverging on the pair `key`.
@@ -568,7 +632,7 @@ impl Checker {
                     lines.push(json!({
                         "wall_ts_ms": now, "op_index": op_index, "doc_id": doc,
                         "from": nodes[*origin].0, "to": nodes[n].0,
-                        "lag_ms": now.saturating_sub(*created),
+                        "lag_ms": now.saturating_sub(*created), "source": "poll",
                     }));
                 }
             }
