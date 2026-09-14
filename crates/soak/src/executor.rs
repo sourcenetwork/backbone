@@ -91,29 +91,47 @@ impl Executor {
             return self.grant(op).await;
         }
         let (name, url) = &self.nodes[op.node];
-        let col = &self.collection;
-        let payload = op.payload.as_deref().unwrap_or("{}");
+        let col = op
+            .collection
+            .as_deref()
+            .unwrap_or(self.collection.as_str())
+            .to_string();
+        let mut payload = op.payload.clone().unwrap_or_else(|| "{}".into());
+        let parent_orphan = match op.parent_slot {
+            Some(ps) => match self.slots.get(ps).cloned().flatten() {
+                Some(id) => {
+                    payload = with_author(&payload, &id);
+                    false
+                }
+                None => true,
+            },
+            None => false,
+        };
         let victim = op.slot.and_then(|s| self.slots.get(s).cloned().flatten());
         let expected: Vec<String> = op
             .expect_slots
             .iter()
             .filter_map(|s| self.slots.get(*s).cloned().flatten())
             .collect();
-        let query = match op.kind {
-            OpKind::Create => Some(create_mutation(col, payload, &self.encrypt_fields)),
-            OpKind::Update => victim.as_ref().map(|id| {
-                format!(
-                    "mutation {{ update_{col}(docID: \"{id}\", input: {payload}) {{ _docID }} }}"
-                )
-            }),
-            OpKind::Delete => victim
-                .as_ref()
-                .map(|id| format!("mutation {{ delete_{col}(docID: \"{id}\") {{ _docID }} }}")),
-            OpKind::Query => Some(match &self.se_field {
-                Some(field) => se_query(col, field, payload),
-                None => format!("{{ {payload} }}"),
-            }),
-            OpKind::Grant => unreachable!("grants return early"),
+        let query = if parent_orphan {
+            None
+        } else {
+            match op.kind {
+                OpKind::Create => Some(create_mutation(&col, &payload, &self.encrypt_fields)),
+                OpKind::Update => victim.as_ref().map(|id| {
+                    format!(
+                        "mutation {{ update_{col}(docID: \"{id}\", input: {payload}) {{ _docID }} }}"
+                    )
+                }),
+                OpKind::Delete => victim
+                    .as_ref()
+                    .map(|id| format!("mutation {{ delete_{col}(docID: \"{id}\") {{ _docID }} }}")),
+                OpKind::Query => Some(match &self.se_field {
+                    Some(field) => se_query(&col, field, &payload),
+                    None => format!("{{ {payload} }}"),
+                }),
+                OpKind::Grant => unreachable!("grants return early"),
+            }
         };
         let bearer = match (op.actor, self.tokens.as_mut()) {
             (Some(a), Some(t)) => t.bearer(a, url).map_err(|e| e.to_string()),
@@ -172,7 +190,7 @@ impl Executor {
                     }
                 }
                 OpKind::Query => match &self.se_field {
-                    Some(_) => se_verdict(&data, col, &expected),
+                    Some(_) => se_verdict(&data, &col, &expected),
                     None => (true, None),
                 },
                 OpKind::Grant => unreachable!("grants return early"),
@@ -363,6 +381,21 @@ pub fn views_line(seen: &[bool]) -> String {
     )
 }
 
+/// Splice the soak relation spelling into a Book create payload.
+pub fn with_author(payload: &str, id: &str) -> String {
+    let inner = payload
+        .trim()
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .unwrap_or(payload)
+        .trim();
+    if inner.is_empty() {
+        format!("{{author: \"{id}\"}}")
+    } else {
+        format!("{{{inner}, author: \"{id}\"}}")
+    }
+}
+
 /// `add_<col>` with the profile's `encryptFields:` list (unquoted names).
 pub fn create_mutation(col: &str, payload: &str, encrypt_fields: &[String]) -> String {
     if encrypt_fields.is_empty() {
@@ -542,6 +575,14 @@ mod tests {
         assert_eq!(
             views_line(&[true, false, false]),
             "views owner=true reader=false anon=false"
+        );
+    }
+
+    #[test]
+    fn with_author_uses_the_soak_spelling() {
+        assert_eq!(
+            with_author("{name: \"x\", rating: 1.0}", "bae-parent"),
+            "{name: \"x\", rating: 1.0, author: \"bae-parent\"}"
         );
     }
 

@@ -31,8 +31,8 @@ impl NodeKind {
         }
     }
 
-    /// Host-side CLI used to talk to a container of this kind.
-    fn host_binary(self) -> Result<PathBuf> {
+    /// Host-side CLI used to talk to a node of this kind.
+    pub fn host_binary(self) -> Result<PathBuf> {
         Ok(match self {
             NodeKind::Rust => PathBuf::from(
                 std::env::var("DEFRA_RUST_BINARY").wrap_err("DEFRA_RUST_BINARY must be set")?,
@@ -70,6 +70,17 @@ pub fn m2_specs() -> Vec<NodeSpec> {
         spec("go-1", NodeKind::Go, "badger", "B"),
         spec("go-2", NodeKind::Go, "badger", "B"),
     ]
+}
+
+/// `rust_n` Rust nodes then `go_n` Go nodes, each runtime's nodes alternating
+/// between the two partition sides so neither side is single-runtime. Either
+/// count may be zero: a homogeneous mesh is the control for a mixed one.
+pub fn topology_specs(rust_n: usize, go_n: usize) -> Vec<NodeSpec> {
+    let side = |i: usize| if i.is_multiple_of(2) { "A" } else { "B" };
+    (0..rust_n)
+        .map(|i| spec(&format!("rust-{i}"), NodeKind::Rust, "regolith", side(i)))
+        .chain((0..go_n).map(|i| spec(&format!("go-{i}"), NodeKind::Go, "badger", side(i))))
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -431,6 +442,9 @@ pub enum Nodes {
     Process {
         cluster: TestCluster,
         stopped: HashMap<usize, StoppedNode>,
+        /// Kind and store per node index, mirroring what Docker keeps on its
+        /// containers; the process cluster itself does not record them.
+        specs: Vec<NodeSpec>,
     },
     Docker(DockerNodes),
 }
@@ -459,9 +473,21 @@ impl Nodes {
 
     pub fn store(&self, i: usize) -> &str {
         match self {
-            Nodes::Process { .. } => crate::STORES[i],
+            Nodes::Process { specs, .. } => &specs[i].store,
             Nodes::Docker(d) => &d.containers[i].spec.store,
         }
+    }
+
+    pub fn kind(&self, i: usize) -> NodeKind {
+        match self {
+            Nodes::Process { specs, .. } => specs[i].kind,
+            Nodes::Docker(d) => d.containers[i].spec.kind,
+        }
+    }
+
+    /// Lowest index running `kind`, or `None` in a single-runtime mesh.
+    pub fn first_of(&self, kind: NodeKind) -> Option<usize> {
+        (0..self.len()).find(|&i| self.kind(i) == kind)
     }
 
     pub fn rootdir(&self, i: usize) -> PathBuf {
@@ -500,14 +526,9 @@ impl Nodes {
 
     /// Host-side binary per node index, for CLI-only ops.
     pub fn binaries(&self) -> Result<Vec<PathBuf>> {
-        match self {
-            Nodes::Process { .. } => crate::binaries(),
-            Nodes::Docker(d) => d
-                .containers
-                .iter()
-                .map(|c| c.spec.kind.host_binary())
-                .collect(),
-        }
+        (0..self.len())
+            .map(|i| self.kind(i).host_binary())
+            .collect()
     }
 
     pub fn client(&self, i: usize) -> DefraClient {
@@ -593,7 +614,9 @@ impl Nodes {
 
     pub async fn stop(&mut self, i: usize) -> Result<()> {
         match self {
-            Nodes::Process { cluster, stopped } => {
+            Nodes::Process {
+                cluster, stopped, ..
+            } => {
                 let node = cluster.stop_node(i).await?;
                 stopped.insert(i, node);
                 Ok(())
@@ -607,7 +630,9 @@ impl Nodes {
 
     pub async fn start_stopped(&mut self, i: usize) -> Result<()> {
         match self {
-            Nodes::Process { cluster, stopped } => {
+            Nodes::Process {
+                cluster, stopped, ..
+            } => {
                 let Some(node) = stopped.remove(&i) else {
                     bail!("node {i} is not stopped");
                 };
@@ -810,6 +835,47 @@ mod tests {
         );
         assert_eq!(parse_mem_usage("900kB / 1GB"), Some(900_000));
         assert_eq!(parse_mem_usage("garbage"), None);
+    }
+
+    #[test]
+    fn topology_specs_are_rust_first_and_balanced() {
+        let s = topology_specs(2, 2);
+        let names: Vec<&str> = s.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, ["rust-0", "rust-1", "go-0", "go-1"]);
+        assert!(s[..2].iter().all(|n| matches!(n.kind, NodeKind::Rust)));
+        assert!(s[2..].iter().all(|n| matches!(n.kind, NodeKind::Go)));
+        assert_eq!(s[0].store, "regolith");
+        assert_eq!(s[2].store, "badger");
+        // Round-robin within each kind, so both groups hold both runtimes.
+        assert_eq!(s[0].host, "A");
+        assert_eq!(s[1].host, "B");
+        assert_eq!(s[2].host, "A");
+        assert_eq!(s[3].host, "B");
+    }
+
+    #[test]
+    fn topology_specs_allow_a_single_runtime() {
+        let r = topology_specs(4, 0);
+        assert_eq!(r.len(), 4);
+        assert!(r.iter().all(|n| matches!(n.kind, NodeKind::Rust)));
+        assert!(r.iter().all(|n| n.store == "regolith"));
+
+        let g = topology_specs(0, 4);
+        assert_eq!(g.len(), 4);
+        assert!(g.iter().all(|n| matches!(n.kind, NodeKind::Go)));
+        assert!(g.iter().all(|n| n.store == "badger"));
+        assert_eq!(g[0].name, "go-0");
+    }
+
+    #[test]
+    fn topology_specs_balance_groups_at_any_size() {
+        for (r, g) in [(1, 0), (3, 1), (5, 5), (0, 7)] {
+            let s = topology_specs(r, g);
+            assert_eq!(s.len(), r + g);
+            let a = s.iter().filter(|n| n.host == "A").count();
+            let b = s.iter().filter(|n| n.host == "B").count();
+            assert!(a.abs_diff(b) <= 2, "unbalanced {r}r{g}g: {a} vs {b}");
+        }
     }
 
     #[test]

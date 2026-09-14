@@ -64,7 +64,7 @@ The nodes' data and logs are kept under the run directory (the driver points
 | Flag | Default | Meaning |
 |---|---|---|
 | `--seed N` | unix time | Master seed; both axes derive from it. |
-| `--profile NAME` | p0-crud | Workload profile: `p0-crud` (plaintext Users), `p0-size` (p0-crud with a within-run payload-size mix: 256/1,200/16,000/128,000 bytes weighted 40/30/20/10, to measure disk growth against payload size), `p1-encrypted` (Vault with encrypted secret/pin and an SE index on name; builds the cluster with encryption, dev mode, per-node identities and a shared SE key), `p1-unique` (p1 with a unique name per document instead of the 40-name pool, so an SE query matches exactly one document: it separates the searchable-encryption first-responder misses from the "many documents per name" query shape; run 307 remains the colliding-name result) or `p2-acp` (User under a local ACP policy with owner/reader identities, see "ACP profile"). |
+| `--profile NAME` | p0-crud | Workload profile: `p0-crud` (plaintext Users), `p0-size` (p0-crud with a within-run payload-size mix: 256/1,200/16,000/128,000 bytes weighted 40/30/20/10; mixed-size correctness, not a disk decomposition), `p0-size-256` / `p0-size-128k` (p0-crud at a fixed create size, for one-term disk comparison against a same-day `p0-crud` run), `p0-index` (p0-crud with `@index` on `age`; the planned GraphQL is byte-identical to p0-crud at the same seed), `p3-relation` (one-to-many Author/Book; child creates use `author: "<parent docID>"` resolved from a parent slot), `p1-encrypted` (Vault with encrypted secret/pin and an SE index on name; builds the cluster with encryption, dev mode, per-node identities and a shared SE key), `p1-unique` (p1 with a unique name per document instead of the 40-name pool, so an SE query matches exactly one document: it separates the searchable-encryption first-responder misses from the "many documents per name" query shape; run 307 remains the colliding-name result) or `p2-acp` (User under a local ACP policy with owner/reader identities, see "ACP profile"). |
 | `--create-nodes 0,1` | all nodes | Node indices that receive create ops (0,1 Rust; 2,3 Go); other ops still go to any node. Recorded in the manifest. |
 | `--ops N` | 200 | Ops to plan and execute. |
 | `--secs S` | none | Wall deadline; stops the workload first if hit. |
@@ -84,6 +84,7 @@ The nodes' data and logs are kept under the run directory (the driver points
 | `--sse-go` | off | Open subscriptions on Go nodes too (reproduces the Go memory growth). |
 | `--nodes process\|docker` | process | `docker` runs the M2 six-node topology (rust-0, rust-1, go-0 on host A; rust-2, go-1, go-2 on host B) as containers on a `soak-<run_id>` network, see "Docker backend". Recorded per node in the manifest (`backend`) and honoured by `replay`. |
 | `--reuse-network` | off | Start even though a `soak-*` network is left over from an earlier run. |
+| `--topology <n>r<m>g` | backend default | Mesh shape: `n` Rust nodes, then `m` Go nodes. Either count may be zero, so `4r0g` and `0r4g` are the single-runtime controls for a mixed run. Recorded in the manifest and honoured by `replay`. Without it each backend keeps the shape every published run used: the M2 six in containers, two of each as processes. Node **order is Rust first**, so `--create-nodes 0,1` means the first two Rust nodes at `2r2g` but the first two Go nodes at `0r4g`. |
 
 ### Docker backend
 
@@ -97,8 +98,9 @@ also needs `DEFRA_RUST_BINARY` and the Go `defradb` on `PATH` as before
 (the driver's CLI calls run on the host against each container's published
 API port), and the docker CLI pointed at the host, e.g.
 `DOCKER_CONTEXT=orbstack`. The encrypted and ACP profiles refuse the
-backend; `p0-crud` and `p0-size` run in containers, but `p0-size`'s large
-payloads have never been exercised through the container path.
+backend; plaintext profiles (`p0-crud`, `p0-size`, `p0-size-256`, `p0-size-128k`,
+`p0-index`, `p3-relation`) run in containers, but 128 KB payloads have never
+been exercised through the container path.
 
 ```sh
 export DOCKER_CONTEXT=orbstack
@@ -277,6 +279,31 @@ Known runtime behaviours met while building M0 (Rust `ba6dac661`, Go
   with one open grows by roughly 200 MB of resident memory per minute at
   3 ops/s until it restarts (7.8 GB after 30 minutes); Rust nodes do not.
   That is why the driver subscribes on Rust nodes only.
+
+### Topology
+
+`--topology <n>r<m>g` sets the mesh size and runtime mix. Nodes are named
+`rust-0..rust-<n-1>` then `go-0..go-<m-1>`, and each runtime's nodes alternate
+between the two partition sides so neither side is single-runtime.
+
+```sh
+soak run --topology 2r2g      # two of each, the published process shape
+soak run --topology 4r0g      # all-Rust control
+soak run --topology 0r4g      # all-Go control
+soak run --topology 6r2g      # asymmetric
+```
+
+A single-runtime mesh skips the steps that need a node of each kind and says
+so: the `--control` wiring, and the `p2-acp` token probe against the absent
+runtime. `p2-acp` itself needs a Rust node, because it mints identities with
+the Rust CLI.
+
+One cost grows sharply with the mesh, and it is not the checker. The checker
+reads each node once per pass and compares the unordered pairs in memory, so
+its HTTP cost is linear in nodes. `profile.md`, though, prints one row per
+*directed* pair: 12 rows at four nodes, 30 at six, 380 at twenty, which stops
+being readable well before that. Node memory is the real ceiling. Size the run
+to the host.
 
 ## Not yet
 

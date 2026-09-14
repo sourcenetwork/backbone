@@ -10,7 +10,7 @@
 //!          [--ceiling-mb MB] [--floor-rate R] [--meter-secs S]
 //!          [--min-settle SECS] [--no-subscribe] [--node-env KEY=VALUE]...
 //!          [--retry-intervals 5,10,20,40] [--sse-go] [--until-op N] [--hold]
-//!          [--nodes process|docker] [--reuse-network]
+//!          [--nodes process|docker] [--reuse-network] [--topology 2r2g]
 //! soak replay --manifest <run>/manifest.json [--until-op N] [--hold]
 //!             [--grace SECS] [--settle SECS]
 //! soak summarize <run dir>
@@ -76,6 +76,9 @@ use meter::{Meter, MeterConfig};
 use nodes::{DockerNodes, Nodes};
 
 const SCHEMA: &str = "type Users { name: String age: Int score: Float blob: String }";
+const INDEXED_SCHEMA: &str =
+    "type Users { name: String age: Int @index score: Float blob: String }";
+const RELATION_SCHEMA: &str = "type Book {\n    name: String\n    rating: Float\n    author: Author\n}\n\ntype Author {\n    name: String\n    age: Int\n    verified: Boolean\n    published: [Book]\n}";
 const VAULT_SCHEMA: &str =
     "type Vault { name: String secret: String pin: String score: Float blob: String }";
 /// Shared searchable-encryption key for every node; the key is not under test.
@@ -84,8 +87,20 @@ const SE_KEY: [u8; 32] = [0x5e; 32];
 fn schema_for(profile: &Profile) -> &'static str {
     if profile.is_encrypted() {
         VAULT_SCHEMA
+    } else if profile.relation {
+        RELATION_SCHEMA
+    } else if profile.indexed {
+        INDEXED_SCHEMA
     } else {
         SCHEMA
+    }
+}
+
+fn mesh_collections(profile: &Profile) -> Vec<String> {
+    if profile.relation {
+        vec!["Author".into(), "Book".into()]
+    } else {
+        vec![profile.collection.clone()]
     }
 }
 
@@ -96,15 +111,53 @@ fn acp_schema(policy_id: &str) -> String {
     )
 }
 
-/// Node binary per index: the Rust `defra` before `GO0`, Go `defradb` after.
-fn binaries() -> Result<Vec<PathBuf>> {
-    let rust = PathBuf::from(
-        std::env::var("DEFRA_RUST_BINARY").wrap_err("DEFRA_RUST_BINARY must be set")?,
-    );
-    let go = PathBuf::from("defradb");
-    Ok((0..STORES.len())
-        .map(|i| if i < GO0 { rust.clone() } else { go.clone() })
-        .collect())
+/// Mesh shape from `--topology <n>r<m>g`: `rust` Rust nodes, then `go` Go ones.
+/// Either count may be zero, which is the single-runtime control for a mixed
+/// mesh; both zero is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Topology {
+    rust: usize,
+    go: usize,
+}
+
+impl Topology {
+    fn parse(s: &str) -> Result<Self> {
+        let shape = "--topology must look like 2r2g";
+        let count = |v: &str| -> Result<usize> {
+            eyre::ensure!(
+                !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()),
+                shape
+            );
+            v.parse().wrap_err(shape)
+        };
+        let (rust, rest) = s.split_once('r').ok_or_else(|| eyre!(shape))?;
+        let go = rest.strip_suffix('g').ok_or_else(|| eyre!(shape))?;
+        let t = Self {
+            rust: count(rust)?,
+            go: count(go)?,
+        };
+        eyre::ensure!(t.total() > 0, "--topology needs at least one node");
+        Ok(t)
+    }
+
+    fn total(self) -> usize {
+        self.rust + self.go
+    }
+
+    fn label(self) -> String {
+        format!("{}r{}g", self.rust, self.go)
+    }
+}
+
+/// Kind and store per node index. Without `--topology` each backend keeps the
+/// shape every published run used: the M2 six in containers, two of each as
+/// processes.
+fn node_specs(topology: Option<Topology>, docker: bool) -> Vec<nodes::NodeSpec> {
+    match (topology, docker) {
+        (Some(t), _) => nodes::topology_specs(t.rust, t.go),
+        (None, true) => nodes::m2_specs(),
+        (None, false) => nodes::topology_specs(2, 2),
+    }
 }
 
 fn generate_identity(bin: &Path, what: &str) -> Result<Identity> {
@@ -117,12 +170,6 @@ fn generate_identity(bin: &Path, what: &str) -> Result<Identity> {
 }
 const CONTROL: &str = "Control";
 const CONTROL_SCHEMA: &str = "type Control { v: Int }";
-/// Node indices: the harness spawns Rust nodes first, then Go nodes.
-const RUST0: usize = 0;
-const GO0: usize = 2;
-/// Durable store per node index; the Rust cli has no other durable engine
-/// and Go has only badger.
-const STORES: [&str; 4] = ["regolith", "regolith", "badger", "badger"];
 /// Container images for `--nodes docker`, tagged by the commit they hold.
 const RUST_IMAGE: &str = "soak-defra:8d8bb299f";
 
@@ -158,6 +205,7 @@ struct RunArgs {
     docker: bool,
     /// Start even if a `soak-*` network is left over from an earlier run.
     reuse_network: bool,
+    topology: Option<Topology>,
 }
 
 impl RunArgs {
@@ -165,7 +213,7 @@ impl RunArgs {
         let profile_name = flag("profile").unwrap_or_else(|| "p0-crud".to_string());
         let mut profile = Profile::by_name(&profile_name).ok_or_else(|| {
             eyre!(
-                "unknown --profile {profile_name}; use p0-crud, p0-size, p1-encrypted, p1-unique or p2-acp"
+                "unknown --profile {profile_name}; use p0-crud, p0-size, p0-size-256, p0-size-128k, p0-index, p3-relation, p1-encrypted, p1-unique or p2-acp"
             )
         })?;
         if let Some(rate) = flag("rate") {
@@ -176,11 +224,11 @@ impl RunArgs {
             Some("docker") => true,
             Some(other) => bail!("unknown --nodes {other}; use process or docker"),
         };
-        let node_count = if docker {
-            nodes::m2_specs().len()
-        } else {
-            STORES.len()
+        let topology = match flag("topology") {
+            Some(spec) => Some(Topology::parse(&spec)?),
+            None => None,
         };
+        let node_count = node_specs(topology, docker).len();
         if let Some(list) = flag("create-nodes") {
             let nodes: Vec<usize> = list
                 .split(',')
@@ -241,6 +289,7 @@ impl RunArgs {
             },
             docker,
             reuse_network: has_flag("reuse-network"),
+            topology,
         })
     }
 
@@ -306,6 +355,10 @@ impl RunArgs {
                     .collect(),
             },
             docker: m["nodes"][0]["backend"] == json!("docker"),
+            topology: match m["topology"].as_str() {
+                Some(spec) => Some(Topology::parse(spec)?),
+                None => None,
+            },
             reuse_network: has_flag("reuse-network"),
         })
     }
@@ -390,14 +443,29 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
 
 /// Harness processes, or the M2 six-node topology as containers.
 async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
+    let specs = node_specs(a.topology, a.docker);
+    println!(
+        "topology: {} node(s), {}",
+        specs.len(),
+        specs
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     if a.docker {
         eyre::ensure!(
             !a.profile.is_encrypted() && !a.profile.is_acp(),
             "docker backend supports p0-crud only in M2 stage one"
         );
         // The host CLIs must resolve before any container exists: a panic
-        // in `client()` would skip the teardown.
-        binaries()?;
+        // in `client()` would skip the teardown. Only the runtimes this
+        // topology actually runs are required.
+        for kind in [nodes::NodeKind::Rust, nodes::NodeKind::Go] {
+            if specs.iter().any(|s| s.kind == kind) {
+                kind.host_binary()?;
+            }
+        }
         let leftover = nodes::existing_networks().await?;
         eyre::ensure!(
             leftover.is_empty() || a.reuse_network,
@@ -424,7 +492,7 @@ async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
         let docker = DockerNodes::start(
             &run_id,
             run_dir,
-            nodes::m2_specs(),
+            specs,
             images,
             a.retry_intervals.as_deref(),
             &a.node_env,
@@ -438,17 +506,21 @@ async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
     // their environment, so setting it here reaches every node of either
     // runtime, including the ones a churn event respawns.
     apply_node_env(&a.node_env)?;
+    let rust_n = specs
+        .iter()
+        .filter(|s| s.kind == nodes::NodeKind::Rust)
+        .count();
     let mut builder = TestCluster::builder()
-        .rust_nodes(2)
-        .go_nodes(2)
+        .rust_nodes(rust_n)
+        .go_nodes(specs.len() - rust_n)
         .with_p2p()
         // File keyrings so peer identities survive restarts: without one the
         // Rust node mints a new peer ID per start, and with only the Env
         // keyring so does the Go node; a replicator pointed at the old id
         // never reconnects.
         .with_file_keyring();
-    for (i, store) in STORES.iter().enumerate() {
-        builder = builder.with_node_store(i, *store);
+    for (i, s) in specs.iter().enumerate() {
+        builder = builder.with_node_store(i, s.store.as_str());
     }
     if a.profile.is_encrypted() {
         // Recipe configuration (spec 62, D1): dev mode so Go's KMS has a node
@@ -458,7 +530,9 @@ async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
             .with_encryption()
             .with_development()
             .with_shared_searchable_encryption_key(SE_KEY);
-        for (i, bin) in binaries()?.iter().enumerate() {
+        for (i, spec) in specs.iter().enumerate() {
+            let bin = spec.kind.host_binary()?;
+            let bin = &bin;
             let identity = generate_identity(bin, &format!("node {i}"))?;
             builder = builder.with_node_identity(i, identity.key_hex);
         }
@@ -479,6 +553,7 @@ async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
     Ok(Nodes::Process {
         cluster,
         stopped: HashMap::new(),
+        specs,
     })
 }
 
@@ -494,7 +569,11 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
         );
     }
     let identities = if a.profile.is_acp() {
-        let rust = &binaries()?[RUST0];
+        let rust_node = nodes.first_of(nodes::NodeKind::Rust).ok_or_else(|| {
+            eyre!("the acp profile mints identities with the Rust CLI, and this topology has no Rust node")
+        })?;
+        let bins = nodes.binaries()?;
+        let rust = &bins[rust_node];
         let ids = Identities {
             owner: generate_identity(rust, "owner")?,
             reader: generate_identity(rust, "reader")?,
@@ -508,11 +587,16 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
         None
     };
     wire_full_mesh(nodes, &a.profile, identities.as_ref(), a.no_subscribe)?;
-    preflight(nodes, &a.profile.collection).await?;
+    let preflight_col = if a.profile.relation {
+        "Author"
+    } else {
+        a.profile.collection.as_str()
+    };
+    preflight(nodes, preflight_col, a.profile.relation).await?;
     if let Some(ids) = &identities {
         token_probe(nodes, &a.profile.collection, &ids.owner).await?;
     }
-    let mut collections = vec![a.profile.collection.clone()];
+    let mut collections = mesh_collections(&a.profile);
     if a.control {
         wire_control(nodes).await?;
         collections.push(CONTROL.to_string());
@@ -568,6 +652,9 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
         "run_id": run_id,
         "replay_of": a.replay_of,
         "seed": a.seed,
+        // Null means the backend default, so an older manifest replays as the
+        // shape it actually ran.
+        "topology": a.topology.map(Topology::label),
         "ops": a.ops,
         "secs": a.secs,
         "profile": a.profile,
@@ -846,11 +933,11 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
 /// node (ids must agree, the schema references one) and adds the schema.
 /// The topics each node subscribes to: none under `--no-subscribe`, which
 /// leaves the replicators as the only delivery path.
-fn subscribe_topics(collection: &str, no_subscribe: bool) -> Vec<&str> {
+fn subscribe_topics(collections: &[String], no_subscribe: bool) -> Vec<&str> {
     if no_subscribe {
         Vec::new()
     } else {
-        vec![collection]
+        collections.iter().map(|c| c.as_str()).collect()
     }
 }
 
@@ -860,7 +947,7 @@ fn wire_full_mesh(
     identities: Option<&Identities>,
     no_subscribe: bool,
 ) -> Result<()> {
-    let collection = profile.collection.as_str();
+    let collections = mesh_collections(profile);
     let n = nodes.len();
     let addrs: Vec<String> = (0..n).map(|i| nodes.p2p_addr(i)).collect();
     if let Some(ids) = identities {
@@ -900,7 +987,7 @@ fn wire_full_mesh(
             .collect();
         nodes.client(i).p2p_connect(&others)?;
     }
-    let topics = subscribe_topics(collection, no_subscribe);
+    let topics = subscribe_topics(&collections, no_subscribe);
     if topics.is_empty() {
         println!("no collection subscribe: replicators are the only delivery path");
     } else {
@@ -908,18 +995,19 @@ fn wire_full_mesh(
             nodes.client(i).p2p_collection_add(&topics)?;
         }
     }
+    let collection_refs: Vec<&str> = collections.iter().map(|c| c.as_str()).collect();
     for i in 0..n {
         for j in (0..n).filter(|j| *j != i) {
             nodes
                 .client(i)
-                .p2p_replicator_set(&[collection], &addrs[j])?;
+                .p2p_replicator_set(&collection_refs, &addrs[j])?;
         }
     }
     if let Some(field) = &profile.se_field {
         for i in 0..n {
             nodes
                 .client(i)
-                .encrypted_index_add(collection, field)
+                .encrypted_index_add(&collections[0], field)
                 .wrap_err_with(|| format!("encrypted index on {}", nodes.name(i)))?;
         }
     }
@@ -928,10 +1016,17 @@ fn wire_full_mesh(
 
 /// T0 check: a doc created on each node must show up on every other node
 /// over HTTP GraphQL before any workload runs, so a miswired mesh fails fast.
-async fn preflight(nodes: &Nodes, collection: &str) -> Result<()> {
+async fn preflight(nodes: &Nodes, collection: &str, relation: bool) -> Result<()> {
     let n = nodes.len();
     for i in 0..n {
-        let doc = format!(r#"{{"name": "preflight-{}"}}"#, nodes.name(i));
+        let doc = if relation {
+            format!(
+                r#"{{"name": "preflight-{}", "age": 1, "verified": true}}"#,
+                nodes.name(i)
+            )
+        } else {
+            format!(r#"{{"name": "preflight-{}"}}"#, nodes.name(i))
+        };
         nodes
             .client(i)
             .collection_create(collection, &doc)
@@ -973,7 +1068,11 @@ async fn preflight(nodes: &Nodes, collection: &str) -> Result<()> {
 async fn token_probe(nodes: &Nodes, collection: &str, owner: &Identity) -> Result<()> {
     let http = http_client(Duration::from_secs(30));
     let query = format!("{{ {collection}(limit: 1) {{ _docID }} }}");
-    for i in [RUST0, GO0] {
+    let probes: Vec<usize> = [nodes::NodeKind::Rust, nodes::NodeKind::Go]
+        .into_iter()
+        .filter_map(|k| nodes.first_of(k))
+        .collect();
+    for i in probes.iter().copied() {
         let name = nodes.name(i);
         let url = nodes.api_url(i);
         let token = auth_token(&owner.key_hex, &url)?;
@@ -981,7 +1080,14 @@ async fn token_probe(nodes: &Nodes, collection: &str, owner: &Identity) -> Resul
             .await
             .map_err(|e| eyre!("bearer token rejected by {name}: {e}"))?;
     }
-    println!("token probe ok: owner bearer accepted by rust-0 and go-0");
+    println!(
+        "token probe ok: owner bearer accepted by {}",
+        probes
+            .iter()
+            .map(|&i| nodes.name(i))
+            .collect::<Vec<_>>()
+            .join(" and ")
+    );
     Ok(())
 }
 
@@ -992,13 +1098,22 @@ async fn wire_control(nodes: &Nodes) -> Result<()> {
     for i in 0..nodes.len() {
         nodes.client(i).schema_add(CONTROL_SCHEMA)?;
     }
-    let go_addr = nodes.p2p_addr(GO0);
+    let (Some(rust0), Some(go0)) = (
+        nodes.first_of(nodes::NodeKind::Rust),
+        nodes.first_of(nodes::NodeKind::Go),
+    ) else {
+        println!(
+            "skipping --control: it replicates one Rust node to one Go node, and this topology runs a single runtime"
+        );
+        return Ok(());
+    };
+    let go_addr = nodes.p2p_addr(go0);
     nodes
-        .client(RUST0)
+        .client(rust0)
         .p2p_replicator_set(&[CONTROL], &go_addr)?;
     let http = http_client(Duration::from_secs(30));
-    let go_url = &nodes.api_url(GO0);
-    let rust_url = &nodes.api_url(RUST0);
+    let go_url = &nodes.api_url(go0);
+    let rust_url = &nodes.api_url(rust0);
     let create = |v: u32| format!("mutation {{ add_{CONTROL}(input: [{{v: {v}}}]) {{ _docID }} }}");
     gql(&http, go_url, &create(1))
         .await
@@ -1126,8 +1241,11 @@ mod tests {
     /// without the flag every node subscribes to the collection as before.
     #[test]
     fn no_subscribe_skips_the_collection_topic() {
-        assert_eq!(subscribe_topics("Users", false), vec!["Users"]);
-        assert!(subscribe_topics("Users", true).is_empty());
+        let users = vec!["Users".to_string()];
+        assert_eq!(subscribe_topics(&users, false), vec!["Users"]);
+        assert!(subscribe_topics(&users, true).is_empty());
+        let both = vec!["Author".to_string(), "Book".to_string()];
+        assert_eq!(subscribe_topics(&both, false), vec!["Author", "Book"]);
     }
 
     /// The process backend has no per-node env hook: nodes are children of
@@ -1191,11 +1309,66 @@ mod tests {
     }
 
     #[test]
+    fn topology_parses_and_rejects_empty_meshes() {
+        assert_eq!(
+            Topology::parse("2r2g").unwrap(),
+            Topology { rust: 2, go: 2 }
+        );
+        assert_eq!(
+            Topology::parse("4r0g").unwrap(),
+            Topology { rust: 4, go: 0 }
+        );
+        assert_eq!(
+            Topology::parse("0r4g").unwrap(),
+            Topology { rust: 0, go: 4 }
+        );
+        assert_eq!(Topology::parse("10r3g").unwrap().total(), 13);
+        for bad in ["0r0g", "2r2", "r2g", "2g2r", "", "2r2gx", "-1r2g"] {
+            assert!(Topology::parse(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn topology_round_trips_through_the_manifest_label() {
+        for spec in ["2r2g", "4r0g", "0r4g", "6r2g"] {
+            let t = Topology::parse(spec).unwrap();
+            assert_eq!(t.label(), spec);
+            assert_eq!(Topology::parse(&t.label()).unwrap(), t);
+        }
+    }
+
+    /// An older manifest has no `topology`, and must replay as the shape it
+    /// actually ran: the M2 six in containers, two of each as processes.
+    #[test]
+    fn absent_topology_keeps_each_backend_default() {
+        assert_eq!(node_specs(None, true).len(), 6);
+        assert_eq!(node_specs(None, false).len(), 4);
+        assert_eq!(node_specs(Some(Topology { rust: 0, go: 3 }), true).len(), 3);
+    }
+
+    #[test]
+    fn default_process_topology_matches_the_published_shape() {
+        // Every published process run is two regolith nodes then two badger
+        // ones; the default must keep naming and order identical.
+        let s = nodes::topology_specs(2, 2);
+        assert_eq!(
+            s.iter().map(|n| n.store.as_str()).collect::<Vec<_>>(),
+            ["regolith", "regolith", "badger", "badger"]
+        );
+    }
+
+    #[test]
     fn schema_follows_profile() {
         assert_eq!(schema_for(&Profile::p0_crud()), SCHEMA);
         assert_eq!(schema_for(&Profile::p1_encrypted()), VAULT_SCHEMA);
         // The ACP path uses `acp_schema` instead; pin what `schema_for` returns.
         assert_eq!(schema_for(&Profile::p2_acp()), SCHEMA);
+        assert_eq!(schema_for(&Profile::p0_index()), INDEXED_SCHEMA);
+        assert_eq!(schema_for(&Profile::p3_relation()), RELATION_SCHEMA);
+        assert!(INDEXED_SCHEMA.contains("@index"));
+        assert!(!SCHEMA.contains("@index"));
+        assert!(RELATION_SCHEMA.contains("type Book") && RELATION_SCHEMA.contains("type Author"));
+        assert!(!RELATION_SCHEMA.contains("@index"));
         assert!(VAULT_SCHEMA.contains("type Vault") && VAULT_SCHEMA.contains("secret: String"));
     }
 

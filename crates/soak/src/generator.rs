@@ -50,6 +50,13 @@ pub struct Profile {
     /// is why their frozen plans cannot move: an empty mix draws no randomness.
     #[serde(default)]
     pub size_mix: Vec<(usize, u32)>,
+    /// `true` selects the Users schema with `@index` on `age`. Default false,
+    /// consumes no RNG, so existing frozen plans cannot move.
+    #[serde(default)]
+    pub indexed: bool,
+    /// One-to-many Author/Book profile. Default false, consumes no RNG.
+    #[serde(default)]
+    pub relation: bool,
     #[serde(default)]
     pub acp: Option<AcpProfile>,
 }
@@ -71,6 +78,8 @@ impl Profile {
             unique_names: false,
             create_nodes: None,
             size_mix: Vec::new(),
+            indexed: false,
+            relation: false,
             acp: None,
         }
     }
@@ -82,6 +91,50 @@ impl Profile {
         Self {
             name: "p0-size".into(),
             size_mix: vec![(256, 40), (1_200, 30), (16_000, 20), (128_000, 10)],
+            ..Self::p0_crud()
+        }
+    }
+
+    /// `p0-crud` at a fixed 256-byte create payload. Empty `size_mix`, so the
+    /// draw is `doc_bytes` only: a one-term disk comparison against `p0-crud`
+    /// and `p0-size-128k`, not a within-run mix.
+    pub fn p0_size_256() -> Self {
+        Self {
+            name: "p0-size-256".into(),
+            doc_bytes: 256,
+            ..Self::p0_crud()
+        }
+    }
+
+    /// `p0-crud` at a fixed 128 KB create payload. Same empty-mix construction
+    /// as `p0_size_256`. Largest bucket stays below the candidate chunk
+    /// threshold (design 152, reversal R1).
+    pub fn p0_size_128k() -> Self {
+        Self {
+            name: "p0-size-128k".into(),
+            doc_bytes: 128_000,
+            ..Self::p0_crud()
+        }
+    }
+
+    /// `p0-crud` with `@index` on `age`. The planned GraphQL is byte-identical
+    /// to p0-crud at the same seed; only the schema string differs.
+    pub fn p0_index() -> Self {
+        Self {
+            name: "p0-index".into(),
+            indexed: true,
+            ..Self::p0_crud()
+        }
+    }
+
+    /// One-to-many Author/Book. Same op-kind weights as p0-crud; no size mix
+    /// and no index. Child creates name a parent *slot*; the executor fills
+    /// `author: "<docID>"`.
+    pub fn p3_relation() -> Self {
+        Self {
+            name: "p3-relation".into(),
+            collection: "Book".into(),
+            relation: true,
             ..Self::p0_crud()
         }
     }
@@ -126,6 +179,10 @@ impl Profile {
         match name {
             "p0-crud" => Some(Self::p0_crud()),
             "p0-size" => Some(Self::p0_size()),
+            "p0-size-256" => Some(Self::p0_size_256()),
+            "p0-size-128k" => Some(Self::p0_size_128k()),
+            "p0-index" => Some(Self::p0_index()),
+            "p3-relation" => Some(Self::p3_relation()),
             "p1-encrypted" => Some(Self::p1_encrypted()),
             "p1-unique" => Some(Self::p1_unique()),
             "p2-acp" => Some(Self::p2_acp()),
@@ -181,9 +238,17 @@ pub struct PlannedOp {
     pub expect_slots: Vec<usize>,
     #[serde(default)]
     pub actor: Option<Actor>,
+    /// Per-op collection; `None` means the profile's single collection.
+    #[serde(default)]
+    pub collection: Option<String>,
+    /// Child create: ledger slot of the parent Author. Never a docID.
+    #[serde(default)]
+    pub parent_slot: Option<usize>,
 }
 
 pub const NAME_POOL: usize = 40;
+/// One Author per this many Books, after the first create (always a parent).
+const PARENT_EVERY: u32 = 8;
 
 pub struct Generator {
     rng: StdRng,
@@ -204,6 +269,10 @@ pub struct Generator {
     create_node: Vec<usize>,
     /// Protected slots that already received a reader grant.
     granted: std::collections::HashSet<usize>,
+    /// Live Author slots (relation profile only).
+    authors: Vec<usize>,
+    /// Live Book slots (relation profile only).
+    books: Vec<usize>,
 }
 
 impl Generator {
@@ -219,6 +288,8 @@ impl Generator {
             owner_of: Vec::new(),
             create_node: Vec::new(),
             granted: std::collections::HashSet::new(),
+            authors: Vec::new(),
+            books: Vec::new(),
         }
     }
 
@@ -272,12 +343,28 @@ impl Generator {
         };
         let mut expect_slots = Vec::new();
         let mut actor = None;
+        let mut collection = None;
+        let mut parent_slot = None;
         let (slot, payload) = match kind {
             OpKind::Create => {
                 let slot = self.created;
                 self.created += 1;
                 self.live.push(slot);
-                let payload = if self.profile.is_encrypted() {
+                let payload = if self.profile.relation {
+                    let is_parent =
+                        self.authors.is_empty() || self.rng.gen_range(0..PARENT_EVERY + 1) == 0;
+                    if is_parent {
+                        self.authors.push(slot);
+                        collection = Some("Author".into());
+                        self.create_author_input()
+                    } else {
+                        let pslot = self.authors[self.rng.gen_range(0..self.authors.len())];
+                        self.books.push(slot);
+                        collection = Some("Book".into());
+                        parent_slot = Some(pslot);
+                        self.create_book_input()
+                    }
+                } else if self.profile.is_encrypted() {
                     let mut name = format!("name-{:02}", self.rng.gen_range(0..NAME_POOL));
                     // p1-unique draws the same pool value, so both profiles
                     // plan the same ops from a seed; the slot suffix is what
@@ -301,19 +388,39 @@ impl Generator {
             }
             OpKind::Update => {
                 let pos = self.rng.gen_range(0..self.live.len());
-                let payload = if self.profile.is_encrypted() {
+                let slot = self.live[pos];
+                let payload = if self.profile.relation {
+                    if self.authors.contains(&slot) {
+                        collection = Some("Author".into());
+                        self.update_author_input()
+                    } else {
+                        collection = Some("Book".into());
+                        self.update_book_input()
+                    }
+                } else if self.profile.is_encrypted() {
                     self.update_input_vault()
                 } else {
                     self.update_input()
                 };
                 if acp.is_some() {
-                    actor = Some(self.owner_of[self.live[pos]]);
+                    actor = Some(self.owner_of[slot]);
                 }
-                (Some(self.live[pos]), Some(payload))
+                (Some(slot), Some(payload))
             }
             OpKind::Delete => {
                 let pos = self.rng.gen_range(0..self.live.len());
                 let slot = self.live.swap_remove(pos);
+                if self.profile.relation {
+                    if let Some(i) = self.authors.iter().position(|&s| s == slot) {
+                        self.authors.swap_remove(i);
+                        collection = Some("Author".into());
+                    } else {
+                        if let Some(i) = self.books.iter().position(|&s| s == slot) {
+                            self.books.swap_remove(i);
+                        }
+                        collection = Some("Book".into());
+                    }
+                }
                 if acp.is_some() {
                     actor = Some(self.owner_of[slot]);
                 }
@@ -342,7 +449,12 @@ impl Generator {
                     .collect();
                 (None, Some(name))
             }
-            OpKind::Query => (None, Some(self.query_selection())),
+            OpKind::Query => {
+                if self.profile.relation {
+                    collection = Some("Book".into());
+                }
+                (None, Some(self.query_selection()))
+            }
         };
         let index = self.next_index;
         self.next_index += 1;
@@ -355,6 +467,8 @@ impl Generator {
             payload,
             expect_slots,
             actor,
+            collection,
+            parent_slot,
         }
     }
 
@@ -424,11 +538,40 @@ impl Generator {
     }
 
     fn query_selection(&mut self) -> String {
+        if self.profile.relation {
+            let rating = self.rng.gen_range(0..100);
+            return format!(
+                "Book(limit: 10, filter: {{rating: {{_gt: {rating}}}}}) {{ _docID name rating }}"
+            );
+        }
         let age = self.rng.gen_range(0..100);
         format!(
             "{}(limit: 10, filter: {{age: {{_gt: {age}}}}}) {{ _docID name age }}",
             self.profile.collection
         )
+    }
+
+    fn create_author_input(&mut self) -> String {
+        let name = self.alnum(8);
+        let age = self.rng.gen_range(0..100);
+        let verified = self.rng.gen_range(0..2) == 1;
+        format!("{{name: \"{name}\", age: {age}, verified: {verified}}}")
+    }
+
+    fn create_book_input(&mut self) -> String {
+        let name = self.alnum(8);
+        let rating = self.score();
+        format!("{{name: \"{name}\", rating: {rating}}}")
+    }
+
+    fn update_author_input(&mut self) -> String {
+        let age = self.rng.gen_range(0..100);
+        format!("{{age: {age}}}")
+    }
+
+    fn update_book_input(&mut self) -> String {
+        let rating = self.score();
+        format!("{{rating: {rating}}}")
     }
 }
 
@@ -524,6 +667,19 @@ mod tests {
             Profile::by_name("p1-encrypted"),
             Some(Profile::p1_encrypted())
         );
+        assert_eq!(
+            Profile::by_name("p0-size-256"),
+            Some(Profile::p0_size_256())
+        );
+        assert_eq!(
+            Profile::by_name("p0-size-128k"),
+            Some(Profile::p0_size_128k())
+        );
+        assert_eq!(Profile::by_name("p0-index"), Some(Profile::p0_index()));
+        assert_eq!(
+            Profile::by_name("p3-relation"),
+            Some(Profile::p3_relation())
+        );
         assert_eq!(Profile::by_name("nope"), None);
     }
 
@@ -613,6 +769,219 @@ mod tests {
                 .hash(&mut h);
         }
         assert_eq!(h.finish(), 11674702909862144291);
+    }
+
+    fn plan_p0_size_256(seed: u64, n: usize) -> Vec<PlannedOp> {
+        Generator::new(seed, Profile::p0_size_256(), 2)
+            .take(n)
+            .collect()
+    }
+
+    fn plan_p0_size_128k(seed: u64, n: usize) -> Vec<PlannedOp> {
+        Generator::new(seed, Profile::p0_size_128k(), 2)
+            .take(n)
+            .collect()
+    }
+
+    #[test]
+    fn p0_size_256_is_a_single_small_bucket() {
+        let p = Profile::p0_size_256();
+        assert_eq!(p.name, "p0-size-256");
+        assert_eq!(p.doc_bytes, 256);
+        assert!(
+            p.size_mix.is_empty(),
+            "flat profiles use doc_bytes, not a mix"
+        );
+        let lens: std::collections::BTreeSet<usize> = plan_p0_size_256(42, 200)
+            .into_iter()
+            .filter(|op| op.kind == OpKind::Create)
+            .map(|op| op.payload.unwrap().len())
+            .collect();
+        assert!(
+            lens.iter().all(|&l| (200..400).contains(&l)),
+            "expected GraphQL creates near 256 B, got {lens:?}"
+        );
+    }
+
+    #[test]
+    fn p0_size_128k_creates_are_large() {
+        let p = Profile::p0_size_128k();
+        assert_eq!(p.name, "p0-size-128k");
+        assert_eq!(p.doc_bytes, 128_000);
+        assert!(
+            p.size_mix.is_empty(),
+            "flat profiles use doc_bytes, not a mix"
+        );
+        let lens: std::collections::BTreeSet<usize> = plan_p0_size_128k(42, 80)
+            .into_iter()
+            .filter(|op| op.kind == OpKind::Create)
+            .map(|op| op.payload.unwrap().len())
+            .collect();
+        assert!(
+            lens.iter().any(|&l| l > 100_000) && lens.iter().all(|&l| l < 130_000),
+            "expected GraphQL creates near 128 KB, got {lens:?}"
+        );
+    }
+
+    #[test]
+    fn p0_size_256_plan_is_frozen() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for op in plan_p0_size_256(42, 500) {
+            (
+                op.index,
+                op.virtual_ts_ms,
+                op.node,
+                op.kind as u8,
+                op.slot,
+                op.payload,
+            )
+                .hash(&mut h);
+        }
+        assert_eq!(h.finish(), 16343893043046409438);
+    }
+
+    #[test]
+    fn p0_size_128k_plan_is_frozen() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for op in plan_p0_size_128k(42, 500) {
+            (
+                op.index,
+                op.virtual_ts_ms,
+                op.node,
+                op.kind as u8,
+                op.slot,
+                op.payload,
+            )
+                .hash(&mut h);
+        }
+        assert_eq!(h.finish(), 6215196610090915070);
+    }
+
+    fn plan_p0_index(seed: u64, n: usize) -> Vec<PlannedOp> {
+        Generator::new(seed, Profile::p0_index(), 2)
+            .take(n)
+            .collect()
+    }
+
+    #[test]
+    fn p0_index_is_p0_plus_a_flag() {
+        let p = Profile::p0_index();
+        assert_eq!(p.name, "p0-index");
+        assert!(p.indexed);
+        assert!(!Profile::p0_crud().indexed);
+        assert!(!Profile::p0_size().indexed);
+        assert!(p.size_mix.is_empty());
+        assert_eq!(p.doc_bytes, Profile::p0_crud().doc_bytes);
+    }
+
+    #[test]
+    fn p0_index_plan_equals_p0_plan() {
+        use std::hash::{Hash, Hasher};
+        let tuple = |op: &PlannedOp| {
+            (
+                op.index,
+                op.virtual_ts_ms,
+                op.node,
+                op.kind as u8,
+                op.slot,
+                op.payload.clone(),
+            )
+        };
+        let mut h0 = std::collections::hash_map::DefaultHasher::new();
+        let mut hi = std::collections::hash_map::DefaultHasher::new();
+        for op in plan(42, 500) {
+            tuple(&op).hash(&mut h0);
+        }
+        for op in plan_p0_index(42, 500) {
+            tuple(&op).hash(&mut hi);
+        }
+        assert_eq!(h0.finish(), 12263656268250365760);
+        assert_eq!(hi.finish(), h0.finish());
+    }
+
+    fn plan_p3(seed: u64, n: usize) -> Vec<PlannedOp> {
+        Generator::new(seed, Profile::p3_relation(), 2)
+            .take(n)
+            .collect()
+    }
+
+    #[test]
+    fn p3_relation_is_unindexed_and_has_no_size_mix() {
+        let p = Profile::p3_relation();
+        assert_eq!(p.name, "p3-relation");
+        assert!(p.size_mix.is_empty());
+        assert!(!p.indexed);
+        assert!(p.relation);
+        assert!(!Profile::p0_crud().relation);
+    }
+
+    #[test]
+    fn p3_relation_first_create_is_an_author_without_a_parent_slot() {
+        let first = plan_p3(42, 20)
+            .into_iter()
+            .find(|op| op.kind == OpKind::Create)
+            .expect("a create");
+        assert_eq!(first.collection.as_deref(), Some("Author"));
+        assert_eq!(first.parent_slot, None);
+        let p = first.payload.as_deref().unwrap();
+        assert!(p.contains("name:"), "{p}");
+        assert!(p.contains("age:"), "{p}");
+        assert!(p.contains("verified:"), "{p}");
+        assert!(!p.contains("author:"), "{p}");
+        assert!(!p.contains("blob:"), "{p}");
+    }
+
+    #[test]
+    fn p3_relation_child_carries_a_parent_slot_not_a_doc_id() {
+        let ops = plan_p3(42, 400);
+        let child = ops
+            .iter()
+            .find(|op| op.kind == OpKind::Create && op.collection.as_deref() == Some("Book"))
+            .expect("a Book create");
+        let parent_slot = child.parent_slot.expect("child must name a parent slot");
+        let parent = ops
+            .iter()
+            .find(|op| op.kind == OpKind::Create && op.slot == Some(parent_slot))
+            .expect("parent create at that slot");
+        assert_eq!(parent.collection.as_deref(), Some("Author"));
+        let payload = child.payload.as_deref().unwrap();
+        assert!(payload.contains("name:"), "{payload}");
+        assert!(payload.contains("rating:"), "{payload}");
+        assert!(
+            !payload.contains("author:"),
+            "docID is resolved at execute time, got {payload}"
+        );
+        assert!(!payload.contains("bae-"), "{payload}");
+    }
+
+    #[test]
+    fn p0_plans_do_not_set_relation_fields() {
+        for op in plan(42, 200) {
+            assert!(op.collection.is_none());
+            assert!(op.parent_slot.is_none());
+        }
+    }
+
+    #[test]
+    fn p3_relation_plan_is_frozen() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for op in plan_p3(42, 500) {
+            (
+                op.index,
+                op.virtual_ts_ms,
+                op.node,
+                op.kind as u8,
+                op.slot,
+                op.payload.clone(),
+                op.collection.clone(),
+                op.parent_slot,
+            )
+                .hash(&mut h);
+        }
+        assert_eq!(h.finish(), 1928505163324143662);
     }
 
     #[test]
