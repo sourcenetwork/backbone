@@ -169,14 +169,19 @@ sweep's own mismatch count, so a backlog that drains is distinguishable
 from a real split.
 
 **Churner (axis 2).** The schedule is drawn at start from the topology
-stream: mean spacing, per-node cooldown, three kinds drawn uniformly
-(restart, crash-kill, graceful leave), down-time in 5..30 s. Events
-fire on virtual time (op progress, polled every 250 ms), so a replay fires
-them within a few ops of the same index; `topology.jsonl` records planned
-and actual virtual time. `restart` is the harness's SIGTERM path (same ports, health gate);
+stream: mean spacing, per-node cooldown, kinds drawn uniformly (restart,
+crash-kill, graceful leave, and partition on `--nodes docker`), down-time
+in 5..30 s. Events fire on wall time from workload start (polled every
+250 ms), and the schedule covers the shorter of the op budget and the
+`--secs` deadline; manifests without a `churn.config.clock` replay on
+virtual time (op progress) as they ran. `topology.jsonl` records planned and actual
+clock time. `restart` is the harness's SIGTERM path (same ports, health gate);
 `crash_kill` is SIGKILL, a wall-time pause, respawn, then a GraphQL health
 poll; `graceful_leave` is the harness's stop (SIGTERM, ports held), a
-wall-time pause, then its start on the same ports. Down-time is wall time so a stalled workload cannot leave a node
+wall-time pause, then its start on the same ports; `partition` is a docker
+network disconnect, a wall-time pause, then connect (the API port goes
+with the network, so the driver sees a crash-kill and the `rejoin` record
+carries the re-read `p2p_addr`). Down-time is wall time so a stalled workload cannot leave a node
 dead. The churner shares the driver task with the workload (the harness
 restart future is not `Send`).
 

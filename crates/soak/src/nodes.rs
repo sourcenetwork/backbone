@@ -9,8 +9,6 @@ use defra_harness::{extract_p2p_addr, DefraClient, StoppedNode, TestCluster};
 use eyre::{bail, ensure, Result, WrapErr};
 use serde::{Deserialize, Serialize};
 
-use crate::executor::gql;
-
 /// The harness's file-keyring secret (`defra_harness::cluster::builder`).
 const KEYRING_SECRET: &str = "integration-test-secret";
 const API_PORT: &str = "9181";
@@ -267,12 +265,15 @@ impl DockerNodes {
         }
     }
 
-    /// Best-effort removal of every container, then the network; the first
-    /// error is returned at the end. A container that was never created
-    /// (a partial `start`) is not an error.
-    async fn teardown(&self) -> Result<()> {
+    /// Best-effort: dump every container's remaining logs, remove every
+    /// container, then the network; the first error is returned at the end.
+    /// A container that was never created (a partial `start`) is not an error.
+    async fn teardown(&mut self) -> Result<()> {
         let mut first_err = None;
         for i in 0..self.containers.len() {
+            if let Err(e) = self.dump_logs(i).await {
+                first_err.get_or_insert(e);
+            }
             if let Err(e) = docker(&["rm", "-f", &self.container_name(i)]).await {
                 if !e.to_string().contains("No such container") {
                     first_err.get_or_insert(e);
@@ -289,11 +290,12 @@ impl DockerNodes {
         format!("{}-{}", self.network, self.containers[i].spec.name)
     }
 
-    /// Poll the API until it answers, then record the container's addresses.
+    /// Poll `p2p/info` until it answers (both runtimes do once up; Go
+    /// rejects `{ __typename }`), then record the container's addresses.
     async fn wait_ready(&mut self, i: usize) -> Result<()> {
         let url = self.containers[i].api_url();
         let deadline = Instant::now() + READY_TIMEOUT;
-        while gql(&self.http, &url, "{ __typename }").await.is_err() {
+        while crate::churn::peer_id(&self.http, &url).await.is_none() {
             ensure!(
                 Instant::now() < deadline,
                 "{}: API not ready within {READY_TIMEOUT:?}",
@@ -576,7 +578,6 @@ impl Nodes {
         }
     }
 
-    #[allow(dead_code)] // wired in by the partition churn kind
     pub fn supports_partition(&self) -> bool {
         matches!(self, Nodes::Docker(_))
     }
@@ -585,7 +586,6 @@ impl Nodes {
     /// with the network, so the driver cannot reach the node either: from
     /// the driver's side this is a crash-kill whose process keeps running.
     /// The port returns on `rejoin`, which re-reads the container's address.
-    #[allow(dead_code)] // wired in by the partition churn kind
     pub async fn partition(&mut self, i: usize) -> Result<()> {
         match self {
             Nodes::Process { .. } => bail!("process backend cannot partition"),
@@ -597,7 +597,6 @@ impl Nodes {
         }
     }
 
-    #[allow(dead_code)] // wired in by the partition churn kind
     pub async fn rejoin(&mut self, i: usize) -> Result<()> {
         match self {
             Nodes::Process { .. } => bail!("process backend cannot partition"),
@@ -612,7 +611,7 @@ impl Nodes {
     pub async fn shutdown(self) -> Result<()> {
         match self {
             Nodes::Process { .. } => Ok(()),
-            Nodes::Docker(d) => d.teardown().await,
+            Nodes::Docker(mut d) => d.teardown().await,
         }
     }
 }

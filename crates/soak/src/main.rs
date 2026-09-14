@@ -61,7 +61,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use auth::{auth_token, Identities, Identity};
 use checker::{Checker, CheckerConfig, Touch};
-use churn::ChurnConfig;
+use churn::{ChurnClock, ChurnConfig, ChurnEvent};
 use executor::{gql, gql_as, http_client, now_ms, Executor};
 use generator::{Actor, Generator, OpKind, Profile};
 use meter::{Meter, MeterConfig};
@@ -127,6 +127,8 @@ struct RunArgs {
     profile: Profile,
     control: bool,
     churn: Option<ChurnConfig>,
+    /// The original's stored schedule on replay; `None` draws one.
+    churn_schedule: Option<Vec<ChurnEvent>>,
     grace: Duration,
     settle: Duration,
     ceiling_bytes: u64,
@@ -179,7 +181,10 @@ impl RunArgs {
             );
             profile.create_nodes = Some(nodes);
         }
-        let mut churn = has_flag("churn").then(ChurnConfig::default);
+        let mut churn = has_flag("churn").then(|| ChurnConfig {
+            clock: ChurnClock::Wall,
+            ..ChurnConfig::default()
+        });
         if let (Some(cfg), Some(secs)) = (churn.as_mut(), flag("churn-spacing")) {
             let ms = secs
                 .parse::<u64>()
@@ -196,6 +201,7 @@ impl RunArgs {
             profile,
             control: has_flag("control"),
             churn,
+            churn_schedule: None,
             grace: Duration::from_secs(parse_flag("grace", checker.grace.as_secs())?),
             settle: Duration::from_secs(parse_flag("settle", checker.settle.as_secs())?),
             ceiling_bytes: (parse_flag::<f64>("ceiling-mb", 120.0 * 1024.0)? * 1_048_576.0) as u64,
@@ -211,9 +217,10 @@ impl RunArgs {
         })
     }
 
-    /// The original run's parameters. `ops` stays the planned count so the
-    /// churn schedule's horizon is identical; the workload stops at the
-    /// original's executed count via `until_op`, and the disk budget is off.
+    /// The original run's parameters. The stored churn schedule is replayed
+    /// as recorded (older manifests without one are redrawn from the seed
+    /// over the planned `ops`); the workload stops at the original's
+    /// executed count via `until_op`, and the disk budget is off.
     fn from_manifest(path: &Path) -> Result<Self> {
         let m: Value = serde_json::from_str(
             &std::fs::read_to_string(path)
@@ -222,6 +229,10 @@ impl RunArgs {
         let caps = &m["caps"];
         let churn = match m["churn"]["config"].as_object() {
             Some(_) => Some(serde_json::from_value(m["churn"]["config"].clone())?),
+            None => None,
+        };
+        let churn_schedule = match m["churn"]["schedule"].as_array() {
+            Some(_) => Some(serde_json::from_value(m["churn"]["schedule"].clone())?),
             None => None,
         };
         Ok(Self {
@@ -235,6 +246,7 @@ impl RunArgs {
             profile: serde_json::from_value(m["profile"].clone()).wrap_err("manifest profile")?,
             control: m["control"].as_bool().unwrap_or(false),
             churn,
+            churn_schedule,
             grace: Duration::from_secs(parse_flag(
                 "grace",
                 caps["grace_secs"].as_u64().unwrap_or(120),
@@ -455,12 +467,25 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
         println!("{name} peer id: {}", pid.as_deref().unwrap_or("?"));
         peer_ids.push(pid);
     }
-    let horizon_ms = churn::virtual_ms(a.ops as u64, a.profile.rate);
-    let churn_events = a
-        .churn
-        .as_ref()
-        .map(|cfg| churn::schedule(a.seed, endpoints.len(), horizon_ms, cfg))
-        .unwrap_or_default();
+    // On wall time the run ends at `--secs` if that comes first; events
+    // drawn past it would never fire.
+    let mut horizon_ms = churn::virtual_ms(a.ops as u64, a.profile.rate);
+    if let (Some(cfg), Some(secs)) = (a.churn.as_ref(), a.secs) {
+        if cfg.clock == ChurnClock::Wall {
+            horizon_ms = horizon_ms.min(secs * 1000);
+        }
+    }
+    let churn_events = match (&a.churn_schedule, &a.churn) {
+        (Some(stored), _) => stored.clone(),
+        (None, Some(cfg)) => churn::schedule_with(
+            a.seed,
+            endpoints.len(),
+            horizon_ms,
+            cfg,
+            nodes.supports_partition(),
+        ),
+        (None, None) => Vec::new(),
+    };
     for e in &churn_events {
         println!(
             "churn plan #{} at {}s: {:?} {} (down {}ms)",
@@ -650,6 +675,7 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
     let churner = churn::run(
         nodes,
         churn_events,
+        a.churn.as_ref().map(|c| c.clock).unwrap_or_default(),
         a.profile.rate,
         a.profile.collection.clone(),
         Arc::clone(&op_index),

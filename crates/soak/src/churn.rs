@@ -1,11 +1,12 @@
 //! Seeded topology churn (axis 2).
 //!
 //! The schedule of restart / crash-kill events is drawn at run start as
-//! virtual-time offsets, so it is a pure function of the seed and printable
-//! before the run begins. Virtual time is op progress (`op_index / rate`),
-//! the same clock the generator's `virtual_ts_ms` uses, so a replay fires
-//! the same events between the same ops. Crash down-time is wall time so a
-//! stalled workload cannot leave a node dead forever.
+//! offsets on the run's churn clock, so it is a pure function of the seed
+//! and printable before the run begins. The clock is wall time from workload
+//! start, or virtual time (op progress, `op_index / rate`, the same clock the
+//! generator's `virtual_ts_ms` uses) for manifests that predate the choice.
+//! Down-time is always wall time so a stalled workload cannot leave a node
+//! dead forever.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -32,30 +33,47 @@ const TOPO_AXIS: u64 = 0x7090_10c4_0000_0002;
 pub enum ChurnKind {
     /// SIGTERM, then start again on the same ports.
     Restart,
-    /// SIGKILL, stay dead for `down_ms` of virtual time, respawn.
+    /// SIGKILL, stay dead for `down_ms` of wall time, respawn.
     CrashKill,
     /// SIGTERM, stay stopped for `down_ms` with the ports held, start again.
     GracefulLeave,
+    /// Network disconnect for `down_ms` of wall time, then connect.
+    Partition,
+}
+
+/// Which clock the schedule offsets are read against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChurnClock {
+    /// Op progress over the profile rate; the clock old manifests ran on.
+    #[default]
+    Virtual,
+    /// Elapsed wall time since the workload started.
+    Wall,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChurnEvent {
     pub index: usize,
+    /// Offset from workload start on the run's churn clock.
     pub virtual_ts_ms: u64,
     pub node: usize,
     pub kind: ChurnKind,
-    /// CrashKill and GracefulLeave only.
+    /// Zero for Restart.
     pub down_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChurnConfig {
-    /// Mean virtual time between events, mesh-wide.
+    /// Mean time between events, mesh-wide.
     pub spacing_ms: u64,
-    /// Minimum virtual time from one event's end to the next on that node.
+    /// Minimum time from one event's end to the next on that node.
     pub cooldown_ms: u64,
-    /// Crash and leave down-time bounds, inclusive.
+    /// Down-time bounds, inclusive.
     pub down_ms: (u64, u64),
+    /// Absent from old manifests, which ran on virtual time.
+    #[serde(default)]
+    pub clock: ChurnClock,
 }
 
 impl Default for ChurnConfig {
@@ -64,14 +82,22 @@ impl Default for ChurnConfig {
             spacing_ms: 120_000,
             cooldown_ms: 120_000,
             down_ms: (5_000, 30_000),
+            clock: ChurnClock::Virtual,
         }
     }
 }
 
-/// Events in ascending virtual time, all before `horizon_ms`. A draw that
+/// Events in ascending clock time, all before `horizon_ms`. A draw that
 /// lands on a cooling-down node is dropped, not redrawn, so the stream stays
-/// a pure function of the seed.
-pub fn schedule(seed: u64, nodes: usize, horizon_ms: u64, cfg: &ChurnConfig) -> Vec<ChurnEvent> {
+/// a pure function of the seed. `partitions` adds the Partition kind to the
+/// draw for backends that can cut a node off the network.
+pub fn schedule_with(
+    seed: u64,
+    nodes: usize,
+    horizon_ms: u64,
+    cfg: &ChurnConfig,
+    partitions: bool,
+) -> Vec<ChurnEvent> {
     let mut rng = StdRng::seed_from_u64(seed ^ TOPO_AXIS);
     let mut last_end: Vec<Option<u64>> = vec![None; nodes];
     let mut events = Vec::new();
@@ -82,16 +108,16 @@ pub fn schedule(seed: u64, nodes: usize, horizon_ms: u64, cfg: &ChurnConfig) -> 
             return events;
         }
         let node = rng.gen_range(0..nodes);
-        let kind = match rng.gen_range(0..3) {
+        let kinds = if partitions { 4 } else { 3 };
+        let kind = match rng.gen_range(0..kinds) {
             0 => ChurnKind::Restart,
             1 => ChurnKind::CrashKill,
-            _ => ChurnKind::GracefulLeave,
+            2 => ChurnKind::GracefulLeave,
+            _ => ChurnKind::Partition,
         };
         let down_ms = match kind {
-            ChurnKind::CrashKill | ChurnKind::GracefulLeave => {
-                rng.gen_range(cfg.down_ms.0..=cfg.down_ms.1)
-            }
             ChurnKind::Restart => 0,
+            _ => rng.gen_range(cfg.down_ms.0..=cfg.down_ms.1),
         };
         if last_end[node].is_some_and(|end| t < end + cfg.cooldown_ms) {
             continue;
@@ -121,13 +147,14 @@ pub fn virtual_ms(op_index: u64, rate: f64) -> u64 {
     (op_index as f64 * 1000.0 / rate) as u64
 }
 
-/// Fires `events` on virtual time until `stop`, then returns with every
-/// node up. Each down/up phase appends a line to the log. The meter samples
-/// from here too, since this task holds the nodes.
+/// Fires `events` on `clock` until `stop`, then returns with every node up.
+/// Each down/up phase appends a line to the log. The meter samples from
+/// here too, since this task holds the nodes.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     nodes: &mut Nodes,
     events: Vec<ChurnEvent>,
+    clock: ChurnClock,
     rate: f64,
     collection: String,
     op_index: Arc<AtomicU64>,
@@ -140,19 +167,22 @@ pub async fn run(
         File::create(&log_path).wrap_err_with(|| format!("creating {}", log_path.display()))?,
     );
     let http = reqwest::Client::new();
+    let started = Instant::now();
+    let now = || match clock {
+        ChurnClock::Virtual => virtual_ms(op_index.load(Ordering::Relaxed), rate),
+        ChurnClock::Wall => started.elapsed().as_millis() as u64,
+    };
     let mut pending = events.into_iter().peekable();
     loop {
         meter.maybe_sample(nodes).await?;
-        let vnow = virtual_ms(op_index.load(Ordering::Relaxed), rate);
-        if pending.peek().is_some_and(|e| e.virtual_ts_ms <= vnow) {
+        if pending.peek().is_some_and(|e| e.virtual_ts_ms <= now()) {
             let event = pending.next().expect("peeked");
             fire(
                 nodes,
                 &event,
                 &http,
                 &collection,
-                &op_index,
-                rate,
+                &now,
                 &transitions,
                 &mut log,
             )
@@ -169,32 +199,29 @@ pub async fn run(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn fire(
     nodes: &mut Nodes,
     event: &ChurnEvent,
     http: &reqwest::Client,
     collection: &str,
-    op_index: &AtomicU64,
-    rate: f64,
+    now: &dyn Fn() -> u64,
     transitions: &mpsc::UnboundedSender<Transition>,
     log: &mut BufWriter<File>,
 ) -> Result<()> {
     let name = nodes.name(event.node).to_string();
     let url = nodes.api_url(event.node);
     let started = Instant::now();
-    let vnow = || virtual_ms(op_index.load(Ordering::Relaxed), rate);
     let _ = transitions.send(Transition {
         node: event.node,
         up: false,
         wall_ts_ms: now_ms(),
     });
-    log_phase(log, event, &name, "down", vnow(), 0, None)?;
+    log_phase(log, event, &name, "down", now(), 0, None, None)?;
     println!(
-        "churn #{} {:?} {name} at virtual {}ms (planned {}ms)",
+        "churn #{} {:?} {name} at {}ms (planned {}ms)",
         event.index,
         event.kind,
-        vnow(),
+        now(),
         event.virtual_ts_ms
     );
     match event.kind {
@@ -228,6 +255,27 @@ async fn fire(
                 .await
                 .wrap_err_with(|| format!("{name}: start after leave"))?;
         }
+        ChurnKind::Partition => {
+            nodes
+                .partition(event.node)
+                .await
+                .wrap_err_with(|| format!("{name}: partition"))?;
+            tokio::time::sleep(Duration::from_millis(event.down_ms)).await;
+            nodes
+                .rejoin(event.node)
+                .await
+                .wrap_err_with(|| format!("{name}: rejoin"))?;
+            log_phase(
+                log,
+                event,
+                &name,
+                "rejoin",
+                now(),
+                started.elapsed().as_millis() as u64,
+                None,
+                Some(&nodes.p2p_addr(event.node)),
+            )?;
+        }
     }
     wait_healthy(http, &url, collection, Duration::from_secs(60))
         .await
@@ -243,9 +291,10 @@ async fn fire(
         event,
         &name,
         "up",
-        vnow(),
+        now(),
         started.elapsed().as_millis() as u64,
         pid.as_deref(),
+        None,
     )?;
     println!(
         "churn #{} {name} back up after {:?} as peer {}",
@@ -300,6 +349,9 @@ async fn rotate_logs(nodes: &mut Nodes, event: &ChurnEvent) -> Result<()> {
     Ok(())
 }
 
+/// `p2p_addr` is the container's re-read address, recorded on the `rejoin`
+/// phase only.
+#[allow(clippy::too_many_arguments)]
 fn log_phase(
     log: &mut BufWriter<File>,
     event: &ChurnEvent,
@@ -308,13 +360,17 @@ fn log_phase(
     virtual_ts_ms: u64,
     duration_ms: u64,
     peer_id: Option<&str>,
+    p2p_addr: Option<&str>,
 ) -> Result<()> {
-    let line = json!({
+    let mut line = json!({
         "event": event.index, "kind": event.kind, "node": node, "phase": phase,
         "planned_virtual_ts_ms": event.virtual_ts_ms, "virtual_ts_ms": virtual_ts_ms,
         "wall_ts_ms": now_ms(), "down_ms": event.down_ms, "duration_ms": duration_ms,
         "peer_id": peer_id,
     });
+    if let Some(addr) = p2p_addr {
+        line["p2p_addr"] = json!(addr);
+    }
     serde_json::to_writer(&mut *log, &line)?;
     log.write_all(b"\n")?;
     log.flush()?;
@@ -348,7 +404,7 @@ mod tests {
     const HOUR: u64 = 3_600_000;
 
     fn plan(seed: u64) -> Vec<ChurnEvent> {
-        schedule(seed, 2, HOUR, &ChurnConfig::default())
+        schedule_with(seed, 2, HOUR, &ChurnConfig::default(), false)
     }
 
     #[test]
@@ -406,5 +462,37 @@ mod tests {
                 _ => assert!((cfg.down_ms.0..=cfg.down_ms.1).contains(&e.down_ms)),
             }
         }
+    }
+
+    /// Replay redraws the schedule from the seed, so the draws without the
+    /// Partition kind are frozen: these are the first events of seed 106.
+    #[test]
+    fn process_schedule_is_unchanged_without_partition() {
+        let ev = schedule_with(106, 4, 1_800_000, &ChurnConfig::default(), false);
+        let head: Vec<_> = ev
+            .iter()
+            .take(4)
+            .map(|e| (e.virtual_ts_ms, e.node, e.kind, e.down_ms))
+            .collect();
+        assert_eq!(
+            head,
+            [
+                (174_829, 3, ChurnKind::CrashKill, 26_658),
+                (348_896, 2, ChurnKind::CrashKill, 15_703),
+                (470_098, 3, ChurnKind::GracefulLeave, 14_878),
+                (635_362, 2, ChurnKind::Restart, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn docker_schedule_draws_partitions() {
+        let cfg = ChurnConfig::default();
+        let ev = schedule_with(106, 6, 1_800_000, &cfg, true);
+        assert!(ev.iter().any(|e| e.kind == ChurnKind::Partition));
+        assert!(ev
+            .iter()
+            .filter(|e| e.kind == ChurnKind::Partition)
+            .all(|e| (cfg.down_ms.0..=cfg.down_ms.1).contains(&e.down_ms)));
     }
 }
