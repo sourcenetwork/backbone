@@ -2,7 +2,7 @@
 //! `profile.json` plus a one-screen `profile.md` (`soak summarize DIR`), and
 //! the replay-contract comparison of two runs (`soak compare A B`).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -87,16 +87,61 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
         let e = rss_max.entry(s(r, "node").to_string()).or_default();
         *e = (*e).max(b);
     }
+    // Lag in three groupings: directed pair, source alone, and receiving
+    // runtime x source. `source` is what the sample came from (poll or sse);
+    // mixing them hides that an sse sample is an event-time arrival.
     let mut lag_sources: BTreeMap<String, u64> = BTreeMap::new();
-    let mut lag_by_dir: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut lag_groups: BTreeMap<(String, String), Vec<u64>> = BTreeMap::new();
+    let mut lag_seen: BTreeMap<(String, String), HashSet<&str>> = BTreeMap::new();
     for l in &lag {
-        *lag_sources
-            .entry(l["source"].as_str().unwrap_or("poll").to_string())
-            .or_default() += 1;
-        lag_by_dir
-            .entry(format!("{}->{}", s(l, "from"), s(l, "to")))
-            .or_default()
-            .push(l["lag_ms"].as_u64().unwrap_or(0));
+        let source = l["source"].as_str().unwrap_or("poll");
+        let ms = l["lag_ms"].as_u64().unwrap_or(0);
+        *lag_sources.entry(source.to_string()).or_default() += 1;
+        for key in [
+            (
+                format!("{}->{}", s(l, "from"), s(l, "to")),
+                "all".to_string(),
+            ),
+            ("all".to_string(), source.to_string()),
+            (format!("*->{}", runtime(s(l, "to"))), source.to_string()),
+        ] {
+            lag_groups.entry(key).or_default().push(ms);
+        }
+        if let Some(id) = l["doc_id"].as_str() {
+            lag_seen
+                .entry((s(l, "from").to_string(), s(l, "to").to_string()))
+                .or_default()
+                .insert(id);
+        }
+    }
+    // Censoring: creates that never produced a lag sample on the far side are
+    // not fast, they are unseen, and they are absent from every percentile.
+    let mut creates_by_node: BTreeMap<&str, HashSet<&str>> = BTreeMap::new();
+    for op in &ops {
+        if op["ok"].as_bool() == Some(true) && s(op, "kind") == "create" {
+            if let Some(id) = op["doc_id"].as_str() {
+                creates_by_node.entry(s(op, "node")).or_default().insert(id);
+            }
+        }
+    }
+    let node_names: Vec<&str> = manifest["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n["name"].as_str())
+        .collect();
+    let mut lag_unseen: Vec<Value> = Vec::new();
+    for (from, creates) in &creates_by_node {
+        for to in &node_names {
+            if to == from {
+                continue;
+            }
+            let seen = lag_seen.get(&(from.to_string(), to.to_string()));
+            let seen_here = seen.map_or(0, |s| creates.iter().filter(|d| s.contains(*d)).count());
+            lag_unseen.push(json!({"from": from, "to": to, "creates": creates.len(),
+                                   "lag_samples": seen.map_or(0, HashSet::len),
+                                   "unseen": creates.len() - seen_here}));
+        }
     }
     let mut check_status: BTreeMap<String, u64> = BTreeMap::new();
     for c in &checks {
@@ -128,6 +173,35 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
     let sweep_docs: std::collections::HashSet<&str> = final_sweep_lines
         .iter()
         .filter_map(|f| f["doc_id"].as_str())
+        .collect();
+    // Unique documents, not rows: a sweep row is one (pair, doc) mismatch, so a
+    // doc missing on one node shows up once per pair that node is in.
+    let mut m1_by_missing: BTreeMap<&str, HashSet<&str>> = BTreeMap::new();
+    let mut m1_docs: HashSet<&str> = HashSet::new();
+    for f in &final_sweep_lines {
+        if s(f, "mechanism") != "M1" {
+            continue;
+        }
+        let (Some(doc), Some(node)) = (f["doc_id"].as_str(), f["detail"]["missing_on"].as_str())
+        else {
+            continue;
+        };
+        m1_docs.insert(doc);
+        m1_by_missing.entry(node).or_default().insert(doc);
+    }
+    let union_where = |pred: fn(&str) -> bool| -> HashSet<&str> {
+        m1_by_missing
+            .iter()
+            .filter(|(n, _)| pred(n))
+            .flat_map(|(_, d)| d.iter().copied())
+            .collect()
+    };
+    let m1_on_rust = union_where(|n| n.starts_with("rust"));
+    let m1_on_go = union_where(|n| n.starts_with("go"));
+    let diverged_docs_unique: HashSet<&str> = divergences
+        .iter()
+        .flat_map(|d| d["doc_ids"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
         .collect();
     let mut record_docs_healed = 0u64;
     let mut record_docs_persistent = 0u64;
@@ -161,6 +235,13 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
             longest_outage_ms = longest_outage_ms.max(t["duration_ms"].as_u64().unwrap_or(0));
         }
     }
+    // Docker samples carry a null pid: those bytes are `docker stats` MemUsage
+    // for the whole container, not the process RSS `ps` reports.
+    let rss_instrument = if !rss.is_empty() && rss.iter().all(|r| r["pid"].is_null()) {
+        "docker_stats"
+    } else {
+        "ps"
+    };
     let causes = classify_final_sweep(
         &read_jsonl(&run_dir.join("final_sweep.jsonl")),
         &ops,
@@ -188,17 +269,31 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
             "bytes_per_write_op": if writes_ok > 0 { (last.saturating_sub(*first)) as f64 / writes_ok as f64 } else { 0.0 },
         })).collect::<Vec<_>>(),
         "rss_max_bytes": rss_max,
-        "convergence_lag_ms": lag_by_dir.iter().map(|(dir, v)| json!({"direction": dir, "stats": pct(v)})).collect::<Vec<_>>(),
+        "rss_instrument": rss_instrument,
+        "convergence_lag_ms": lag_groups.iter().map(|((dir, source), v)| json!({"direction": dir, "source": source, "stats": pct(v)})).collect::<Vec<_>>(),
+        "lag_unseen": lag_unseen,
         "lag_sources": lag_sources,
         "checks": check_status,
         "divergence_records": divergences.len(),
         "diverged_docs": diverged_docs,
+        "diverged_docs_unique": diverged_docs_unique.len(),
         "records_by_pair": records_by_pair,
-        "record_doc_tags": record_tags,
+        "record_doc_tags": record_tags.clone(),
+        "record_doc_tag_slots": record_tags,
         "record_docs_healed_by_sweep": record_docs_healed,
         "record_docs_persistent": record_docs_persistent,
         "final_sweep_tags": sweep_tags,
-        "final_sweep": final_check.map(|c| json!({"mismatches": c["mismatches"], "eligible": c["eligible"]})),
+        "final_sweep": final_check.map(|c| json!({"mismatches": c["mismatches"], "eligible": c["eligible"],
+                                                  "sampled_pending": c["pending"]})),
+        "sweep_rows": final_sweep_lines.len(),
+        "sweep_unique_docs": sweep_docs.len(),
+        "sweep_unique_m1_docs": m1_docs.len(),
+        "sweep_unique_m1_by_missing_on": m1_by_missing.iter().map(|(n, d)| (n.to_string(), d.len())).collect::<BTreeMap<_, _>>(),
+        "sweep_unique_m1_on_rust": m1_on_rust.len(),
+        "sweep_unique_m1_on_go": m1_on_go.len(),
+        "sweep_unique_m1_overlap": m1_on_rust.intersection(&m1_on_go).count(),
+        "loss_strict": loss_by_outage(&ops, &topology, &final_sweep_lines, 0),
+        "loss_plus_30s": loss_by_outage(&ops, &topology, &final_sweep_lines, RECOVERY_WINDOW_MS),
         "final_sweep_causes": causes,
         "churn": {"events": churn_kinds, "longest_outage_ms": longest_outage_ms},
     });
@@ -218,7 +313,7 @@ fn render(p: &Value, manifest: &Value) -> String {
     let mut out = String::new();
     let o = &p["ops"];
     out += &format!(
-        "# soak profile: run {} (seed {})\n\nrust {} / go {}\n\nops: {} executed ({} ok, {} failed, {} skipped), {:.2} ops/s over {:.0}s, stopped by {}\n\n",
+        "# soak profile: run {} (seed {})\n\nrust {} / go {}\n\nops: {} executed ({} ok, {} failed, {} skipped), {:.2} ops/s over {:.0}s, {} mesh writes ok, stopped by {}\n\n",
         p["run_id"].as_str().unwrap_or("?"),
         p["seed"],
         manifest["rust_version"]["commit"].as_str().map(|c| &c[..c.len().min(9)]).unwrap_or("?"),
@@ -226,6 +321,7 @@ fn render(p: &Value, manifest: &Value) -> String {
         o["executed"], o["ok"], o["failed"], o["skipped"],
         o["achieved_ops_per_s"].as_f64().unwrap_or(0.0),
         o["span_s"].as_f64().unwrap_or(0.0),
+        o["writes_ok"],
         o["stopped_by"].as_str().unwrap_or("?"),
     );
     out += "## latency ms (p50 / p95 / max, n)\n\n| node | kind | p50 | p95 | max | n |\n|---|---|---|---|---|---|\n";
@@ -241,7 +337,7 @@ fn render(p: &Value, manifest: &Value) -> String {
             st["n"]
         );
     }
-    out += "\n## disk (engine-inclusive: store named per node)\n\n| node | store | start MB | end MB | bytes per write op |\n|---|---|---|---|---|\n";
+    out += "\n## disk (engine-inclusive: store named per node)\n\n| node | store | start MB | end MB | bytes_grown_per_mesh_write |\n|---|---|---|---|---|\n";
     for d in p["disk"].as_array().into_iter().flatten() {
         out += &format!(
             "| {} | {} | {} | {} | {:.0} |\n",
@@ -252,36 +348,68 @@ fn render(p: &Value, manifest: &Value) -> String {
             d["bytes_per_write_op"].as_f64().unwrap_or(0.0)
         );
     }
-    out += "\n## max RSS MB\n\n";
+    out += if p["rss_instrument"] == "docker_stats" {
+        "\n## max memory (docker stats MemUsage, not process RSS) MB\n\n"
+    } else {
+        "\n## max RSS MB (ps rss)\n\n"
+    };
     for (node, b) in p["rss_max_bytes"].as_object().into_iter().flatten() {
         out += &format!("- {node}: {}\n", mb(b));
     }
     out += &format!(
-        "\n## convergence lag s (create first seen on the other side; sources {})\n\n| direction | n | p50 | p95 | max |\n|---|---|---|---|---|\n",
+        "\n## convergence lag ms (create first seen on the other side; sources {})\n\n| direction | source | n | p50_ms | p95_ms | max_ms |\n|---|---|---|---|---|---|\n",
         p["lag_sources"]
     );
     for l in p["convergence_lag_ms"].as_array().into_iter().flatten() {
         let st = &l["stats"];
-        let sec = |v: &Value| format!("{:.0}", v.as_f64().unwrap_or(0.0) / 1000.0);
         out += &format!(
-            "| {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} |\n",
             l["direction"].as_str().unwrap_or(""),
+            l["source"].as_str().unwrap_or(""),
             st["n"],
-            sec(&st["p50"]),
-            sec(&st["p95"]),
-            sec(&st["max"])
+            st["p50"],
+            st["p95"],
+            st["max"]
         );
     }
+    let unseen: Vec<&Value> = p["lag_unseen"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|u| u["unseen"].as_u64().unwrap_or(0) > 0)
+        .collect();
+    if !unseen.is_empty() {
+        out += "\ncreates with no lag sample on the far side (censored, absent from every percentile above):\n\n";
+        for u in unseen {
+            out += &format!(
+                "- {} -> {}: {} of {} creates unseen\n",
+                u["from"].as_str().unwrap_or(""),
+                u["to"].as_str().unwrap_or(""),
+                u["unseen"],
+                u["creates"]
+            );
+        }
+    }
     out += &format!(
-        "\n## checks: {}; divergence records {} ({} docs) by pair {}; final sweep {}\n",
+        "\n## checks: {}; divergence records {} ({} record-doc slots, {} unique docs) by pair {}; final sweep {}\n\n`sampled_pending` is what the last full pass happened to look at (recent docs plus a cold sample of 50), not the size of the backlog.\n",
         p["checks"],
         p["divergence_records"],
         p["diverged_docs"],
+        p["diverged_docs_unique"],
         p["records_by_pair"],
         p["final_sweep"]
     );
     out += &format!(
-        "\n## known-cause tags: record docs {} ({} healed by the sweep, {} still present); final sweep {}\n",
+        "\nfinal sweep: {} rows, {} unique docs (M1 unique {}, rust {}, go {}, overlap {})\n",
+        p["sweep_rows"],
+        p["sweep_unique_docs"],
+        p["sweep_unique_m1_docs"],
+        p["sweep_unique_m1_on_rust"],
+        p["sweep_unique_m1_on_go"],
+        p["sweep_unique_m1_overlap"]
+    );
+    out += &format!(
+        "\n## known-cause tags: record-doc slots {} ({} slots healed by the sweep, {} still present); final sweep {}\n",
         p["record_doc_tags"], p["record_docs_healed_by_sweep"], p["record_docs_persistent"], p["final_sweep_tags"]
     );
     if let Some(causes) = p["final_sweep_causes"]
@@ -291,6 +419,32 @@ fn render(p: &Value, manifest: &Value) -> String {
         out += "\n## final sweep mismatches by likely cause (last write on the doc vs the peer's outage windows)\n\n";
         for (cause, n) in causes {
             out += &format!("- {n} {cause}\n");
+        }
+    }
+    for (key, title) in [
+        ("loss_strict", "[down,up]"),
+        ("loss_plus_30s", "[down,up+30s]"),
+    ] {
+        let rows = p[key].as_array().into_iter().flatten();
+        let mut collapsed: BTreeMap<(&str, &str), (u64, u64)> = BTreeMap::new();
+        for r in rows {
+            let e = collapsed
+                .entry((
+                    r["kind"].as_str().unwrap_or(""),
+                    r["recv_rt"].as_str().unwrap_or(""),
+                ))
+                .or_default();
+            e.0 += r["written"].as_u64().unwrap_or(0);
+            e.1 += r["lost"].as_u64().unwrap_or(0);
+        }
+        if collapsed.is_empty() {
+            continue;
+        }
+        out += &format!(
+            "\n## loss (creates by another node in {title}, still missing_on the down node at the final sweep)\n\n| kind | recv | written | lost |\n|---|---|---|---|\n"
+        );
+        for ((kind, recv), (written, lost)) in collapsed {
+            out += &format!("| {kind} | {recv} | {written} | {lost} |\n");
         }
     }
     out += &format!(
@@ -441,6 +595,89 @@ fn classify_final_sweep(
     out
 }
 
+/// A node's runtime is its name prefix; the cluster builder names them.
+fn runtime(node: &str) -> &'static str {
+    if node.starts_with("rust") {
+        "rust"
+    } else if node.starts_with("go") {
+        "go"
+    } else {
+        "?"
+    }
+}
+
+/// Loss during an outage: creates made by some *other* node while a node was
+/// down, counted against the ones that node was still missing at the final
+/// sweep. `extra` widens the window past the `up` record (a node answers
+/// GraphQL before its replicator link is back). Keyed by outage kind, the
+/// runtime of the node that was down, and the runtime of the writer.
+fn loss_by_outage(ops: &[Value], topology: &[Value], sweep: &[Value], extra: u64) -> Vec<Value> {
+    let ups: HashMap<u64, u64> = topology
+        .iter()
+        .filter(|t| s(t, "phase") == "up")
+        .map(|t| {
+            (
+                t["event"].as_u64().unwrap_or(0),
+                t["wall_ts_ms"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect();
+    let windows: Vec<(&str, &str, u64, u64)> = topology
+        .iter()
+        .filter(|t| s(t, "phase") == "down")
+        .filter_map(|t| {
+            let up = ups.get(&t["event"].as_u64().unwrap_or(0))?;
+            Some((
+                s(t, "kind"),
+                s(t, "node"),
+                t["wall_ts_ms"].as_u64().unwrap_or(0),
+                up + extra,
+            ))
+        })
+        .collect();
+    let mut missing_on: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for f in sweep {
+        if s(f, "mechanism") == "M1" {
+            if let (Some(doc), Some(node)) =
+                (f["doc_id"].as_str(), f["detail"]["missing_on"].as_str())
+            {
+                missing_on.entry(node).or_default().insert(doc);
+            }
+        }
+    }
+    let mut agg: BTreeMap<(&str, &str, &str), (u64, u64)> = BTreeMap::new();
+    for (kind, node, down, up) in &windows {
+        for op in ops {
+            if op["ok"].as_bool() != Some(true)
+                || s(op, "kind") != "create"
+                || s(op, "node") == *node
+            {
+                continue;
+            }
+            let Some(doc) = op["doc_id"].as_str() else {
+                continue;
+            };
+            let wall = op["wall_ts_ms"].as_u64().unwrap_or(0);
+            if wall < *down || wall > *up {
+                continue;
+            }
+            let e = agg
+                .entry((kind, runtime(node), runtime(s(op, "node"))))
+                .or_default();
+            e.0 += 1;
+            if missing_on.get(node).is_some_and(|m| m.contains(doc)) {
+                e.1 += 1;
+            }
+        }
+    }
+    agg.into_iter()
+        .map(|((kind, recv, writer), (written, lost))| {
+            json!({"kind": kind, "recv_rt": recv, "writer_rt": writer,
+                   "written": written, "lost": lost})
+        })
+        .collect()
+}
+
 /// Grants change relationships, not documents, so they are not writes.
 fn is_write(kind: &str) -> bool {
     !matches!(kind, "query" | "grant")
@@ -449,6 +686,49 @@ fn is_write(kind: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loss_counts_only_foreign_creates_inside_the_window() {
+        let topology = vec![
+            json!({"event": 1, "phase": "down", "kind": "crash_kill", "node": "go-0", "wall_ts_ms": 100}),
+            json!({"event": 1, "phase": "up", "kind": "crash_kill", "node": "go-0", "wall_ts_ms": 200}),
+        ];
+        let ops = vec![
+            // Kept, and still missing at the sweep.
+            json!({"ok": true, "kind": "create", "node": "rust-0", "doc_id": "a", "wall_ts_ms": 150}),
+            // Kept, arrived.
+            json!({"ok": true, "kind": "create", "node": "rust-0", "doc_id": "b", "wall_ts_ms": 160}),
+            // The down node's own create: not counted.
+            json!({"ok": true, "kind": "create", "node": "go-0", "doc_id": "c", "wall_ts_ms": 170}),
+            // After the window, inside the +30s recovery window.
+            json!({"ok": true, "kind": "create", "node": "rust-0", "doc_id": "d", "wall_ts_ms": 210}),
+            // Not a create.
+            json!({"ok": true, "kind": "update", "node": "rust-0", "doc_id": "e", "wall_ts_ms": 150}),
+            // Failed.
+            json!({"ok": false, "kind": "create", "node": "rust-0", "doc_id": "f", "wall_ts_ms": 150}),
+        ];
+        let sweep = vec![
+            json!({"mechanism": "M1", "doc_id": "a", "detail": {"missing_on": "go-0"}}),
+            // M3 rows have no missing_on and must not join.
+            json!({"mechanism": "M3", "doc_id": "b", "detail": {"heads_a": "x", "heads_b": "y"}}),
+        ];
+        let strict = loss_by_outage(&ops, &topology, &sweep, 0);
+        assert_eq!(strict.len(), 1);
+        assert_eq!(strict[0]["kind"], "crash_kill");
+        assert_eq!(strict[0]["recv_rt"], "go");
+        assert_eq!(strict[0]["writer_rt"], "rust");
+        assert_eq!(strict[0]["written"], 2);
+        assert_eq!(strict[0]["lost"], 1);
+        let wide = loss_by_outage(&ops, &topology, &sweep, RECOVERY_WINDOW_MS);
+        assert_eq!(wide[0]["written"], 3);
+        assert_eq!(wide[0]["lost"], 1);
+    }
+
+    #[test]
+    fn runtime_is_the_name_prefix() {
+        assert_eq!(runtime("rust-2"), "rust");
+        assert_eq!(runtime("go-0"), "go");
+    }
 
     #[test]
     fn grants_and_queries_are_not_writes() {

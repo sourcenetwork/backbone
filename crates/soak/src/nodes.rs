@@ -91,8 +91,18 @@ impl Container {
 }
 
 /// `docker run` arguments for `c`; the flag order per runtime mirrors the
-/// harness builders (`rust_node.rs` / `go_node.rs`).
-pub fn docker_run_argv(c: &Container, network: &str, secret: &str) -> Vec<String> {
+/// harness builders (`rust_node.rs` / `go_node.rs`). `retry_intervals` is the
+/// comma-separated `--replicator-retry-intervals` both runtimes take on
+/// `start`; without it a container churn measures the default ladder, not
+/// replication.
+/// `node_env` is passed through as `-e KEY=VALUE` on every container.
+pub fn docker_run_argv(
+    c: &Container,
+    network: &str,
+    secret: &str,
+    retry_intervals: Option<&str>,
+    node_env: &[String],
+) -> Vec<String> {
     let mut v: Vec<String> = [
         "run",
         "-d",
@@ -106,12 +116,14 @@ pub fn docker_run_argv(c: &Container, network: &str, secret: &str) -> Vec<String
         &format!("{}:/data", c.rootdir.display()),
         "-e",
         &format!("DEFRA_KEYRING_SECRET={secret}"),
-        &c.image,
-        "--rootdir",
-        "/data",
     ]
     .map(String::from)
     .to_vec();
+    for kv in node_env {
+        v.push("-e".into());
+        v.push(kv.clone());
+    }
+    v.extend([c.image.clone(), "--rootdir".into(), "/data".into()]);
     let url = ["--url", &format!("0.0.0.0:{API_PORT}")].map(String::from);
     let keyring = ["--keyring-backend", "file", "--keyring-path", "/data/keys"].map(String::from);
     match c.spec.kind {
@@ -141,6 +153,10 @@ pub fn docker_run_argv(c: &Container, network: &str, secret: &str) -> Vec<String
         ]
         .map(String::from),
     );
+    if let Some(intervals) = retry_intervals {
+        v.push("--replicator-retry-intervals".into());
+        v.push(intervals.into());
+    }
     v
 }
 
@@ -220,6 +236,8 @@ impl DockerNodes {
         run_dir: &Path,
         specs: Vec<NodeSpec>,
         images: (&str, &str),
+        retry_intervals: Option<&str>,
+        node_env: &[String],
     ) -> Result<Self> {
         let network = format!("soak-{run_id}");
         docker(&["network", "create", &network]).await?;
@@ -248,7 +266,13 @@ impl DockerNodes {
                     peer_addr: None,
                 });
                 let i = nodes.containers.len() - 1;
-                let argv = docker_run_argv(&nodes.containers[i], &nodes.network, &nodes.secret);
+                let argv = docker_run_argv(
+                    &nodes.containers[i],
+                    &nodes.network,
+                    &nodes.secret,
+                    retry_intervals,
+                    node_env,
+                );
                 let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
                 docker(&argv).await?;
                 nodes.wait_ready(i).await?;
@@ -308,7 +332,7 @@ impl DockerNodes {
 
     /// Record the container's address on the soak network and its libp2p
     /// peer address. The node reports `/ip4/0.0.0.0/...`, so the host part
-    /// is the inspected address; it may change after a `rejoin`.
+    /// is the inspected address; `rejoin` pins it, so it must not change.
     async fn record_addr(&mut self, i: usize) -> Result<()> {
         let name = self.container_name(i);
         let url = self.containers[i].api_url();
@@ -325,17 +349,23 @@ impl DockerNodes {
         .trim()
         .to_string();
         ensure!(!ip.is_empty(), "{name}: no address on {}", self.network);
-        // After a rejoin the API answers before p2p info does; give it a moment.
-        let mut peer_id = None;
-        for _ in 0..10 {
-            peer_id = crate::churn::peer_id(&self.http, &url).await;
-            if peer_id.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Some(recorded) = &self.containers[i].ip {
+            ensure!(
+                *recorded == ip,
+                "{name}: rejoined at {ip}, peers hold {recorded}"
+            );
         }
-        let Some(peer_id) = peer_id else {
-            bail!("{name}: no peer id from {url}");
+        // After a rejoin the API answers before p2p info does.
+        let deadline = Instant::now() + READY_TIMEOUT;
+        let peer_id = loop {
+            if let Some(id) = crate::churn::peer_id(&self.http, &url).await {
+                break id;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "{name}: no peer id from {url} within {READY_TIMEOUT:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
         };
         let c = &mut self.containers[i];
         c.peer_addr = Some(format!("/ip4/{ip}/tcp/{P2P_PORT}/p2p/{peer_id}"));
@@ -371,6 +401,27 @@ impl DockerNodes {
         }
         self.last_dump[i] = now;
         Ok(())
+    }
+
+    /// Resident memory of every container from one `docker stats` call;
+    /// `None` where a container has no usable row.
+    async fn rss_all(&self) -> Vec<Option<u64>> {
+        let names: Vec<String> = (0..self.containers.len())
+            .map(|i| self.container_name(i))
+            .collect();
+        let mut args = vec![
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.Name}} {{.MemUsage}}",
+        ];
+        args.extend(names.iter().map(String::as_str));
+        let out = docker(&args).await.unwrap_or_default();
+        let by_name: HashMap<&str, &str> = out.lines().filter_map(|l| l.split_once(' ')).collect();
+        names
+            .iter()
+            .map(|n| by_name.get(n.as_str()).and_then(|s| parse_mem_usage(s)))
+            .collect()
     }
 }
 
@@ -436,21 +487,14 @@ impl Nodes {
         }
     }
 
-    /// Resident memory of the node: `ps` for a process, `docker stats` for
-    /// a container.
-    pub async fn rss_bytes(&self, i: usize) -> Option<u64> {
+    /// Resident memory per node: `ps` per process, one `docker stats` call
+    /// for all containers.
+    pub async fn rss_all(&self) -> Vec<Option<u64>> {
         match self {
-            Nodes::Process { .. } => self.pid(i).and_then(crate::meter::rss_bytes),
-            Nodes::Docker(d) => docker(&[
-                "stats",
-                "--no-stream",
-                "--format",
-                "{{.MemUsage}}",
-                &d.container_name(i),
-            ])
-            .await
-            .ok()
-            .and_then(|s| parse_mem_usage(&s)),
+            Nodes::Process { .. } => (0..self.len())
+                .map(|i| self.pid(i).and_then(crate::meter::rss_bytes))
+                .collect(),
+            Nodes::Docker(d) => d.rss_all().await,
         }
     }
 
@@ -602,7 +646,10 @@ impl Nodes {
             Nodes::Process { .. } => bail!("process backend cannot partition"),
             Nodes::Docker(d) => {
                 let name = d.container_name(i);
-                docker(&["network", "connect", &d.network, &name]).await?;
+                let Some(ip) = d.containers[i].ip.clone() else {
+                    bail!("{name}: no recorded address to rejoin at");
+                };
+                docker(&["network", "connect", "--ip", &ip, &d.network, &name]).await?;
                 d.record_addr(i).await
             }
         }
@@ -635,7 +682,7 @@ mod tests {
             ip: None,
             peer_addr: None,
         };
-        let v = docker_run_argv(&c, "soak-test", "s3cret");
+        let v = docker_run_argv(&c, "soak-test", "s3cret", None, &[]);
         let s = v.join(" ");
         assert!(s.starts_with("run -d --name soak-test-rust-0 --network soak-test -p 127.0.0.1:41181:9181 -v /tmp/r0:/data -e DEFRA_KEYRING_SECRET=s3cret soak-defra:8d8bb299f "));
         assert!(s.contains("--rootdir /data --url 0.0.0.0:9181 --no-log-color --keyring-backend file --keyring-path /data/keys start --store regolith --no-telemetry --no-encryption --no-searchable-encryption --no-signing --p2paddr /ip4/0.0.0.0/tcp/9171"));
@@ -649,7 +696,106 @@ mod tests {
             image: "soak-defradb:53f0e76a3".into(),
             ..c
         };
-        assert!(docker_run_argv(&g, "soak-test", "s").join(" ").contains("soak-defradb:53f0e76a3 --rootdir /data --no-log-color --keyring-backend file --keyring-path /data/keys start --url 0.0.0.0:9181 --store badger --no-telemetry --no-encryption --no-searchable-encryption --no-signing --p2paddr /ip4/0.0.0.0/tcp/9171"));
+        assert!(docker_run_argv(&g, "soak-test", "s", None, &[]).join(" ").contains("soak-defradb:53f0e76a3 --rootdir /data --no-log-color --keyring-backend file --keyring-path /data/keys start --url 0.0.0.0:9181 --store badger --no-telemetry --no-encryption --no-searchable-encryption --no-signing --p2paddr /ip4/0.0.0.0/tcp/9171"));
+    }
+
+    /// Both runtimes take `--replicator-retry-intervals` on `start`
+    /// (Rust `crates/cli/src/commands/start/mod.rs`, Go `cli/start.go`), so
+    /// the container churn can be measured off the default ladder.
+    #[test]
+    fn docker_run_argv_carries_the_retry_ladder_for_both_runtimes() {
+        let rust = Container {
+            spec: NodeSpec {
+                name: "rust-0".into(),
+                kind: NodeKind::Rust,
+                store: "regolith".into(),
+                host: "A",
+            },
+            image: "soak-defra:8d8bb299f".into(),
+            api_port: 41181,
+            rootdir: "/tmp/r0".into(),
+            ip: None,
+            peer_addr: None,
+        };
+        let go = Container {
+            spec: NodeSpec {
+                name: "go-0".into(),
+                kind: NodeKind::Go,
+                store: "badger".into(),
+                host: "A",
+            },
+            image: "soak-defradb:53f0e76a3".into(),
+            ..rust.clone()
+        };
+        for c in [&rust, &go] {
+            let v = docker_run_argv(c, "soak-test", "s", Some("5,10,20,40"), &[]);
+            let start = v.iter().position(|a| a == "start").expect("start verb");
+            let flag = v
+                .iter()
+                .position(|a| a == "--replicator-retry-intervals")
+                .expect("retry ladder flag");
+            // Both runtimes take it on the `start` subcommand, not before it.
+            assert!(flag > start);
+            assert_eq!(v[flag + 1], "5,10,20,40");
+            // Nothing else moved.
+            assert!(v.join(" ").contains("--p2paddr /ip4/0.0.0.0/tcp/9171"));
+        }
+        // Absent by default, so an unflagged run is byte-identical to before.
+        assert!(!docker_run_argv(&rust, "soak-test", "s", None, &[])
+            .contains(&"--replicator-retry-intervals".to_string()));
+    }
+
+    /// `--node-env` reaches every container, both runtimes, as `-e KEY=VALUE`
+    /// before the image, and nothing is added when it is empty.
+    #[test]
+    fn docker_run_argv_carries_node_env_for_both_runtimes() {
+        let rust = Container {
+            spec: NodeSpec {
+                name: "rust-0".into(),
+                kind: NodeKind::Rust,
+                store: "regolith".into(),
+                host: "A",
+            },
+            image: "soak-defra:8d8bb299f".into(),
+            api_port: 41181,
+            rootdir: "/tmp/r0".into(),
+            ip: None,
+            peer_addr: None,
+        };
+        let go = Container {
+            spec: NodeSpec {
+                name: "go-0".into(),
+                kind: NodeKind::Go,
+                store: "badger".into(),
+                host: "A",
+            },
+            image: "soak-defradb:53f0e76a3".into(),
+            ..rust.clone()
+        };
+        let env = [
+            "RUST_LOG=debug".to_string(),
+            "GOLOG_LEVEL=debug".to_string(),
+        ];
+        for c in [&rust, &go] {
+            let v = docker_run_argv(c, "soak-test", "s", None, &env);
+            let image = v.iter().position(|a| *a == c.image).expect("image");
+            for kv in &env {
+                let at = v.iter().position(|a| a == kv).expect("node env value");
+                assert_eq!(v[at - 1], "-e");
+                // Docker only reads `-e` before the image name.
+                assert!(at < image);
+            }
+            // The keyring secret is still there, and the command still starts.
+            assert!(v.contains(&format!("DEFRA_KEYRING_SECRET={}", "s")));
+            assert!(v.contains(&"start".to_string()));
+        }
+        // Empty list: byte-identical to a run without the flag.
+        assert_eq!(
+            docker_run_argv(&rust, "soak-test", "s", None, &[]),
+            docker_run_argv(&rust, "soak-test", "s", None, &Vec::new())
+        );
+        assert!(!docker_run_argv(&rust, "soak-test", "s", None, &[])
+            .contains(&"RUST_LOG=debug".to_string()));
     }
 
     #[test]

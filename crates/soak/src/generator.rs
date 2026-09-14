@@ -38,6 +38,10 @@ pub struct Profile {
     /// Field with a searchable-encryption index; the query op becomes an SE query.
     #[serde(default)]
     pub se_field: Option<String>,
+    /// Give every document its own `name` instead of drawing one of
+    /// `NAME_POOL`, so an SE query matches exactly one document.
+    #[serde(default)]
+    pub unique_names: bool,
     /// Node indices that receive create ops; `None` = any node. Other ops are unaffected.
     #[serde(default)]
     pub create_nodes: Option<Vec<usize>>,
@@ -59,6 +63,7 @@ impl Profile {
             collection: "Users".into(),
             encrypt_fields: Vec::new(),
             se_field: None,
+            unique_names: false,
             create_nodes: None,
             acp: None,
         }
@@ -72,6 +77,18 @@ impl Profile {
             encrypt_fields: vec!["secret".into(), "pin".into()],
             se_field: Some("name".into()),
             ..Self::p0_crud()
+        }
+    }
+
+    /// p1 with one document per name: same weights, fields and sizes, but the
+    /// SE query returns a single document, so a miss is the first-responder
+    /// defect and not the many-documents-per-name query shape (133 part 4,
+    /// rank 3). 307 remains the colliding-name result.
+    pub fn p1_unique() -> Self {
+        Self {
+            name: "p1-unique".into(),
+            unique_names: true,
+            ..Self::p1_encrypted()
         }
     }
 
@@ -92,6 +109,7 @@ impl Profile {
         match name {
             "p0-crud" => Some(Self::p0_crud()),
             "p1-encrypted" => Some(Self::p1_encrypted()),
+            "p1-unique" => Some(Self::p1_unique()),
             "p2-acp" => Some(Self::p2_acp()),
             _ => None,
         }
@@ -242,7 +260,13 @@ impl Generator {
                 self.created += 1;
                 self.live.push(slot);
                 let payload = if self.profile.is_encrypted() {
-                    let name = format!("name-{:02}", self.rng.gen_range(0..NAME_POOL));
+                    let mut name = format!("name-{:02}", self.rng.gen_range(0..NAME_POOL));
+                    // p1-unique draws the same pool value, so both profiles
+                    // plan the same ops from a seed; the slot suffix is what
+                    // makes the name unique per document.
+                    if self.profile.unique_names {
+                        name = format!("{name}-{slot:06}");
+                    }
                     self.names.push(name.clone());
                     self.create_input_vault(&name)
                 } else {
@@ -608,6 +632,88 @@ mod tests {
                 .hash(&mut h);
         }
         assert_eq!(h.finish(), 133609464861947189);
+    }
+
+    fn plan_p1_unique(seed: u64, n: usize) -> Vec<PlannedOp> {
+        Generator::new(seed, Profile::p1_unique(), 4)
+            .take(n)
+            .collect()
+    }
+
+    /// p1-unique must not move either: hash of the first 500 ops for seed 42,
+    /// 4 nodes, same shape as the p0 and p1 locks.
+    #[test]
+    fn p1_unique_plan_is_frozen() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for op in plan_p1_unique(42, 500) {
+            (
+                op.index,
+                op.virtual_ts_ms,
+                op.node,
+                op.kind as u8,
+                op.slot,
+                op.payload,
+                op.expect_slots,
+            )
+                .hash(&mut h);
+        }
+        assert_eq!(h.finish(), 18060237726193507568);
+    }
+
+    /// The point of the profile: over a plan the size of run 307 (seed 307,
+    /// 4 nodes, 5401 ops executed) no two documents share a name, so an SE
+    /// query has exactly one right answer.
+    #[test]
+    fn p1_unique_never_repeats_a_name() {
+        let names: Vec<String> = plan_p1_unique(307, 5401)
+            .into_iter()
+            .filter(|o| o.kind == OpKind::Create)
+            .map(|o| {
+                o.payload.unwrap()["{name: \"".len()..]
+                    .split('"')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            names.len() > 1000,
+            "expected 307-sized creates, got {}",
+            names.len()
+        );
+        let unique: std::collections::HashSet<&String> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "p1-unique repeated a name");
+        // Every SE query therefore expects exactly one slot.
+        assert!(plan_p1_unique(307, 5401)
+            .iter()
+            .filter(|o| o.kind == OpKind::Query)
+            .all(|o| o.expect_slots.len() == 1));
+    }
+
+    /// Identical to p1 apart from the names, and it is still an SE profile.
+    #[test]
+    fn p1_unique_matches_p1_except_names() {
+        let (u, p1) = (Profile::p1_unique(), Profile::p1_encrypted());
+        assert_eq!(
+            (u.create, u.update, u.delete, u.query, u.doc_bytes, u.rate),
+            (
+                p1.create,
+                p1.update,
+                p1.delete,
+                p1.query,
+                p1.doc_bytes,
+                p1.rate
+            )
+        );
+        assert_eq!(u.collection, p1.collection);
+        assert_eq!(u.encrypt_fields, p1.encrypt_fields);
+        assert_eq!(u.se_field, p1.se_field);
+        assert!(u.unique_names && !p1.unique_names);
+        assert!(u.is_encrypted() && !u.is_acp());
+        assert_eq!(Profile::by_name("p1-unique"), Some(u.clone()));
+        let back: Profile = serde_json::from_value(serde_json::to_value(&u).unwrap()).unwrap();
+        assert_eq!(back, u);
     }
 
     #[test]

@@ -124,7 +124,7 @@ impl Meter {
         let wall = now_ms();
         let op_index = self.op_index.load(Ordering::Relaxed);
         let mut total = 0u64;
-        for i in 0..nodes.len() {
+        for (i, rss) in nodes.rss_all().await.into_iter().enumerate() {
             let name = nodes.name(i);
             let bytes = du_bytes(&nodes.rootdir(i))?;
             total += bytes;
@@ -133,7 +133,6 @@ impl Meter {
             serde_json::to_writer(&mut self.du, &line)?;
             self.du.write_all(b"\n")?;
             let pid = nodes.pid(i);
-            let rss = nodes.rss_bytes(i).await;
             if pid.is_some() || rss.is_some() {
                 let line = json!({
                     "wall_ts_ms": wall, "op_index": op_index, "node": name, "pid": pid,

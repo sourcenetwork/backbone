@@ -22,7 +22,7 @@ roadmap live in the agent-ops vault under `Worklogs/cross-defra/soak-harness/`.
 
 ```sh
 export DEFRA_RUST_BINARY=~/Repos/Source/defradb.rs/target/release/defra
-export PATH=~/.cache/defra-harness/53f0e76a3:$PATH DEFRA_GO_COMPAT_COMMIT=53f0e76a3
+export PATH=~/.cache/defra-harness/v1.1.0:$PATH DEFRA_GO_COMPAT_COMMIT=v1.1.0
 cargo run -p soak -- run --seed 42 --ops 1800 --rate 3 --churn
 ```
 
@@ -64,7 +64,7 @@ The nodes' data and logs are kept under the run directory (the driver points
 | Flag | Default | Meaning |
 |---|---|---|
 | `--seed N` | unix time | Master seed; both axes derive from it. |
-| `--profile NAME` | p0-crud | Workload profile: `p0-crud` (plaintext Users), `p1-encrypted` (Vault with encrypted secret/pin and an SE index on name; builds the cluster with encryption, dev mode, per-node identities and a shared SE key) or `p2-acp` (User under a local ACP policy with owner/reader identities, see "ACP profile"). |
+| `--profile NAME` | p0-crud | Workload profile: `p0-crud` (plaintext Users), `p1-encrypted` (Vault with encrypted secret/pin and an SE index on name; builds the cluster with encryption, dev mode, per-node identities and a shared SE key), `p1-unique` (p1 with a unique name per document instead of the 40-name pool, so an SE query matches exactly one document: it separates the searchable-encryption first-responder misses from the "many documents per name" query shape; run 307 remains the colliding-name result) or `p2-acp` (User under a local ACP policy with owner/reader identities, see "ACP profile"). |
 | `--create-nodes 0,1` | all nodes | Node indices that receive create ops (0,1 Rust; 2,3 Go); other ops still go to any node. Recorded in the manifest. |
 | `--ops N` | 200 | Ops to plan and execute. |
 | `--secs S` | none | Wall deadline; stops the workload first if hit. |
@@ -73,11 +73,14 @@ The nodes' data and logs are kept under the run directory (the driver points
 | `--churn-spacing S` | 120 | Mean seconds between events and per-node cooldown. |
 | `--grace S` | 120 | Mismatches younger than this, or within this long after a node came back, are in-flight sync, not divergence. Covers two failed pushes on the runtimes' 30/60/120s retry ladder. |
 | `--settle S` | 120 | After the workload, keep checking this long for an eligible clear check before the final sweep. |
+| `--min-settle S` | 0 | Settle at least this long even once the mesh is clear. The default ends the settle on the first clear check, often seconds after the last op, so a run has no sample of an idle mesh: `du` and RSS stop at the load. Set it to get an idle tail; the meter samples throughout. |
 | `--ceiling-mb MB` | 122880 | Disk ceiling over all node data dirs; hard stop at 95%. |
 | `--floor-rate R` | 0.5 | The governor never throttles below this. |
 | `--meter-secs S` | 60 | du / RSS sampling and governor interval. |
 | `--control` | off | Positive control: a `Control` collection replicated rust-0 -> go-0 only, written on go-0, must produce divergences on the pairs that predicts and nothing on `Users`. |
-| `--retry-intervals 5,10,20,40` | runtime default | Both runtimes' `--replicator-retry-intervals`; recorded in the manifest since it changes the system under test. |
+| `--retry-intervals 5,10,20,40` | runtime default | Both runtimes' `--replicator-retry-intervals`, on both backends; recorded in the manifest since it changes the system under test. Without it an outage longer than the first 30 s rung is timed by the sender's next dial, not by replication, so recovery numbers are ladder-confounded and the two runtimes are not comparable across that gap. |
+| `--node-env KEY=VALUE` | none | Repeatable. Set on every node, both backends (docker `-e`, process inherited from the driver) and both runtimes, and recorded in `manifest.caps.node_env` so a run's log level is auditable. Only validation is the `=`. The Rust partition-tail lines (`dag_fetcher.rs` "Attempt stall budget exhausted", `swarm.rs` "Closing redundant connection", `retry.rs` "Activated durable push markers") are DEBUG, so no existing run contains them: `--node-env RUST_LOG=debug`. |
+| `--no-subscribe` | off | Skip the collection subscribe (`p2p_collection_add`), leaving the replicators as the only delivery path. By default every node both subscribes to the collection topic and has a replicator to every other node, so gossip delivers whatever a replicator push loses and a broken push is invisible. Use it to measure the replicator alone. |
 | `--sse-go` | off | Open subscriptions on Go nodes too (reproduces the Go memory growth). |
 | `--nodes process\|docker` | process | `docker` runs the M2 six-node topology (rust-0, rust-1, go-0 on host A; rust-2, go-1, go-2 on host B) as containers on a `soak-<run_id>` network, see "Docker backend". Recorded per node in the manifest (`backend`) and honoured by `replay`. |
 | `--reuse-network` | off | Start even though a `soak-*` network is left over from an earlier run. |
@@ -85,10 +88,15 @@ The nodes' data and logs are kept under the run directory (the driver points
 ### Docker backend
 
 `--nodes docker` needs the images `soak-defra:8d8bb299f` (Rust) and
-`soak-defradb:53f0e76a3` (Go) on the docker host, `DEFRA_RUST_BINARY` and
-the Go `defradb` on `PATH` as before (the driver's CLI calls run on the
-host against each container's published API port), and the docker CLI
-pointed at the host, e.g. `DOCKER_CONTEXT=orbstack`. Only `p0-crud` runs in
+`soak-defradb:$DEFRA_GO_COMPAT_COMMIT` (Go) on the docker host, so the Go
+image and the host `defradb` always name the same version; build the Go
+image locally for that version, e.g. for v1.1.0, from a defradb clone at
+the tag: `docker build --platform linux/arm64 -f tools/defradb.containerfile
+--build-arg VERSION=v1.1.0 -t soak-defradb:v1.1.0 <clone at the tag>`. It
+also needs `DEFRA_RUST_BINARY` and the Go `defradb` on `PATH` as before
+(the driver's CLI calls run on the host against each container's published
+API port), and the docker CLI pointed at the host, e.g.
+`DOCKER_CONTEXT=orbstack`. Only `p0-crud` runs in
 containers for now; the encrypted and ACP profiles refuse the backend.
 
 ```sh
@@ -98,8 +106,9 @@ cargo run -p soak -- run --nodes docker --seed 611 --ops 300 --rate 3
 
 Each container mounts `<run dir>/target/docker/<name>` at `/data`, so the
 node data stay in the artifact and `docker logs` are flushed to
-`<name>/logs/{stdout,stderr}.log` before every log rotation. The run
-removes its containers and network at the end, on error too. A run that
+`<name>/logs/{stdout,stderr}.log` before every log rotation and before
+teardown. The run removes its containers and network at the end, on error
+too. A run that
 was killed leaves them behind, and the next `soak run` refuses to start
 while any `soak-*` network exists: remove them (`docker rm -f $(docker ps
 -aq --filter name=soak-)`, then `docker network rm soak-<run_id>`) or pass
@@ -222,6 +231,25 @@ succeed in the other.
   the last write versus the outage windows.
 - `divergent docs: N tagged, M UNTAGGED` is the alarm line: tagged docs are
   the known write-during-outage loss; untagged ones need a look.
+- Counts are record-doc slots unless the line says `unique`: a doc missing on
+  one node is one row per pair that node belongs to, so `1277 record-doc
+  slots` can be `259 unique docs`. The `final sweep:` line and the `loss`
+  tables are unique documents.
+- `sampled_pending` is what that pass happened to look at (recent docs plus a
+  cold sample of 50), not the size of the backlog.
+- Convergence lag is in ms and split by `source`: `poll` is bounded below by
+  the 10 s checker interval, `sse` is event time. The `*->rust` / `*->go`
+  rows are by receiving runtime. Creates that never arrived have no sample at
+  all and are listed as unseen under the table, not as a fast percentile.
+- `bytes_grown_per_mesh_write` divides one node's growth by the whole mesh's
+  successful writes: it is replication amplification, not that node's writes.
+- On the docker backend the memory heading says `docker stats MemUsage`; the
+  values are whatever `docker stats` printed for the container, not `ps` RSS
+  of one process.
+- The `loss` tables count creates made by some other node while a node was
+  down and still missing on it at the final sweep. `[down,up]` is the strict
+  window; `[down,up+30s]` adds the recovery window, since a node answers
+  GraphQL before its replicator link is back.
 - `NOT eligible` on the final sweep means a node was down or in grace at the
   end; lengthen `--settle`.
 
@@ -251,7 +279,7 @@ Known runtime behaviours met while building M0 (Rust `ba6dac661`, Go
 
 ## Not yet
 
-A second machine, network partitions, relations /
-secondary indexes / lens, node-internal telemetry (otel), a
+A second machine, per-pair partitions, link degradation (tc/netem),
+relations / secondary indexes / lens, node-internal telemetry (otel), a
 concurrent executor, M1 sweep scoping, tag rules for anything but the
 outage loss.

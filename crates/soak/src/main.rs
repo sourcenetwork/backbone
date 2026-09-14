@@ -8,6 +8,7 @@
 //! soak run [--seed N] [--ops N] [--secs S] [--rate OPS_PER_SEC] [--control]
 //!          [--churn [--churn-spacing SECS]] [--grace SECS] [--settle SECS]
 //!          [--ceiling-mb MB] [--floor-rate R] [--meter-secs S]
+//!          [--min-settle SECS] [--no-subscribe] [--node-env KEY=VALUE]...
 //!          [--retry-intervals 5,10,20,40] [--sse-go] [--until-op N] [--hold]
 //!          [--nodes process|docker] [--reuse-network]
 //! soak replay --manifest <run>/manifest.json [--until-op N] [--hold]
@@ -27,7 +28,14 @@
 //! inspection until Enter. `--retry-intervals` sets both runtimes'
 //! `--replicator-retry-intervals` (default ladder 30,60,120,240,480,960,1920
 //! s) and is recorded in the manifest, since it changes the system under
-//! test. `compare` checks two runs against the replay
+//! test; both backends take it. `--min-settle SECS` keeps the settle (and
+//! the meter) running that long after the workload stops even if the mesh is
+//! already clear, which is the only way a run gets an idle sample.
+//! `--no-subscribe` skips the collection subscribe, leaving the replicator as
+//! the only delivery path, so a push failure is visible instead of masked by
+//! gossip. `--node-env KEY=VALUE`, repeatable, reaches every node on both
+//! backends and both runtimes, and is recorded in the manifest; it is how a
+//! run raises its log level (`--node-env RUST_LOG=debug`). `compare` checks two runs against the replay
 //! contract: planned op fields and the churn schedule, plus docIDs where
 //! both runs have one; outcomes and timing are not part of it.
 //!
@@ -117,7 +125,6 @@ const GO0: usize = 2;
 const STORES: [&str; 4] = ["regolith", "regolith", "badger", "badger"];
 /// Container images for `--nodes docker`, tagged by the commit they hold.
 const RUST_IMAGE: &str = "soak-defra:8d8bb299f";
-const GO_IMAGE: &str = "soak-defradb:53f0e76a3";
 
 /// Everything a run needs; `replay` rebuilds it from a manifest.
 struct RunArgs {
@@ -131,6 +138,8 @@ struct RunArgs {
     churn_schedule: Option<Vec<ChurnEvent>>,
     grace: Duration,
     settle: Duration,
+    /// Settle at least this long after the workload stops, clear or not.
+    min_settle: Duration,
     ceiling_bytes: u64,
     floor_rate: f64,
     meter_interval: Duration,
@@ -141,6 +150,10 @@ struct RunArgs {
     retry_intervals: Option<String>,
     /// Also subscribe on Go nodes (reproduces the memory growth).
     sse_go: bool,
+    /// Skip the collection subscribe: replicators are the only delivery path.
+    no_subscribe: bool,
+    /// `KEY=VALUE` pairs set on every node, both backends and both runtimes.
+    node_env: Vec<String>,
     /// Containers on a `soak-<run_id>` network instead of harness processes.
     docker: bool,
     /// Start even if a `soak-*` network is left over from an earlier run.
@@ -151,7 +164,9 @@ impl RunArgs {
     fn from_flags() -> Result<Self> {
         let profile_name = flag("profile").unwrap_or_else(|| "p0-crud".to_string());
         let mut profile = Profile::by_name(&profile_name).ok_or_else(|| {
-            eyre!("unknown --profile {profile_name}; use p0-crud, p1-encrypted or p2-acp")
+            eyre!(
+                "unknown --profile {profile_name}; use p0-crud, p1-encrypted, p1-unique or p2-acp"
+            )
         })?;
         if let Some(rate) = flag("rate") {
             profile.rate = rate.parse().wrap_err("--rate must be a number")?;
@@ -204,6 +219,10 @@ impl RunArgs {
             churn_schedule: None,
             grace: Duration::from_secs(parse_flag("grace", checker.grace.as_secs())?),
             settle: Duration::from_secs(parse_flag("settle", checker.settle.as_secs())?),
+            min_settle: Duration::from_secs(parse_flag(
+                "min-settle",
+                checker.min_settle.as_secs(),
+            )?),
             ceiling_bytes: (parse_flag::<f64>("ceiling-mb", 120.0 * 1024.0)? * 1_048_576.0) as u64,
             floor_rate: parse_flag("floor-rate", 0.5)?,
             meter_interval: Duration::from_secs(parse_flag("meter-secs", 60)?),
@@ -212,6 +231,14 @@ impl RunArgs {
             replay_of: None,
             retry_intervals: flag("retry-intervals"),
             sse_go: has_flag("sse-go"),
+            no_subscribe: has_flag("no-subscribe"),
+            node_env: {
+                let items = flags("node-env");
+                for kv in &items {
+                    split_node_env(kv)?;
+                }
+                items
+            },
             docker,
             reuse_network: has_flag("reuse-network"),
         })
@@ -255,6 +282,10 @@ impl RunArgs {
                 "settle",
                 caps["settle_secs"].as_u64().unwrap_or(120),
             )?),
+            min_settle: Duration::from_secs(parse_flag(
+                "min-settle",
+                caps["min_settle_secs"].as_u64().unwrap_or(0),
+            )?),
             ceiling_bytes: u64::MAX / 2,
             floor_rate: caps["floor_rate"].as_f64().unwrap_or(0.5),
             meter_interval: Duration::from_secs(caps["meter_secs"].as_u64().unwrap_or(60)),
@@ -263,6 +294,17 @@ impl RunArgs {
             replay_of: m["run_id"].as_str().map(String::from),
             retry_intervals: caps["retry_intervals"].as_str().map(String::from),
             sse_go: has_flag("sse-go") || caps["sse_go"].as_bool().unwrap_or(false),
+            no_subscribe: has_flag("no-subscribe")
+                || caps["no_subscribe"].as_bool().unwrap_or(false),
+            node_env: match flags("node-env") {
+                items if !items.is_empty() => items,
+                _ => caps["node_env"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+            },
             docker: m["nodes"][0]["backend"] == json!("docker"),
             reuse_network: has_flag("reuse-network"),
         })
@@ -353,10 +395,6 @@ async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
             !a.profile.is_encrypted() && !a.profile.is_acp(),
             "docker backend supports p0-crud only in M2 stage one"
         );
-        eyre::ensure!(
-            a.retry_intervals.is_none(),
-            "--retry-intervals is not supported by the docker backend"
-        );
         // The host CLIs must resolve before any container exists: a panic
         // in `client()` would skip the teardown.
         binaries()?;
@@ -370,13 +408,36 @@ async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let images = (RUST_IMAGE, GO_IMAGE);
-        let docker = DockerNodes::start(&run_id, run_dir, nodes::m2_specs(), images)
-            .await
-            .wrap_err("starting the docker cluster")?;
-        println!("docker backend: {RUST_IMAGE} + {GO_IMAGE} on soak-{run_id}");
+        // The Go image tag is the compat commit, so image and host binary
+        // always name the same version.
+        let commit = std::env::var("DEFRA_GO_COMPAT_COMMIT")
+            .wrap_err("DEFRA_GO_COMPAT_COMMIT must be set for the docker backend")?;
+        eyre::ensure!(
+            !commit.is_empty(),
+            "DEFRA_GO_COMPAT_COMMIT must be set for the docker backend"
+        );
+        let go_image = format!("soak-defradb:{commit}");
+        let images = (RUST_IMAGE, go_image.as_str());
+        if let Some(intervals) = &a.retry_intervals {
+            println!("replicator retry intervals in every container: {intervals}s");
+        }
+        let docker = DockerNodes::start(
+            &run_id,
+            run_dir,
+            nodes::m2_specs(),
+            images,
+            a.retry_intervals.as_deref(),
+            &a.node_env,
+        )
+        .await
+        .wrap_err("starting the docker cluster")?;
+        println!("docker backend: {RUST_IMAGE} + {go_image} on soak-{run_id}");
         return Ok(Nodes::Docker(docker));
     }
+    // The harness spawns nodes as children of this process and does not clear
+    // their environment, so setting it here reaches every node of either
+    // runtime, including the ones a churn event respawns.
+    apply_node_env(&a.node_env)?;
     let mut builder = TestCluster::builder()
         .rust_nodes(2)
         .go_nodes(2)
@@ -446,7 +507,7 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
     } else {
         None
     };
-    wire_full_mesh(nodes, &a.profile, identities.as_ref())?;
+    wire_full_mesh(nodes, &a.profile, identities.as_ref(), a.no_subscribe)?;
     preflight(nodes, &a.profile.collection).await?;
     if let Some(ids) = &identities {
         token_probe(nodes, &a.profile.collection, &ids.owner).await?;
@@ -528,8 +589,10 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
         "caps": {
             "ceiling_bytes": a.ceiling_bytes, "floor_rate": a.floor_rate,
             "meter_secs": a.meter_interval.as_secs(), "grace_secs": a.grace.as_secs(),
-            "settle_secs": a.settle.as_secs(), "until_op": a.until_op,
+            "settle_secs": a.settle.as_secs(), "min_settle_secs": a.min_settle.as_secs(),
+            "until_op": a.until_op,
             "retry_intervals": a.retry_intervals, "sse_go": a.sse_go,
+            "no_subscribe": a.no_subscribe, "node_env": a.node_env,
         },
         "started_wall_ts_ms": now_ms(),
     });
@@ -539,6 +602,7 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
     let rate_milli = Arc::new(AtomicU64::new((a.profile.rate * 1000.0) as u64));
     let stop_flag = Arc::new(AtomicBool::new(false));
     let churn_failed = Arc::new(AtomicBool::new(false));
+    let workload_done = Arc::new(AtomicBool::new(false));
     let (touched_tx, touched_rx) = mpsc::unbounded_channel();
     let (transitions_tx, transitions_rx) = mpsc::unbounded_channel();
     let (arrivals_tx, arrivals_rx) = mpsc::unbounded_channel();
@@ -565,6 +629,7 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
         CheckerConfig {
             grace: a.grace,
             settle: a.settle,
+            min_settle: a.min_settle,
             encrypted_fields: a.profile.encrypt_fields.clone(),
             acp: identities.clone(),
             ..CheckerConfig::default()
@@ -599,75 +664,83 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
         &run_dir.join("ops.jsonl"),
     )?;
     let workload = async {
-        let mut current_rate = a.profile.rate;
-        let mut tick = tokio::time::interval(Duration::from_secs_f64(1.0 / current_rate));
-        let deadline = a.secs.map(|s| Instant::now() + Duration::from_secs(s));
-        let (mut ok, mut failed, mut skipped, mut executed) = (0u64, 0u64, 0u64, 0u64);
-        let mut stopped_by = "ops";
-        let started = Instant::now();
-        for op in generator.by_ref().take(a.ops) {
-            if a.until_op.is_some_and(|n| op.index >= n) {
-                stopped_by = "until_op";
-                break;
-            }
-            if deadline.is_some_and(|d| Instant::now() >= d) {
-                stopped_by = "secs";
-                break;
-            }
-            if stop_flag.load(Ordering::Relaxed) {
-                stopped_by = if churn_failed.load(Ordering::Relaxed) {
-                    "churn_error"
-                } else {
-                    "budget"
-                };
-                break;
-            }
-            let rate = rate_milli.load(Ordering::Relaxed) as f64 / 1000.0;
-            if rate > 0.0 && (rate - current_rate).abs() > 1e-9 {
-                current_rate = rate;
-                tick = tokio::time::interval(Duration::from_secs_f64(1.0 / rate));
-                tick.tick().await;
-            }
-            tick.tick().await;
-            let record = executor.execute(&op).await?;
-            op_index.store(op.index + 1, Ordering::Relaxed);
-            executed = op.index + 1;
-            if record.ok {
-                ok += 1;
-                // Grants change relationships, not documents; nothing replicates.
-                if let Some(id) = record.doc_id.as_ref().filter(|_| op.kind != OpKind::Grant) {
-                    let _ = touched_tx.send(Touch {
-                        doc_id: id.clone(),
-                        node: record.node.clone(),
-                        wall_ts_ms: record.wall_ts_ms,
-                        create: op.kind == OpKind::Create,
-                        protected: match (op.kind, op.actor) {
-                            (OpKind::Create, Some(Actor::Owner)) => Some(true),
-                            (OpKind::Create, Some(Actor::Anon)) => Some(false),
-                            _ => None,
-                        },
-                    });
+        let result = async {
+            let mut current_rate = a.profile.rate;
+            let mut tick = tokio::time::interval(Duration::from_secs_f64(1.0 / current_rate));
+            let deadline = a.secs.map(|s| Instant::now() + Duration::from_secs(s));
+            let (mut ok, mut failed, mut skipped, mut executed) = (0u64, 0u64, 0u64, 0u64);
+            let mut stopped_by = "ops";
+            let started = Instant::now();
+            for op in generator.by_ref().take(a.ops) {
+                if a.until_op.is_some_and(|n| op.index >= n) {
+                    stopped_by = "until_op";
+                    break;
                 }
-            } else if record.skipped {
-                skipped += 1;
-            } else {
-                failed += 1;
-                println!(
-                    "op {} {:?} on {} failed: {}",
-                    op.index,
-                    op.kind,
-                    record.node,
-                    record.error.unwrap_or_default()
-                );
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    stopped_by = "secs";
+                    break;
+                }
+                if stop_flag.load(Ordering::Relaxed) {
+                    stopped_by = if churn_failed.load(Ordering::Relaxed) {
+                        "churn_error"
+                    } else {
+                        "budget"
+                    };
+                    break;
+                }
+                let rate = rate_milli.load(Ordering::Relaxed) as f64 / 1000.0;
+                if rate > 0.0 && (rate - current_rate).abs() > 1e-9 {
+                    current_rate = rate;
+                    tick = tokio::time::interval(Duration::from_secs_f64(1.0 / rate));
+                    tick.tick().await;
+                }
+                tick.tick().await;
+                let record = executor.execute(&op).await?;
+                op_index.store(op.index + 1, Ordering::Relaxed);
+                executed = op.index + 1;
+                if record.ok {
+                    ok += 1;
+                    // Grants change relationships, not documents; nothing replicates.
+                    if let Some(id) = record.doc_id.as_ref().filter(|_| op.kind != OpKind::Grant) {
+                        let _ = touched_tx.send(Touch {
+                            doc_id: id.clone(),
+                            node: record.node.clone(),
+                            wall_ts_ms: record.wall_ts_ms,
+                            create: op.kind == OpKind::Create,
+                            protected: match (op.kind, op.actor) {
+                                (OpKind::Create, Some(Actor::Owner)) => Some(true),
+                                (OpKind::Create, Some(Actor::Anon)) => Some(false),
+                                _ => None,
+                            },
+                        });
+                    }
+                } else if record.skipped {
+                    skipped += 1;
+                } else {
+                    failed += 1;
+                    println!(
+                        "op {} {:?} on {} failed: {}",
+                        op.index,
+                        op.kind,
+                        record.node,
+                        record.error.unwrap_or_default()
+                    );
+                }
             }
+            println!(
+                "done: {executed} ops ({ok} ok, {failed} failed, {skipped} skipped orphans), {:.2} ops/s over {:.1}s, stopped by {stopped_by}",
+                executed as f64 / started.elapsed().as_secs_f64(),
+                started.elapsed().as_secs_f64()
+            );
+            Ok::<_, eyre::Report>((executed, stopped_by))
         }
-        println!(
-            "done: {executed} ops ({ok} ok, {failed} failed, {skipped} skipped orphans), {:.2} ops/s over {:.1}s, stopped by {stopped_by}",
-            executed as f64 / started.elapsed().as_secs_f64(),
-            started.elapsed().as_secs_f64()
-        );
-        let _ = churn_stop_tx.send(());
-        Ok::<_, eyre::Report>((executed, stopped_by))
+        .await;
+        // The settle starts here, while the churner (and its meter) keep
+        // running; an error path must signal it too or the checker never
+        // returns and the churner is never released.
+        workload_done.store(true, Ordering::Relaxed);
+        let _ = stop_tx.send(());
+        result
     };
     // The churner borrows the nodes from here and shares this task with the
     // workload: the harness restart future is not Send, so it cannot be
@@ -682,6 +755,7 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
         transitions_tx,
         run_dir.join("topology.jsonl"),
         meter,
+        Arc::clone(&workload_done),
         churn_stop_rx,
     );
     // After a churner failure the mesh is not what the run planned; stop the
@@ -694,11 +768,19 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
         }
         result
     };
-    let (workload_result, churner_result) = tokio::join!(workload, churner);
+    // The churner holds the nodes, so it is the only thing that can meter:
+    // release it once the checker's settle and final sweep are done, not when
+    // the workload stops, or a `--min-settle` run has no idle sample.
+    let settle_meter = async {
+        let summary = checker_task.await;
+        let _ = churn_stop_tx.send(());
+        summary
+    };
+    let (workload_result, churner_result, checker_result) =
+        tokio::join!(workload, churner, settle_meter);
     churner_result.wrap_err("churner")?;
     let (executed, stopped_by) = workload_result?;
-    let _ = stop_tx.send(());
-    let summary = checker_task.await?.wrap_err("checker")?;
+    let summary = checker_result?.wrap_err("checker")?;
     for task in &subscriptions {
         task.abort();
     }
@@ -762,7 +844,22 @@ async fn drive(run_dir: &Path, a: &RunArgs, nodes: &mut Nodes) -> Result<()> {
 /// pair. Same call order as defradb.rs `p2p_interop_bench`, which is
 /// proven on mixed clusters. On ACP the owner adds the policy on every
 /// node (ids must agree, the schema references one) and adds the schema.
-fn wire_full_mesh(nodes: &Nodes, profile: &Profile, identities: Option<&Identities>) -> Result<()> {
+/// The topics each node subscribes to: none under `--no-subscribe`, which
+/// leaves the replicators as the only delivery path.
+fn subscribe_topics(collection: &str, no_subscribe: bool) -> Vec<&str> {
+    if no_subscribe {
+        Vec::new()
+    } else {
+        vec![collection]
+    }
+}
+
+fn wire_full_mesh(
+    nodes: &Nodes,
+    profile: &Profile,
+    identities: Option<&Identities>,
+    no_subscribe: bool,
+) -> Result<()> {
     let collection = profile.collection.as_str();
     let n = nodes.len();
     let addrs: Vec<String> = (0..n).map(|i| nodes.p2p_addr(i)).collect();
@@ -803,8 +900,13 @@ fn wire_full_mesh(nodes: &Nodes, profile: &Profile, identities: Option<&Identiti
             .collect();
         nodes.client(i).p2p_connect(&others)?;
     }
-    for i in 0..n {
-        nodes.client(i).p2p_collection_add(&[collection])?;
+    let topics = subscribe_topics(collection, no_subscribe);
+    if topics.is_empty() {
+        println!("no collection subscribe: replicators are the only delivery path");
+    } else {
+        for i in 0..n {
+            nodes.client(i).p2p_collection_add(&topics)?;
+        }
     }
     for i in 0..n {
         for j in (0..n).filter(|j| *j != i) {
@@ -948,6 +1050,36 @@ fn flag(name: &str) -> Option<String> {
     None
 }
 
+/// Every `--name VALUE` occurrence, in command-line order.
+fn flags(name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == format!("--{name}") {
+            out.extend(args.next());
+        }
+    }
+    out
+}
+
+/// The only validation a `--node-env` item gets: it has an `=`.
+fn split_node_env(item: &str) -> Result<(&str, &str)> {
+    item.split_once('=')
+        .ok_or_else(|| eyre!("--node-env {item}: expected KEY=VALUE"))
+}
+
+/// Set the pairs on this process; spawned nodes inherit them.
+fn apply_node_env(items: &[String]) -> Result<()> {
+    for item in items {
+        let (k, v) = split_node_env(item)?;
+        std::env::set_var(k, v);
+    }
+    if !items.is_empty() {
+        println!("node env on every node: {}", items.join(" "));
+    }
+    Ok(())
+}
+
 fn has_flag(name: &str) -> bool {
     std::env::args().any(|a| a == format!("--{name}"))
 }
@@ -989,6 +1121,74 @@ fn new_run_dir(seed: u64) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--no-subscribe` removes gossip so the replicator is the only path;
+    /// without the flag every node subscribes to the collection as before.
+    #[test]
+    fn no_subscribe_skips_the_collection_topic() {
+        assert_eq!(subscribe_topics("Users", false), vec!["Users"]);
+        assert!(subscribe_topics("Users", true).is_empty());
+    }
+
+    /// The process backend has no per-node env hook: nodes are children of
+    /// this process and inherit its environment, so applying the pairs here
+    /// is what reaches both runtimes.
+    #[test]
+    fn node_env_is_applied_to_this_process_and_validated() {
+        assert_eq!(
+            split_node_env("RUST_LOG=debug").unwrap(),
+            ("RUST_LOG", "debug")
+        );
+        // A value may contain further `=`; only the first splits.
+        assert_eq!(
+            split_node_env("RUST_LOG=defra=debug,libp2p=info").unwrap(),
+            ("RUST_LOG", "defra=debug,libp2p=info")
+        );
+        assert!(split_node_env("RUST_LOG").is_err());
+
+        apply_node_env(&["SOAK_TEST_NODE_ENV=debug".to_string()]).unwrap();
+        assert_eq!(std::env::var("SOAK_TEST_NODE_ENV").unwrap(), "debug");
+        assert!(apply_node_env(&["NO_EQUALS_HERE".to_string()]).is_err());
+        // Nothing to apply, nothing set.
+        apply_node_env(&[]).unwrap();
+        assert!(std::env::var("SOAK_TEST_NODE_ENV_UNSET").is_err());
+    }
+
+    /// The manifest cap is `caps.node_env`, and a replay of a run that used
+    /// the flag gets the same environment without retyping it.
+    #[test]
+    fn node_env_round_trips_through_manifest_caps() {
+        let dir = std::env::temp_dir().join(format!("soak-caps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("manifest.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&json!({
+                "run_id": "1789000000-42",
+                "seed": 42,
+                "ops": 100,
+                "profile": Profile::p0_crud(),
+                "nodes": [{"backend": "process"}],
+                "caps": {"node_env": ["RUST_LOG=debug", "GOLOG_LEVEL=debug"]},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let a = RunArgs::from_manifest(&path).unwrap();
+        assert_eq!(a.node_env, ["RUST_LOG=debug", "GOLOG_LEVEL=debug"]);
+        // A manifest written before this commit has no such cap.
+        std::fs::write(
+            &path,
+            serde_json::to_string(&json!({
+                "run_id": "1789000000-42", "seed": 42, "ops": 100,
+                "profile": Profile::p0_crud(), "nodes": [{"backend": "process"}], "caps": {},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(RunArgs::from_manifest(&path).unwrap().node_env.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn schema_follows_profile() {

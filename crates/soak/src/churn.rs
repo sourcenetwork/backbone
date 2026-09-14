@@ -11,7 +11,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -147,8 +147,9 @@ pub fn virtual_ms(op_index: u64, rate: f64) -> u64 {
     (op_index as f64 * 1000.0 / rate) as u64
 }
 
-/// Fires `events` on `clock` until `stop`, then returns with every node up.
-/// Each down/up phase appends a line to the log. The meter samples from
+/// Fires `events` on `clock` until `workload_done`, then keeps metering
+/// until `stop`, so the settle window is sampled too; returns with every node
+/// up. Each down/up phase appends a line to the log. The meter samples from
 /// here too, since this task holds the nodes.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -161,6 +162,7 @@ pub async fn run(
     transitions: mpsc::UnboundedSender<Transition>,
     log_path: PathBuf,
     mut meter: Meter,
+    workload_done: Arc<AtomicBool>,
     mut stop: oneshot::Receiver<()>,
 ) -> Result<()> {
     let mut log = BufWriter::new(
@@ -175,7 +177,11 @@ pub async fn run(
     let mut pending = events.into_iter().peekable();
     loop {
         meter.maybe_sample(nodes).await?;
-        if pending.peek().is_some_and(|e| e.virtual_ts_ms <= now()) {
+        // Once the workload has stopped the run is settling: keep metering,
+        // but do not fire an event into the window the settle is measuring.
+        if !workload_done.load(Ordering::Relaxed)
+            && pending.peek().is_some_and(|e| e.virtual_ts_ms <= now())
+        {
             let event = pending.next().expect("peeked");
             fire(
                 nodes,

@@ -96,6 +96,12 @@ pub fn m5_compare(
 }
 
 /// First 8 chars: enough to see two values differ without logging secrets.
+/// Settle ends once the floor has been served and either the mesh is clear
+/// or the budget is spent. A zero floor is the historical early exit.
+fn settle_done(elapsed: Duration, min_settle: Duration, settle: Duration, clear: bool) -> bool {
+    elapsed >= min_settle && (clear || elapsed >= settle)
+}
+
 fn short(v: &Option<String>) -> String {
     v.as_deref().unwrap_or("").chars().take(8).collect()
 }
@@ -150,6 +156,9 @@ pub struct CheckerConfig {
     /// After the workload stops, keep checking this long for a clear check
     /// before the final sweep, so in-flight sync is not read as divergence.
     pub settle: Duration,
+    /// Settle for at least this long even if the mesh is already clear, so a
+    /// run that wants an idle sample gets one after the load stops.
+    pub min_settle: Duration,
     /// Encrypted fields to compare as plaintext (M5); empty = off.
     pub encrypted_fields: Vec<String>,
     /// Owner/reader identities for the access-parity views (M6); None = off.
@@ -165,6 +174,7 @@ impl Default for CheckerConfig {
             cold_sample: 50,
             batch: 100,
             settle: Duration::from_secs(120),
+            min_settle: Duration::ZERO,
             encrypted_fields: Vec::new(),
             acp: None,
         }
@@ -354,7 +364,7 @@ impl Checker {
                 _ = &mut stop => {
                     // Settle: keep checking until a fully clear, eligible
                     // check or the budget runs out, then sweep everything.
-                    let deadline = Instant::now() + self.cfg.settle;
+                    let started = Instant::now();
                     loop {
                         while let Ok(t) = touched.try_recv() {
                             self.note(t, &mut recent);
@@ -365,7 +375,8 @@ impl Checker {
                         let clear = self
                             .check(std::mem::take(&mut recent), &mut transitions, false)
                             .await?;
-                        if clear || Instant::now() >= deadline {
+                        if settle_done(started.elapsed(), self.cfg.min_settle, self.cfg.settle, clear)
+                        {
                             break;
                         }
                         tokio::time::sleep(self.cfg.interval).await;
@@ -1012,6 +1023,27 @@ impl Checker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settle_holds_for_min_settle_then_exits_on_clear_or_budget() {
+        let (min, settle) = (Duration::from_secs(60), Duration::from_secs(120));
+        // Clear early no longer ends the settle while the floor is unserved.
+        assert!(!settle_done(Duration::from_secs(13), min, settle, true));
+        // Served floor plus clear ends it.
+        assert!(settle_done(Duration::from_secs(60), min, settle, true));
+        // Never clear: the budget still ends it.
+        assert!(!settle_done(Duration::from_secs(119), min, settle, false));
+        assert!(settle_done(Duration::from_secs(120), min, settle, false));
+        // A floor past the budget wins: the budget alone cannot cut it short.
+        assert!(!settle_done(
+            Duration::from_secs(150),
+            Duration::from_secs(300),
+            settle,
+            true
+        ));
+        // Default: zero floor is the historical early exit on the first clear.
+        assert!(settle_done(Duration::ZERO, Duration::ZERO, settle, true));
+    }
 
     fn fm(rows: &[(&str, &[Option<&str>])]) -> FieldMap {
         rows.iter()
