@@ -53,11 +53,23 @@ use tokio::sync::{mpsc, oneshot};
 
 use checker::{Checker, CheckerConfig, Touch};
 use churn::ChurnConfig;
-use executor::{gql, now_ms, Executor};
+use executor::{gql, http_client, now_ms, Executor};
 use generator::{Generator, OpKind, Profile};
 use meter::{Meter, MeterConfig};
 
 const SCHEMA: &str = "type Users { name: String age: Int score: Float blob: String }";
+const VAULT_SCHEMA: &str =
+    "type Vault { name: String secret: String pin: String score: Float blob: String }";
+/// Shared searchable-encryption key for every node; the key is not under test.
+const SE_KEY: [u8; 32] = [0x5e; 32];
+
+fn schema_for(profile: &Profile) -> &'static str {
+    if profile.is_encrypted() {
+        VAULT_SCHEMA
+    } else {
+        SCHEMA
+    }
+}
 const CONTROL: &str = "Control";
 const CONTROL_SCHEMA: &str = "type Control { v: Int }";
 /// Node indices: the harness spawns Rust nodes first, then Go nodes.
@@ -91,9 +103,27 @@ struct RunArgs {
 
 impl RunArgs {
     fn from_flags() -> Result<Self> {
-        let mut profile = Profile::p0_crud();
+        let profile_name = flag("profile").unwrap_or_else(|| "p0-crud".to_string());
+        let mut profile = Profile::by_name(&profile_name).ok_or_else(|| {
+            eyre!("unknown --profile {profile_name}; use p0-crud or p1-encrypted")
+        })?;
         if let Some(rate) = flag("rate") {
             profile.rate = rate.parse().wrap_err("--rate must be a number")?;
+        }
+        if let Some(list) = flag("create-nodes") {
+            let nodes: Vec<usize> = list
+                .split(',')
+                .map(|s| {
+                    s.trim()
+                        .parse::<usize>()
+                        .wrap_err("--create-nodes must be node indices")
+                })
+                .collect::<Result<_>>()?;
+            eyre::ensure!(
+                nodes.iter().all(|n| *n < STORES.len()),
+                "--create-nodes: index out of range"
+            );
+            profile.create_nodes = Some(nodes);
         }
         let mut churn = has_flag("churn").then(ChurnConfig::default);
         if let (Some(cfg), Some(secs)) = (churn.as_mut(), flag("churn-spacing")) {
@@ -248,6 +278,26 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
     for (i, store) in STORES.iter().enumerate() {
         builder = builder.with_node_store(i, *store);
     }
+    if a.profile.is_encrypted() {
+        // Recipe configuration (spec 62, D1): dev mode so Go's KMS has a node
+        // identity under --no-keyring, an explicit identity per node, and one
+        // SE key seeded into every file keyring.
+        let rust_bin = PathBuf::from(
+            std::env::var("DEFRA_RUST_BINARY").wrap_err("DEFRA_RUST_BINARY must be set")?,
+        );
+        let go_bin = PathBuf::from("defradb");
+        builder = builder
+            .with_encryption()
+            .with_development()
+            .with_shared_searchable_encryption_key(SE_KEY);
+        for i in 0..STORES.len() {
+            let bin = if i < GO0 { &rust_bin } else { &go_bin };
+            let identity = defra_harness::identity::generate_identity(bin)
+                .wrap_err_with(|| format!("generating the node identity for node {i}"))?;
+            builder = builder.with_node_identity(i, identity.private_key_hex);
+        }
+        println!("encrypted profile: encryption + dev mode + per-node identities + shared SE key");
+    }
     if let Some(intervals) = &a.retry_intervals {
         let flag = ["--replicator-retry-intervals", intervals.as_str()];
         builder = builder.with_extra_rust_args(flag).with_extra_go_args(flag);
@@ -264,7 +314,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
             cluster.api_url(i)
         );
     }
-    wire_full_mesh(&cluster, &a.profile.collection)?;
+    wire_full_mesh(&cluster, &a.profile)?;
     preflight(&cluster, &a.profile.collection).await?;
     let mut collections = vec![a.profile.collection.clone()];
     if a.control {
@@ -280,7 +330,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
             )
         })
         .collect();
-    let http = reqwest::Client::new();
+    let http = http_client(Duration::from_secs(30));
     let mut peer_ids = Vec::new();
     for (name, url) in &nodes {
         let pid = churn::peer_id(&http, url).await;
@@ -365,6 +415,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         CheckerConfig {
             grace: a.grace,
             settle: a.settle,
+            encrypted_fields: a.profile.encrypt_fields.clone(),
             ..CheckerConfig::default()
         },
         a.seed,
@@ -390,7 +441,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
 
     let node_list = nodes.clone();
     let mut generator = Generator::new(a.seed, a.profile.clone(), nodes.len());
-    let mut executor = Executor::new(nodes, &a.profile.collection, &run_dir.join("ops.jsonl"))?;
+    let mut executor = Executor::new(nodes, &a.profile, &run_dir.join("ops.jsonl"))?;
     let workload = async {
         let mut current_rate = a.profile.rate;
         let mut tick = tokio::time::interval(Duration::from_secs_f64(1.0 / current_rate));
@@ -496,6 +547,9 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         "checks: {} ({} unreachable), divergence records: {}, still present at final sweep: {}",
         summary.checks, summary.unreachable, summary.divergences, summary.unresolved
     );
+    if summary.m5_docs > 0 {
+        println!("m5 docs compared: {}", summary.m5_docs);
+    }
     println!(
         "final sweep: {} mismatches ({})",
         summary.final_mismatches,
@@ -527,6 +581,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         "final_mismatches": summary.final_mismatches, "final_eligible": summary.final_eligible,
         "tagged_docs": summary.tagged_docs, "untagged_docs": summary.untagged_docs,
         "sse_events": summary.sse_events, "quiet_checks": summary.quiet_checks,
+        "m5_docs": summary.m5_docs,
     });
     std::fs::write(&manifest_path, serde_json::to_string_pretty(&m)?)?;
     drop(cluster);
@@ -539,11 +594,12 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
 /// to all peers, subscribe the collection, one replicator per directed
 /// pair. Same call order as defradb.rs `p2p_interop_bench`, which is
 /// proven on mixed clusters.
-fn wire_full_mesh(cluster: &TestCluster, collection: &str) -> Result<()> {
+fn wire_full_mesh(cluster: &TestCluster, profile: &Profile) -> Result<()> {
+    let collection = profile.collection.as_str();
     let n = cluster.len();
     let addrs: Vec<String> = (0..n).map(|i| extract_p2p_addr(cluster, i)).collect();
     for i in 0..n {
-        cluster.client(i).schema_add(SCHEMA)?;
+        cluster.client(i).schema_add(schema_for(profile))?;
     }
     for i in 0..n {
         let others: Vec<&str> = (0..n)
@@ -562,6 +618,14 @@ fn wire_full_mesh(cluster: &TestCluster, collection: &str) -> Result<()> {
                 .p2p_replicator_set(&[collection], &addrs[j])?;
         }
     }
+    if let Some(field) = &profile.se_field {
+        for i in 0..n {
+            cluster
+                .client(i)
+                .encrypted_index_add(collection, field)
+                .wrap_err_with(|| format!("encrypted index on {}", cluster.nodes[i].name))?;
+        }
+    }
     Ok(())
 }
 
@@ -570,16 +634,13 @@ fn wire_full_mesh(cluster: &TestCluster, collection: &str) -> Result<()> {
 async fn preflight(cluster: &TestCluster, collection: &str) -> Result<()> {
     let n = cluster.len();
     for i in 0..n {
-        let doc = format!(
-            r#"{{"name": "preflight-{}", "age": 1}}"#,
-            cluster.nodes[i].name
-        );
+        let doc = format!(r#"{{"name": "preflight-{}"}}"#, cluster.nodes[i].name);
         cluster
             .client(i)
             .collection_create(collection, &doc)
             .wrap_err_with(|| format!("creating the preflight doc on {}", cluster.nodes[i].name))?;
     }
-    let http = reqwest::Client::new();
+    let http = http_client(Duration::from_secs(30));
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let mut missing = Vec::new();
@@ -621,7 +682,7 @@ async fn wire_control(cluster: &TestCluster) -> Result<()> {
     cluster
         .client(RUST0)
         .p2p_replicator_set(&[CONTROL], &go_addr)?;
-    let http = reqwest::Client::new();
+    let http = http_client(Duration::from_secs(30));
     let go_url = cluster.api_url(GO0);
     let rust_url = cluster.api_url(RUST0);
     let create = |v: u32| format!("mutation {{ add_{CONTROL}(input: [{{v: {v}}}]) {{ _docID }} }}");
@@ -711,4 +772,16 @@ fn new_run_dir(seed: u64) -> Result<PathBuf> {
     let dir = PathBuf::from("runs").join(format!("{}-{seed}", unix_secs()));
     std::fs::create_dir(&dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
     Ok(dir.canonicalize()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_follows_profile() {
+        assert_eq!(schema_for(&Profile::p0_crud()), SCHEMA);
+        assert_eq!(schema_for(&Profile::p1_encrypted()), VAULT_SCHEMA);
+        assert!(VAULT_SCHEMA.contains("type Vault") && VAULT_SCHEMA.contains("secret: String"));
+    }
 }

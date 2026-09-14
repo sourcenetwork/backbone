@@ -3,13 +3,13 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eyre::{Result, WrapErr};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::generator::{OpKind, PlannedOp};
+use crate::generator::{OpKind, PlannedOp, Profile};
 
 /// One executed op. `wall_ts_ms`, `latency_ms` and `error` (runtime text,
 /// e.g. Go's "did you mean" list is unordered) are the only fields a replay
@@ -36,19 +36,23 @@ pub struct Executor {
     /// (name, api_url) per node index.
     nodes: Vec<(String, String)>,
     collection: String,
+    encrypt_fields: Vec<String>,
+    se_field: Option<String>,
     /// Slot -> docID learned from the create response.
     slots: Vec<Option<String>>,
     log: BufWriter<File>,
 }
 
 impl Executor {
-    pub fn new(nodes: Vec<(String, String)>, collection: &str, log_path: &Path) -> Result<Self> {
+    pub fn new(nodes: Vec<(String, String)>, profile: &Profile, log_path: &Path) -> Result<Self> {
         let log =
             File::create(log_path).wrap_err_with(|| format!("creating {}", log_path.display()))?;
         Ok(Self {
-            http: reqwest::Client::new(),
+            http: http_client(Duration::from_secs(30)),
             nodes,
-            collection: collection.to_string(),
+            collection: profile.collection.clone(),
+            encrypt_fields: profile.encrypt_fields.clone(),
+            se_field: profile.se_field.clone(),
             slots: Vec::new(),
             log: BufWriter::new(log),
         })
@@ -60,10 +64,13 @@ impl Executor {
         let col = &self.collection;
         let payload = op.payload.as_deref().unwrap_or("{}");
         let victim = op.slot.and_then(|s| self.slots.get(s).cloned().flatten());
+        let expected: Vec<String> = op
+            .expect_slots
+            .iter()
+            .filter_map(|s| self.slots.get(*s).cloned().flatten())
+            .collect();
         let query = match op.kind {
-            OpKind::Create => Some(format!(
-                "mutation {{ add_{col}(input: [{payload}]) {{ _docID }} }}"
-            )),
+            OpKind::Create => Some(create_mutation(col, payload, &self.encrypt_fields)),
             OpKind::Update => victim.as_ref().map(|id| {
                 format!(
                     "mutation {{ update_{col}(docID: \"{id}\", input: {payload}) {{ _docID }} }}"
@@ -72,7 +79,10 @@ impl Executor {
             OpKind::Delete => victim
                 .as_ref()
                 .map(|id| format!("mutation {{ delete_{col}(docID: \"{id}\") {{ _docID }} }}")),
-            OpKind::Query => Some(format!("{{ {payload} }}")),
+            OpKind::Query => Some(match &self.se_field {
+                Some(field) => se_query(col, field, payload),
+                None => format!("{{ {payload} }}"),
+            }),
         };
 
         let wall_ts_ms = now_ms();
@@ -125,7 +135,10 @@ impl Executor {
                         )
                     }
                 }
-                OpKind::Query => (true, None),
+                OpKind::Query => match &self.se_field {
+                    Some(_) => se_verdict(&data, col, &expected),
+                    None => (true, None),
+                },
             },
             Err(e) => (false, Some(e)),
         };
@@ -150,10 +163,68 @@ impl Executor {
     }
 }
 
+/// `add_<col>` with the profile's `encryptFields:` list (unquoted names).
+pub fn create_mutation(col: &str, payload: &str, encrypt_fields: &[String]) -> String {
+    if encrypt_fields.is_empty() {
+        format!("mutation {{ add_{col}(input: [{payload}]) {{ _docID }} }}")
+    } else {
+        format!(
+            "mutation {{ add_{col}(input: [{payload}], encryptFields: [{}]) {{ _docID }} }}",
+            encrypt_fields.join(", ")
+        )
+    }
+}
+
+/// Searchable-encryption equality query; the owner fans it to its replicators.
+pub fn se_query(col: &str, field: &str, value: &str) -> String {
+    format!("{{ encrypted_{col}(filter: {{{field}: {{_eq: \"{value}\"}}}}) {{ docIDs }} }}")
+}
+
+/// ok iff every expected docID is in the flattened `docIDs` of the reply.
+pub fn se_verdict(data: &Value, col: &str, expected: &[String]) -> (bool, Option<String>) {
+    let got: std::collections::HashSet<&str> = data[format!("encrypted_{col}")]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|row| row["docIDs"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .collect();
+    let missing: Vec<&str> = expected
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !got.contains(id))
+        .collect();
+    if missing.is_empty() {
+        return (true, None);
+    }
+    let mut shown: Vec<&str> = missing.iter().copied().take(5).collect();
+    if missing.len() > 5 {
+        shown.push("...");
+    }
+    (
+        false,
+        Some(format!(
+            "se query missing {} of {} expected docIDs: {}",
+            missing.len(),
+            expected.len(),
+            shown.join(", ")
+        )),
+    )
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// A client whose requests fail after `timeout`; without one a request that
+/// never completes stalls the workload loop for the rest of the run.
+pub(crate) fn http_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .expect("reqwest client")
 }
 
 /// POST a GraphQL document to a node; transport and GraphQL errors become
@@ -180,4 +251,73 @@ pub async fn gql(http: &reqwest::Client, url: &str, query: &str) -> Result<Value
         return Err(format!("graphql: {}", msgs.join("; ")));
     }
     Ok(body["data"].clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gql_times_out_against_silent_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let http = http_client(Duration::from_secs(1));
+        let started = Instant::now();
+        let out =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(gql(&http, &url, "{ __typename }"));
+        let err = out.expect_err("a request nobody answers must fail");
+        assert!(err.starts_with("http:"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn create_mutation_plain_and_encrypted() {
+        assert_eq!(
+            create_mutation("Users", "{a: 1}", &[]),
+            "mutation { add_Users(input: [{a: 1}]) { _docID } }"
+        );
+        assert_eq!(
+            create_mutation(
+                "Vault",
+                "{a: 1}",
+                &["secret".to_string(), "pin".to_string()]
+            ),
+            "mutation { add_Vault(input: [{a: 1}], encryptFields: [secret, pin]) { _docID } }"
+        );
+    }
+
+    #[test]
+    fn se_query_string() {
+        assert_eq!(
+            se_query("Vault", "name", "name-07"),
+            "{ encrypted_Vault(filter: {name: {_eq: \"name-07\"}}) { docIDs } }"
+        );
+    }
+
+    #[test]
+    fn se_verdict_subset_ok_missing_fails() {
+        let data = json!({ "encrypted_Vault": [ { "docIDs": ["bae-a", "bae-b"] }, { "docIDs": ["bae-c"] } ] });
+        let want = ["bae-a".to_string(), "bae-c".to_string()];
+        assert_eq!(se_verdict(&data, "Vault", &want), (true, None));
+        let want2 = ["bae-a".to_string(), "bae-z".to_string()];
+        let (ok, err) = se_verdict(&data, "Vault", &want2);
+        assert!(!ok);
+        assert_eq!(
+            err.as_deref(),
+            Some("se query missing 1 of 2 expected docIDs: bae-z")
+        );
+        assert_eq!(
+            se_verdict(&json!({ "encrypted_Vault": [] }), "Vault", &[]),
+            (true, None)
+        );
+        let many: Vec<String> = (0..7).map(|i| format!("bae-m{i}")).collect();
+        let (ok, err) = se_verdict(&json!({ "encrypted_Vault": [] }), "Vault", &many);
+        assert!(!ok);
+        assert_eq!(
+            err.as_deref(),
+            Some("se query missing 7 of 7 expected docIDs: bae-m0, bae-m1, bae-m2, bae-m3, bae-m4, ...")
+        );
+    }
 }

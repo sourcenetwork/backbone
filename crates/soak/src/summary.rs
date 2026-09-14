@@ -397,7 +397,10 @@ fn classify_final_sweep(
     let mut out = BTreeMap::new();
     for f in sweep {
         let mech = s(f, "mechanism");
-        let missing_on = f["detail"]["missing_on"].as_str().unwrap_or("-");
+        let missing_on = f["detail"]["missing_on"]
+            .as_str()
+            .or_else(|| f["detail"]["undecryptable_on"].as_str())
+            .unwrap_or("-");
         let members: Vec<&str> = s(f, "pair").split('|').collect();
         let label = match last_write.get(s(f, "doc_id")) {
             None => format!("{mech} missing_on={missing_on}: no successful write on record"),

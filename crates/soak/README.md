@@ -5,9 +5,10 @@ drives a seeded workload against it, keeps checking that the runtimes
 converge, injects restarts and crashes on a seeded schedule, meters disk and
 memory, and writes one replayable artifact directory per run.
 
-Status: M1a (two Rust nodes on regolith + two Go nodes on badger, on this
-host, as processes, in a full replicator mesh). The design and roadmap live
-in the agent-ops vault under `Worklogs/cross-defra/soak-harness/`.
+Status: M1b (two Rust nodes on regolith + two Go nodes on badger, on this
+host, as processes, in a full replicator mesh; `p1-encrypted` profile:
+encrypted fields + searchable-encryption index, checker M5). The design and
+roadmap live in the agent-ops vault under `Worklogs/cross-defra/soak-harness/`.
 
 ## Prerequisites
 
@@ -16,6 +17,7 @@ in the agent-ops vault under `Worklogs/cross-defra/soak-harness/`.
 - The Go `defradb` built at `GO_COMPAT_COMMIT` (see
   `crates/defra-version/src/lib.rs` in defradb.rs) on `PATH`, with
   `DEFRA_GO_COMPAT_COMMIT` set to that commit.
+- `identity new` is run on both binaries at setup for `--profile p1-encrypted`.
 
 ```sh
 export DEFRA_RUST_BINARY=~/Repos/Source/defradb.rs/target/release/defra
@@ -41,6 +43,8 @@ The nodes' data and logs are kept under the run directory (the driver points
 | Flag | Default | Meaning |
 |---|---|---|
 | `--seed N` | unix time | Master seed; both axes derive from it. |
+| `--profile NAME` | p0-crud | Workload profile: `p0-crud` (plaintext Users) or `p1-encrypted` (Vault with encrypted secret/pin and an SE index on name; builds the cluster with encryption, dev mode, per-node identities and a shared SE key). |
+| `--create-nodes 0,1` | all nodes | Node indices that receive create ops (0,1 Rust; 2,3 Go); other ops still go to any node. Recorded in the manifest. |
 | `--ops N` | 200 | Ops to plan and execute. |
 | `--secs S` | none | Wall deadline; stops the workload first if hit. |
 | `--rate R` | 20 | Profile rate, ops/s mesh-wide, and the virtual clock (`virtual_ts = index / rate`). ~3 is sustainable for 1R+1G on a MacBook. |
@@ -97,7 +101,10 @@ for one Rust node today.
 collection's docID set is fetched once per node and diffed for every pair
 (M1); head CIDs via alias-batched `_commits(docID: ..., depth: 1)` are
 fetched once per node over docs touched since the last check plus a cold
-sample of 50 and diffed per pair (M3). A mismatch becomes a divergence
+sample of 50 and diffed per pair (M3). For `p1-encrypted` the same targets
+are also read as plaintext (`filter: {_docID: {_in: [..]}}`) per node and
+compared per pair (M5); a null or empty encrypted field on one side only is
+recorded as `undecryptable_on`. A mismatch becomes a divergence
 record only after it persisted across 3 consecutive checks spanning at
 least `grace`; the record names the pair and carries the op range and node
 down/up transitions since the last clear check. A pair is eligible when
@@ -192,7 +199,7 @@ Known runtime behaviours met while building M0 (Rust `ba6dac661`, Go
 
 ## Not yet
 
-Containers, a second machine, network partitions, encryption / ACP /
-relations / secondary indexes / lens, node-internal telemetry (otel), a
+Containers, a second machine, network partitions, ACP / relations /
+secondary indexes / lens, node-internal telemetry (otel), a
 concurrent executor, M1 sweep scoping, tag rules for anything but the
 outage loss.

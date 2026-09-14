@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::churn::Transition;
 use crate::confirm::{Confirmer, Key};
-use crate::executor::{gql, now_ms};
+use crate::executor::{gql, http_client, now_ms};
 use crate::sse::Arrival;
 use crate::tags::{tag, Outage, Tag};
 
@@ -53,6 +53,48 @@ pub struct Touch {
 /// divergence, not a lag sample.
 const LAG_TTL_MS: u64 = 900_000;
 
+/// docID -> one value per configured encrypted field (None = null/absent).
+pub type FieldMap = HashMap<String, Vec<Option<String>>>;
+
+/// M5: a doc both nodes hold must read the same plaintext on both. A null
+/// or empty value on one side only is "replicated but undecryptable".
+pub fn m5_compare(
+    a: &FieldMap,
+    b: &FieldMap,
+    node_a: &str,
+    node_b: &str,
+    targets: &[String],
+    fields: &[String],
+) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    for id in targets {
+        let (Some(x), Some(y)) = (a.get(id), b.get(id)) else {
+            continue;
+        };
+        for (i, field) in fields.iter().enumerate() {
+            let (vx, vy) = (x.get(i).cloned().flatten(), y.get(i).cloned().flatten());
+            let empty = |v: &Option<String>| v.as_deref().is_none_or(str::is_empty);
+            let detail = match (empty(&vx), empty(&vy)) {
+                (true, true) => continue,
+                (true, false) => json!({ "undecryptable_on": node_a, "field": field }),
+                (false, true) => json!({ "undecryptable_on": node_b, "field": field }),
+                (false, false) if vx != vy => {
+                    json!({ "field": field, "a": short(&vx), "b": short(&vy) })
+                }
+                _ => continue,
+            };
+            out.push((id.clone(), detail));
+            break;
+        }
+    }
+    out
+}
+
+/// First 8 chars: enough to see two values differ without logging secrets.
+fn short(v: &Option<String>) -> String {
+    v.as_deref().unwrap_or("").chars().take(8).collect()
+}
+
 pub struct CheckerConfig {
     pub interval: Duration,
     /// A mismatch younger than this is "sync in flight", never a divergence.
@@ -67,6 +109,8 @@ pub struct CheckerConfig {
     /// After the workload stops, keep checking this long for a clear check
     /// before the final sweep, so in-flight sync is not read as divergence.
     pub settle: Duration,
+    /// Encrypted fields to compare as plaintext (M5); empty = off.
+    pub encrypted_fields: Vec<String>,
 }
 
 impl Default for CheckerConfig {
@@ -78,6 +122,7 @@ impl Default for CheckerConfig {
             cold_sample: 50,
             batch: 100,
             settle: Duration::from_secs(120),
+            encrypted_fields: Vec::new(),
         }
     }
 }
@@ -102,6 +147,9 @@ pub struct Summary {
     pub sse_events: Vec<u64>,
     /// Checks triggered by quiescence rather than the clock.
     pub quiet_checks: u64,
+    /// Docs whose plaintext was compared on both sides of a pair (M5), summed
+    /// over checks; zero means M5 never compared anything.
+    pub m5_docs: u64,
 }
 
 /// What one comparison pass found.
@@ -111,6 +159,8 @@ struct Compared {
     /// All mismatches, eligible or not, with their pair (for the final sweep).
     all: Vec<(Key, Value)>,
     m3_docs: usize,
+    /// Docs present in both maps of a pair and so actually compared by M5.
+    m5_docs: usize,
     unreachable: Vec<usize>,
 }
 
@@ -176,7 +226,7 @@ impl Checker {
             }
         }
         Ok(Self {
-            http: reqwest::Client::new(),
+            http: http_client(Duration::from_secs(30)),
             eligible_at: vec![Instant::now(); nodes.len()],
             nodes,
             pairs,
@@ -365,6 +415,7 @@ impl Checker {
         self.summary.checks += 1;
 
         let compared = self.compare(&recent, full, &mut node_ok).await?;
+        self.summary.m5_docs += compared.m5_docs as u64;
         let eligible_pairs = self
             .pairs
             .iter()
@@ -417,7 +468,7 @@ impl Checker {
             "wall_ts_ms": now_ms(), "op_index": op_index, "full": full,
             "eligible": all_eligible, "eligible_pairs": eligible_pairs,
             "unreachable_nodes": compared.unreachable.iter().map(|n| &self.nodes[*n].0).collect::<Vec<_>>(),
-            "status": status, "m3_docs": compared.m3_docs, "mismatches": n, "expected": expected,
+            "status": status, "m3_docs": compared.m3_docs, "m5_docs": compared.m5_docs, "mismatches": n, "expected": expected,
             "pending": self.confirmer.pending(), "confirmed": confirmed.len(),
             "duration_ms": now.elapsed().as_millis() as u64,
         });
@@ -427,8 +478,9 @@ impl Checker {
         Ok(clear)
     }
 
-    /// M1 + M3 over all collections and pairs. A node whose queries fail is
-    /// added to `unreachable` and cleared in `node_ok`.
+    /// M1 + M3 (+ M5 for encrypted profiles) over all collections and pairs.
+    /// A node whose queries fail is added to `unreachable` and cleared in
+    /// `node_ok`.
     async fn compare(
         &mut self,
         recent: &HashSet<String>,
@@ -439,6 +491,7 @@ impl Checker {
             mismatches: Vec::new(),
             all: Vec::new(),
             m3_docs: 0,
+            m5_docs: 0,
             unreachable: Vec::new(),
         };
         for col in self.collections.clone() {
@@ -549,6 +602,62 @@ impl Checker {
                             (key.clone(), col.clone(), "M3", id.clone()),
                             json!({ "heads_a": x, "heads_b": y }),
                         );
+                        if eligible {
+                            out.mismatches.push(entry.clone());
+                        }
+                        out.all.push(entry);
+                    }
+                }
+            }
+            // M5: plaintext parity on the same targets, only for encrypted profiles.
+            if !self.cfg.encrypted_fields.is_empty() {
+                let mut plain: Vec<Option<FieldMap>> = Vec::new();
+                for (n, set) in ids.iter().enumerate() {
+                    let Some(set) = set else {
+                        plain.push(None);
+                        continue;
+                    };
+                    let mine: Vec<String> = targets
+                        .iter()
+                        .filter(|t| set.contains(*t))
+                        .cloned()
+                        .collect();
+                    let mut map = FieldMap::new();
+                    let mut failed = false;
+                    for chunk in mine.chunks(self.cfg.batch) {
+                        match self.encrypted_fields(n, &col, chunk).await {
+                            Ok(part) => map.extend(part),
+                            Err(_) => {
+                                failed = true;
+                                break;
+                            }
+                        }
+                    }
+                    if failed {
+                        plain.push(None);
+                        if !out.unreachable.contains(&n) {
+                            out.unreachable.push(n);
+                        }
+                        node_ok[n] = false;
+                    } else {
+                        plain.push(Some(map));
+                    }
+                }
+                for (a, b, key) in &self.pairs {
+                    let (Some(pa), Some(pb)) = (&plain[*a], &plain[*b]) else {
+                        continue;
+                    };
+                    let eligible = node_ok[*a] && node_ok[*b];
+                    out.m5_docs += pa.keys().filter(|id| pb.contains_key(*id)).count();
+                    for (id, detail) in m5_compare(
+                        pa,
+                        pb,
+                        &self.nodes[*a].0,
+                        &self.nodes[*b].0,
+                        &targets,
+                        &self.cfg.encrypted_fields,
+                    ) {
+                        let entry = ((key.clone(), col.clone(), "M5", id), detail);
                         if eligible {
                             out.mismatches.push(entry.clone());
                         }
@@ -687,5 +796,84 @@ impl Checker {
                 (id.clone(), cids)
             })
             .collect())
+    }
+
+    /// The configured encrypted fields for `ids`, one POST per chunk.
+    async fn encrypted_fields(&self, node: usize, col: &str, ids: &[String]) -> Result<FieldMap> {
+        if ids.is_empty() {
+            return Ok(FieldMap::new());
+        }
+        let (name, url) = &self.nodes[node];
+        let fields = self.cfg.encrypted_fields.join(" ");
+        let list: Vec<String> = ids.iter().map(|id| format!("\"{id}\"")).collect();
+        let query = format!(
+            "{{ {col}(filter: {{_docID: {{_in: [{}]}}}}) {{ _docID {fields} }} }}",
+            list.join(", ")
+        );
+        let data = gql(&self.http, url, &query)
+            .await
+            .map_err(|e| eyre!("{name}: encrypted-field read of {} docs: {e}", ids.len()))?;
+        Ok(data[col]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| {
+                let id = d["_docID"].as_str()?.to_string();
+                let vals = self
+                    .cfg
+                    .encrypted_fields
+                    .iter()
+                    .map(|f| d[f].as_str().map(String::from))
+                    .collect();
+                Some((id, vals))
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fm(rows: &[(&str, &[Option<&str>])]) -> FieldMap {
+        rows.iter()
+            .map(|(id, vals)| {
+                (
+                    id.to_string(),
+                    vals.iter().map(|v| v.map(String::from)).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn m5_equal_differ_undecryptable() {
+        let a = fm(&[
+            ("d1", &[Some("s"), Some("1")]),
+            ("d2", &[Some("s"), Some("2")]),
+            ("d3", &[Some("s"), Some("3")]),
+        ]);
+        let b = fm(&[
+            ("d1", &[Some("s"), Some("1")]),
+            ("d2", &[Some("x"), Some("2")]),
+            ("d3", &[None, Some("3")]),
+        ]);
+        let targets = [
+            "d1".to_string(),
+            "d2".to_string(),
+            "d3".to_string(),
+            "d4".to_string(),
+        ];
+        let fields = ["secret".to_string(), "pin".to_string()];
+        let out = m5_compare(&a, &b, "rust-0", "go-0", &targets, &fields);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].0, "d2");
+        assert_eq!(out[0].1["field"], "secret");
+        assert!(out[0].1["a"].is_string() && out[0].1["b"].is_string());
+        assert_eq!(out[1].0, "d3");
+        assert_eq!(
+            out[1].1,
+            json!({ "undecryptable_on": "go-0", "field": "secret" })
+        );
     }
 }

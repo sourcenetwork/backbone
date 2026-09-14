@@ -24,6 +24,15 @@ pub struct Profile {
     /// Ops per second on the virtual schedule.
     pub rate: f64,
     pub collection: String,
+    /// Fields named in `encryptFields:` on every create. Empty = plaintext profile.
+    #[serde(default)]
+    pub encrypt_fields: Vec<String>,
+    /// Field with a searchable-encryption index; the query op becomes an SE query.
+    #[serde(default)]
+    pub se_field: Option<String>,
+    /// Node indices that receive create ops; `None` = any node. Other ops are unaffected.
+    #[serde(default)]
+    pub create_nodes: Option<Vec<usize>>,
 }
 
 impl Profile {
@@ -38,7 +47,34 @@ impl Profile {
             doc_bytes: 1200,
             rate: 20.0,
             collection: "Users".into(),
+            encrypt_fields: Vec::new(),
+            se_field: None,
+            create_nodes: None,
         }
+    }
+
+    /// M1b V1: encrypted `secret`/`pin`, SE index on `name` (spec 62, section 2).
+    pub fn p1_encrypted() -> Self {
+        Self {
+            name: "p1-encrypted".into(),
+            collection: "Vault".into(),
+            encrypt_fields: vec!["secret".into(), "pin".into()],
+            se_field: Some("name".into()),
+            ..Self::p0_crud()
+        }
+    }
+
+    pub fn by_name(name: &str) -> Option<Self> {
+        match name {
+            "p0-crud" => Some(Self::p0_crud()),
+            "p1-encrypted" => Some(Self::p1_encrypted()),
+            _ => None,
+        }
+    }
+
+    /// Needs the encryption-enabled cluster (dev mode, identities, SE key).
+    pub fn is_encrypted(&self) -> bool {
+        !self.encrypt_fields.is_empty() || self.se_field.is_some()
     }
 }
 
@@ -63,7 +99,13 @@ pub struct PlannedOp {
     /// GraphQL literal: create input object, update input object, or the
     /// query selection. None for delete.
     pub payload: Option<String>,
+    /// SE query only: ledger slots whose name equals `payload` at planning
+    /// time; the executor resolves them to docIDs. Empty otherwise.
+    #[serde(default)]
+    pub expect_slots: Vec<usize>,
 }
+
+pub const NAME_POOL: usize = 40;
 
 pub struct Generator {
     rng: StdRng,
@@ -74,6 +116,8 @@ pub struct Generator {
     created: usize,
     /// Live slots; deletes swap_remove, so evolution depends only on the seed.
     live: Vec<usize>,
+    /// Name per slot (creation order); only filled for encrypted profiles.
+    names: Vec<String>,
 }
 
 impl Generator {
@@ -85,6 +129,7 @@ impl Generator {
             next_index: 0,
             created: 0,
             live: Vec::new(),
+            names: Vec::new(),
         }
     }
 
@@ -107,24 +152,56 @@ impl Generator {
             OpKind::Query
         };
         // A victim op with nothing live becomes a create; still seed-determined.
-        if matches!(kind, OpKind::Update | OpKind::Delete) && self.live.is_empty() {
+        if (matches!(kind, OpKind::Update | OpKind::Delete)
+            || (kind == OpKind::Query && self.profile.se_field.is_some()))
+            && self.live.is_empty()
+        {
             kind = OpKind::Create;
         }
-        let node = self.rng.gen_range(0..self.nodes);
+        let node = match (&kind, &self.profile.create_nodes) {
+            (OpKind::Create, Some(allowed)) if !allowed.is_empty() => {
+                allowed[self.rng.gen_range(0..allowed.len())]
+            }
+            _ => self.rng.gen_range(0..self.nodes),
+        };
+        let mut expect_slots = Vec::new();
         let (slot, payload) = match kind {
             OpKind::Create => {
                 let slot = self.created;
                 self.created += 1;
                 self.live.push(slot);
-                (Some(slot), Some(self.create_input()))
+                let payload = if self.profile.is_encrypted() {
+                    let name = format!("name-{:02}", self.rng.gen_range(0..NAME_POOL));
+                    self.names.push(name.clone());
+                    self.create_input_vault(&name)
+                } else {
+                    self.create_input()
+                };
+                (Some(slot), Some(payload))
             }
             OpKind::Update => {
                 let pos = self.rng.gen_range(0..self.live.len());
-                (Some(self.live[pos]), Some(self.update_input()))
+                let payload = if self.profile.is_encrypted() {
+                    self.update_input_vault()
+                } else {
+                    self.update_input()
+                };
+                (Some(self.live[pos]), Some(payload))
             }
             OpKind::Delete => {
                 let pos = self.rng.gen_range(0..self.live.len());
                 (Some(self.live.swap_remove(pos)), None)
+            }
+            OpKind::Query if self.profile.se_field.is_some() => {
+                let pos = self.rng.gen_range(0..self.live.len());
+                let name = self.names[self.live[pos]].clone();
+                expect_slots = self
+                    .live
+                    .iter()
+                    .copied()
+                    .filter(|s| self.names[*s] == name)
+                    .collect();
+                (None, Some(name))
             }
             OpKind::Query => (None, Some(self.query_selection())),
         };
@@ -137,6 +214,7 @@ impl Generator {
             kind,
             slot,
             payload,
+            expect_slots,
         }
     }
 
@@ -165,6 +243,22 @@ impl Generator {
         let age = self.rng.gen_range(0..100);
         let score = self.score();
         format!("{{age: {age}, score: {score}}}")
+    }
+
+    fn create_input_vault(&mut self, name: &str) -> String {
+        let secret = self.alnum(16);
+        let pin = format!("{:04}", self.rng.gen_range(0..10_000));
+        let score = self.score();
+        let blob = self.alnum(self.profile.doc_bytes.saturating_sub(96));
+        format!(
+            "{{name: \"{name}\", secret: \"{secret}\", pin: \"{pin}\", score: {score}, blob: \"{blob}\"}}"
+        )
+    }
+
+    fn update_input_vault(&mut self) -> String {
+        let secret = self.alnum(16);
+        let score = self.score();
+        format!("{{secret: \"{secret}\", score: {score}}}")
     }
 
     fn query_selection(&mut self) -> String {
@@ -229,5 +323,164 @@ mod tests {
             created > 0 && !deleted.is_empty(),
             "profile must exercise all kinds"
         );
+    }
+
+    #[test]
+    fn old_manifest_profile_still_loads() {
+        let old = r#"{"name":"p0-crud","create":30,"update":40,"delete":5,"query":25,
+                      "doc_bytes":1200,"rate":5.0,"collection":"Users"}"#;
+        let p: Profile = serde_json::from_str(old).expect("old profile json");
+        assert_eq!(
+            p,
+            Profile {
+                rate: 5.0,
+                ..Profile::p0_crud()
+            }
+        );
+        assert!(p.encrypt_fields.is_empty() && p.se_field.is_none() && !p.is_encrypted());
+    }
+
+    #[test]
+    fn p1_encrypted_shape() {
+        let p = Profile::p1_encrypted();
+        assert_eq!(p.collection, "Vault");
+        assert_eq!(
+            p.encrypt_fields,
+            vec!["secret".to_string(), "pin".to_string()]
+        );
+        assert_eq!(p.se_field.as_deref(), Some("name"));
+        assert!(p.is_encrypted());
+        let back: Profile = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn profile_by_name() {
+        assert_eq!(Profile::by_name("p0-crud"), Some(Profile::p0_crud()));
+        assert_eq!(
+            Profile::by_name("p1-encrypted"),
+            Some(Profile::p1_encrypted())
+        );
+        assert_eq!(Profile::by_name("nope"), None);
+    }
+
+    /// p0 must not move: hash of the first 500 ops for seed 42, 2 nodes.
+    #[test]
+    fn p0_plan_is_frozen() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for op in plan(42, 500) {
+            (
+                op.index,
+                op.virtual_ts_ms,
+                op.node,
+                op.kind as u8,
+                op.slot,
+                op.payload,
+            )
+                .hash(&mut h);
+        }
+        assert_eq!(h.finish(), 12263656268250365760);
+    }
+
+    fn plan_p1(seed: u64, n: usize) -> Vec<PlannedOp> {
+        Generator::new(seed, Profile::p1_encrypted(), 4)
+            .take(n)
+            .collect()
+    }
+
+    #[test]
+    fn p0_ops_have_no_expect_slots() {
+        assert!(plan(42, 500).iter().all(|op| op.expect_slots.is_empty()));
+    }
+
+    #[test]
+    fn p1_create_and_update_payloads() {
+        let ops = plan_p1(9, 400);
+        let create = ops.iter().find(|o| o.kind == OpKind::Create).unwrap();
+        let p = create.payload.as_deref().unwrap();
+        assert!(p.starts_with("{name: \"") && p.contains("secret: \"") && p.contains("pin: \""));
+        assert!(p.contains("score: ") && p.contains("blob: \"") && !p.contains("age:"));
+        let update = ops.iter().find(|o| o.kind == OpKind::Update).unwrap();
+        let u = update.payload.as_deref().unwrap();
+        assert!(u.starts_with("{secret: \"") && u.contains("score: ") && !u.contains("age:"));
+    }
+
+    /// An SE query names a live doc's name and lists every live slot with that name.
+    #[test]
+    fn p1_query_carries_expected_live_slots() {
+        let mut names: std::collections::HashMap<usize, String> = Default::default();
+        let mut live = std::collections::HashSet::new();
+        let mut queries = 0;
+        for op in plan_p1(11, 3000) {
+            match op.kind {
+                OpKind::Create => {
+                    let slot = op.slot.unwrap();
+                    let p = op.payload.as_deref().unwrap();
+                    let name = p["{name: \"".len()..]
+                        .split('"')
+                        .next()
+                        .unwrap()
+                        .to_string();
+                    names.insert(slot, name);
+                    live.insert(slot);
+                }
+                OpKind::Delete => {
+                    live.remove(&op.slot.unwrap());
+                }
+                OpKind::Query => {
+                    queries += 1;
+                    let name = op.payload.as_deref().expect("SE query payload is the name");
+                    let mut want: Vec<usize> =
+                        live.iter().copied().filter(|s| names[s] == name).collect();
+                    want.sort();
+                    let mut got = op.expect_slots.clone();
+                    got.sort();
+                    assert_eq!(got, want, "op {}", op.index);
+                    assert!(!got.is_empty());
+                }
+                OpKind::Update => {}
+            }
+        }
+        assert!(queries > 50, "profile must exercise SE queries");
+    }
+
+    #[test]
+    fn p1_names_come_from_a_small_pool() {
+        let names: std::collections::HashSet<String> = plan_p1(3, 2000)
+            .into_iter()
+            .filter(|o| o.kind == OpKind::Create)
+            .map(|o| {
+                o.payload.unwrap()["{name: \"".len()..]
+                    .split('"')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert!(names.len() <= NAME_POOL && names.len() > 10);
+    }
+
+    #[test]
+    fn create_nodes_restricts_creates_only() {
+        let mut p = Profile::p1_encrypted();
+        p.create_nodes = Some(vec![0, 1]);
+        let ops: Vec<PlannedOp> = Generator::new(21, p, 4).take(2000).collect();
+        assert!(ops
+            .iter()
+            .filter(|o| o.kind == OpKind::Create)
+            .all(|o| o.node < 2));
+        assert!(
+            ops.iter().any(|o| o.kind != OpKind::Create && o.node >= 2),
+            "other ops still reach Go nodes"
+        );
+    }
+
+    #[test]
+    fn create_nodes_absent_keeps_p0_frozen_and_loads_old_json() {
+        let old = r#"{"name":"p0-crud","create":30,"update":40,"delete":5,"query":25,
+                      "doc_bytes":1200,"rate":5.0,"collection":"Users"}"#;
+        let p: Profile = serde_json::from_str(old).unwrap();
+        assert_eq!(p.create_nodes, None);
     }
 }
