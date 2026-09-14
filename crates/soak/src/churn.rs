@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::executor::{gql, now_ms};
+use crate::meter::Meter;
 
 /// Stream derivation constant for the topology axis.
 const TOPO_AXIS: u64 = 0x7090_10c4_0000_0002;
@@ -115,7 +116,8 @@ pub fn virtual_ms(op_index: u64, rate: f64) -> u64 {
 }
 
 /// Fires `events` on virtual time until `stop`, then hands the cluster back
-/// with every node up. Each down/up phase appends a line to the log.
+/// with every node up. Each down/up phase appends a line to the log. The
+/// meter samples from here too, since this task holds the cluster.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut cluster: TestCluster,
@@ -125,6 +127,7 @@ pub async fn run(
     op_index: Arc<AtomicU64>,
     transitions: mpsc::UnboundedSender<Transition>,
     log_path: PathBuf,
+    mut meter: Meter,
     mut stop: oneshot::Receiver<()>,
 ) -> Result<TestCluster> {
     let mut log = BufWriter::new(
@@ -133,6 +136,7 @@ pub async fn run(
     let http = reqwest::Client::new();
     let mut pending = events.into_iter().peekable();
     loop {
+        meter.maybe_sample(&cluster)?;
         let vnow = virtual_ms(op_index.load(Ordering::Relaxed), rate);
         if pending.peek().is_some_and(|e| e.virtual_ts_ms <= vnow) {
             let event = pending.next().expect("peeked");
@@ -151,7 +155,10 @@ pub async fn run(
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(250)) => {}
-            _ = &mut stop => return Ok(cluster),
+            _ = &mut stop => {
+                meter.sample(&cluster)?;
+                return Ok(cluster);
+            }
         }
     }
 }

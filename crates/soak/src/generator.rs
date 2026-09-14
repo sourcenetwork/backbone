@@ -24,9 +24,6 @@ pub struct Profile {
     /// Ops per second on the virtual schedule.
     pub rate: f64,
     pub collection: String,
-    /// Floats are generated with fewer significant digits than this; the
-    /// roundtrip collapse above 15 digits is a known runtime asymmetry.
-    pub float_precision_cap: u8,
 }
 
 impl Profile {
@@ -41,7 +38,6 @@ impl Profile {
             doc_bytes: 1200,
             rate: 20.0,
             collection: "Users".into(),
-            float_precision_cap: 15,
         }
     }
 }
@@ -151,7 +147,8 @@ impl Generator {
             .collect()
     }
 
-    /// At most 8 significant digits, under `float_precision_cap`.
+    /// At most 8 significant digits, under the 15-digit float roundtrip
+    /// ceiling (a known runtime asymmetry).
     fn score(&mut self) -> String {
         format!("{:.2}", self.rng.gen_range(0..1_000_000) as f64 / 100.0)
     }

@@ -86,23 +86,47 @@ impl Executor {
 
         let mut doc_id = victim;
         let (ok, error) = match outcome {
-            Ok(data) if op.kind == OpKind::Create => {
-                // Both runtimes answer `add_X` with a list; tolerate an object.
-                let added = &data[format!("add_{col}")];
-                let first = added.as_array().and_then(|a| a.first()).unwrap_or(added);
-                doc_id = first["_docID"].as_str().map(String::from);
-                match (&doc_id, op.slot) {
-                    (Some(id), Some(slot)) => {
-                        if self.slots.len() <= slot {
-                            self.slots.resize(slot + 1, None);
+            Ok(data) => match op.kind {
+                OpKind::Create => {
+                    // Both runtimes answer `add_X` with a list; tolerate an object.
+                    let added = &data[format!("add_{col}")];
+                    let first = added.as_array().and_then(|a| a.first()).unwrap_or(added);
+                    doc_id = first["_docID"].as_str().map(String::from);
+                    match (&doc_id, op.slot) {
+                        (Some(id), Some(slot)) => {
+                            if self.slots.len() <= slot {
+                                self.slots.resize(slot + 1, None);
+                            }
+                            self.slots[slot] = Some(id.clone());
+                            (true, None)
                         }
-                        self.slots[slot] = Some(id.clone());
-                        (true, None)
+                        _ => (false, Some("create returned no _docID".to_string())),
                     }
-                    _ => (false, Some("create returned no _docID".to_string())),
                 }
-            }
-            Ok(_) => (true, None),
+                // A docID the node does not hold yet (replication lag) is
+                // not an error to either runtime: the reply is just empty.
+                OpKind::Update | OpKind::Delete => {
+                    let verb = if op.kind == OpKind::Update {
+                        "update"
+                    } else {
+                        "delete"
+                    };
+                    let matched = match &data[format!("{verb}_{col}")] {
+                        Value::Array(a) => a.len(),
+                        Value::Object(_) => 1,
+                        _ => 0,
+                    };
+                    if matched > 0 {
+                        (true, None)
+                    } else {
+                        (
+                            false,
+                            Some("no doc matched on this node (not replicated yet?)".to_string()),
+                        )
+                    }
+                }
+                OpKind::Query => (true, None),
+            },
             Err(e) => (false, Some(e)),
         };
 

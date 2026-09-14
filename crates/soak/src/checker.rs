@@ -30,6 +30,20 @@ use crate::executor::{gql, now_ms};
 /// A confirmed mismatch: key, detail, checks it persisted across.
 type Confirmed = (Key, Value, u32);
 
+/// A doc the workload just wrote; feeds M3 scoping and, for creates, the
+/// convergence-lag samples.
+#[derive(Debug)]
+pub struct Touch {
+    pub doc_id: String,
+    pub node: String,
+    pub wall_ts_ms: u64,
+    pub create: bool,
+}
+
+/// Forget a create still unseen on the other side after this long; by then
+/// it is a divergence, not a lag sample.
+const LAG_TTL_MS: u64 = 900_000;
+
 pub struct CheckerConfig {
     pub interval: Duration,
     /// A mismatch younger than this is "sync in flight", never a divergence.
@@ -97,6 +111,12 @@ pub struct Checker {
     divergences: BufWriter<File>,
     /// Every mismatch of the final sweep, confirmed or not.
     final_sweep: BufWriter<File>,
+    /// Creates not yet seen on the other side: doc -> (origin side, wall ms).
+    awaiting: HashMap<String, (usize, u64)>,
+    /// Node down/up transitions since the last clear check, for the
+    /// record's event window.
+    window_events: Vec<Value>,
+    lag: BufWriter<File>,
     summary: Summary,
 }
 
@@ -133,6 +153,9 @@ impl Checker {
             checks: open("checks.jsonl")?,
             divergences: open("divergences.jsonl")?,
             final_sweep: open("final_sweep.jsonl")?,
+            awaiting: HashMap::new(),
+            window_events: Vec::new(),
+            lag: open("lag.jsonl")?,
             summary: Summary::default(),
         })
     }
@@ -142,7 +165,7 @@ impl Checker {
     /// check; `transitions` feeds node down/up events from the churner.
     pub async fn run(
         mut self,
-        mut touched: mpsc::UnboundedReceiver<String>,
+        mut touched: mpsc::UnboundedReceiver<Touch>,
         mut transitions: mpsc::UnboundedReceiver<Transition>,
         mut stop: oneshot::Receiver<()>,
     ) -> Result<Summary> {
@@ -152,8 +175,8 @@ impl Checker {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    while let Ok(id) = touched.try_recv() {
-                        recent.insert(id);
+                    while let Ok(t) = touched.try_recv() {
+                        self.note(t, &mut recent);
                     }
                     self.check(std::mem::take(&mut recent), &mut transitions, false)
                         .await?;
@@ -163,8 +186,8 @@ impl Checker {
                     // the budget runs out, then sweep everything.
                     let deadline = Instant::now() + self.cfg.settle;
                     loop {
-                        while let Ok(id) = touched.try_recv() {
-                            recent.insert(id);
+                        while let Ok(t) = touched.try_recv() {
+                            self.note(t, &mut recent);
                         }
                         let (clear, eligible) = self
                             .check(std::mem::take(&mut recent), &mut transitions, false)
@@ -180,6 +203,15 @@ impl Checker {
                 }
             }
         }
+    }
+
+    fn note(&mut self, t: Touch, recent: &mut HashSet<String>) {
+        if t.create {
+            if let Some(side) = self.pair.iter().position(|(n, _)| *n == t.node) {
+                self.awaiting.insert(t.doc_id.clone(), (side, t.wall_ts_ms));
+            }
+        }
+        recent.insert(t.doc_id);
     }
 
     /// One check; returns (clear, eligible). `Err` only for log I/O; an
@@ -200,6 +232,10 @@ impl Checker {
             } else {
                 self.down.insert(t.node);
             }
+            let node = self.pair.get(t.node).map(|(n, _)| n.as_str());
+            self.window_events.push(json!({
+                "node": node, "up": t.up, "wall_ts_ms": now_ms(),
+            }));
         }
         let eligible = self.down.is_empty() && now >= self.eligible_at;
         let op_index = self.op_index.load(Ordering::Relaxed);
@@ -229,7 +265,12 @@ impl Checker {
                     self.final_sweep.flush()?;
                 }
                 let (status, confirmed) = if n == 0 {
+                    // Tell the confirmer everything cleared: consecutive
+                    // means consecutive, and emitted entries stop counting
+                    // as unresolved.
+                    self.confirmer.observe::<Value>(now, Vec::new());
                     self.last_clear_op = op_index;
+                    self.window_events.clear();
                     clear = true;
                     ("clear", 0)
                 } else if !eligible {
@@ -263,6 +304,7 @@ impl Checker {
         let mut m3_docs = 0;
         for col in self.collections.clone() {
             let ids = [self.doc_ids(0, &col).await?, self.doc_ids(1, &col).await?];
+            self.sample_lag(&ids)?;
             for side in 0..2 {
                 for id in ids[side].difference(&ids[1 - side]) {
                     let missing_on = &self.pair[1 - side].0;
@@ -324,7 +366,7 @@ impl Checker {
                 "details": items.iter().map(|i| &i.1).collect::<Vec<_>>(),
                 "event_window": {
                     "op_index": [self.last_clear_op, op_index],
-                    "topology_events": [],
+                    "topology_events": self.window_events,
                 },
                 "tags": tags(),
                 "confirmations": items.iter().map(|i| i.2).max().unwrap_or(0),
@@ -340,6 +382,35 @@ impl Checker {
                 op_index
             );
         }
+        Ok(())
+    }
+
+    /// Creates now visible on the other side become lag samples; the
+    /// resolution is the check interval.
+    fn sample_lag(&mut self, ids: &[HashSet<String>; 2]) -> Result<()> {
+        let now = now_ms();
+        let op_index = self.op_index.load(Ordering::Relaxed);
+        let pair = &self.pair;
+        let mut lines = Vec::new();
+        self.awaiting.retain(|doc, (side, created)| {
+            if !ids[*side].contains(doc) {
+                return now.saturating_sub(*created) < LAG_TTL_MS;
+            }
+            if !ids[1 - *side].contains(doc) {
+                return true;
+            }
+            lines.push(json!({
+                "wall_ts_ms": now, "op_index": op_index, "doc_id": doc,
+                "from": pair[*side].0, "to": pair[1 - *side].0,
+                "lag_ms": now.saturating_sub(*created),
+            }));
+            false
+        });
+        for line in lines {
+            serde_json::to_writer(&mut self.lag, &line)?;
+            self.lag.write_all(b"\n")?;
+        }
+        self.lag.flush()?;
         Ok(())
     }
 
