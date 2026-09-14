@@ -8,7 +8,7 @@
 //! soak run [--seed N] [--ops N] [--secs S] [--rate OPS_PER_SEC] [--control]
 //!          [--churn [--churn-spacing SECS]] [--grace SECS] [--settle SECS]
 //!          [--ceiling-mb MB] [--floor-rate R] [--meter-secs S]
-//!          [--until-op N] [--hold]
+//!          [--retry-intervals 5,10,20,40] [--until-op N] [--hold]
 //! soak replay --manifest <run>/manifest.json [--until-op N] [--hold]
 //!             [--grace SECS] [--settle SECS]
 //! soak summarize <run dir>
@@ -23,7 +23,10 @@
 //! crash-kill schedule. `replay` rebuilds a run from its manifest: same
 //! seed, profile, executed op count and churn schedule, no disk budget;
 //! `--until-op` stops the workload early and `--hold` keeps the mesh up for
-//! inspection until Enter. `compare` checks two runs against the replay
+//! inspection until Enter. `--retry-intervals` sets both runtimes'
+//! `--replicator-retry-intervals` (default ladder 30,60,120,240,480,960,1920
+//! s) and is recorded in the manifest, since it changes the system under
+//! test. `compare` checks two runs against the replay
 //! contract: planned op fields and the churn schedule, plus docIDs where
 //! both runs have one; outcomes and timing are not part of it.
 
@@ -77,6 +80,8 @@ struct RunArgs {
     until_op: Option<u64>,
     hold: bool,
     replay_of: Option<String>,
+    /// Comma-separated seconds for both nodes' replicator retry ladder.
+    retry_intervals: Option<String>,
 }
 
 impl RunArgs {
@@ -110,6 +115,7 @@ impl RunArgs {
             until_op: opt_flag("until-op")?,
             hold: has_flag("hold"),
             replay_of: None,
+            retry_intervals: flag("retry-intervals"),
         })
     }
 
@@ -151,6 +157,7 @@ impl RunArgs {
             until_op: opt_flag("until-op")?.or_else(|| m["ops_executed"].as_u64()),
             hold: has_flag("hold"),
             replay_of: m["run_id"].as_str().map(String::from),
+            retry_intervals: caps["retry_intervals"].as_str().map(String::from),
         })
     }
 }
@@ -222,7 +229,7 @@ fn main() -> Result<()> {
 }
 
 async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
-    let cluster = TestCluster::builder()
+    let mut builder = TestCluster::builder()
         .rust_nodes(1)
         .go_nodes(1)
         .with_p2p()
@@ -232,7 +239,13 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
         // never reconnects.
         .with_file_keyring()
         .with_node_store(RUST, STORES[RUST])
-        .with_node_store(GO, STORES[GO])
+        .with_node_store(GO, STORES[GO]);
+    if let Some(intervals) = &a.retry_intervals {
+        let flag = ["--replicator-retry-intervals", intervals.as_str()];
+        builder = builder.with_extra_rust_args(flag).with_extra_go_args(flag);
+        println!("replicator retry intervals on both nodes: {intervals}s");
+    }
+    let cluster = builder
         .build()
         .await
         .wrap_err("building the mixed cluster")?;
@@ -309,6 +322,7 @@ async fn run(run_dir: &Path, a: RunArgs) -> Result<()> {
             "ceiling_bytes": a.ceiling_bytes, "floor_rate": a.floor_rate,
             "meter_secs": a.meter_interval.as_secs(), "grace_secs": a.grace.as_secs(),
             "settle_secs": a.settle.as_secs(), "until_op": a.until_op,
+            "retry_intervals": a.retry_intervals,
         },
         "started_wall_ts_ms": now_ms(),
     });

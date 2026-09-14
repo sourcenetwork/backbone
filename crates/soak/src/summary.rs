@@ -114,6 +114,11 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
             longest_outage_ms = longest_outage_ms.max(t["duration_ms"].as_u64().unwrap_or(0));
         }
     }
+    let causes = classify_final_sweep(
+        &read_jsonl(&run_dir.join("final_sweep.jsonl")),
+        &ops,
+        &topology,
+    );
     let stores: HashMap<String, String> = manifest["nodes"]
         .as_array()
         .into_iter()
@@ -141,6 +146,7 @@ pub fn write_profile(run_dir: &Path) -> Result<Value> {
         "divergence_records": divergences.len(),
         "diverged_docs": diverged_docs,
         "final_sweep": final_check.map(|c| json!({"mismatches": c["mismatches"], "eligible": c["eligible"]})),
+        "final_sweep_causes": causes,
         "churn": {"events": churn_kinds, "longest_outage_ms": longest_outage_ms},
     });
     fs::write(
@@ -214,6 +220,15 @@ fn render(p: &Value, manifest: &Value) -> String {
         "\n## checks: {}; divergence records {} ({} docs); final sweep {}\n",
         p["checks"], p["divergence_records"], p["diverged_docs"], p["final_sweep"]
     );
+    if let Some(causes) = p["final_sweep_causes"]
+        .as_object()
+        .filter(|c| !c.is_empty())
+    {
+        out += "\n## final sweep mismatches by likely cause (last write on the doc vs the peer's outage windows)\n\n";
+        for (cause, n) in causes {
+            out += &format!("- {n} {cause}\n");
+        }
+    }
     out += &format!(
         "\n## churn: {} events, longest outage {:.1}s\n",
         p["churn"]["events"],
@@ -269,4 +284,85 @@ pub fn compare(a: &Path, b: &Path) -> Result<Value> {
                 "doc_ids_agree": doc_ids_agree, "doc_ids_differ": doc_ids_differ},
         "churn_schedule_identical": sched_a == sched_b,
     }))
+}
+
+/// Writes this soon after either node came back count as made during the
+/// recovery: the node answers GraphQL before its replicator link is back.
+const RECOVERY_WINDOW_MS: u64 = 30_000;
+
+/// For each final-sweep mismatch: what was the last successful write to
+/// that doc, and was the other node down, or either node freshly recovered,
+/// at that moment? Counts by
+/// `"<mechanism> missing_on=<node>: last <kind> on <node> while <state>"`.
+fn classify_final_sweep(
+    sweep: &[Value],
+    ops: &[Value],
+    topology: &[Value],
+) -> BTreeMap<String, u64> {
+    // Down windows per node: (start wall ms, end wall ms, kind).
+    let mut ups: HashMap<u64, u64> = HashMap::new();
+    for t in topology {
+        if s(t, "phase") == "up" {
+            ups.insert(
+                t["event"].as_u64().unwrap_or(0),
+                t["wall_ts_ms"].as_u64().unwrap_or(0),
+            );
+        }
+    }
+    let windows: Vec<(String, u64, u64, String)> = topology
+        .iter()
+        .filter(|t| s(t, "phase") == "down")
+        .map(|t| {
+            let ev = t["event"].as_u64().unwrap_or(0);
+            (
+                s(t, "node").to_string(),
+                t["wall_ts_ms"].as_u64().unwrap_or(0),
+                ups.get(&ev).copied().unwrap_or(u64::MAX),
+                s(t, "kind").to_string(),
+            )
+        })
+        .collect();
+    let mut last_write: HashMap<&str, &Value> = HashMap::new();
+    for op in ops {
+        if op["ok"].as_bool() == Some(true) && s(op, "kind") != "query" {
+            if let Some(id) = op["doc_id"].as_str() {
+                last_write.insert(id, op);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    for f in sweep {
+        let mech = s(f, "mechanism");
+        let missing_on = f["detail"]["missing_on"].as_str().unwrap_or("-");
+        let label = match last_write.get(s(f, "doc_id")) {
+            None => format!("{mech} missing_on={missing_on}: no successful write on record"),
+            Some(op) => {
+                let node = s(op, "node");
+                let wall = op["wall_ts_ms"].as_u64().unwrap_or(0);
+                let state = if let Some((_, _, _, kind)) = windows
+                    .iter()
+                    .find(|(n, a, b, _)| n != node && *a <= wall && wall <= *b)
+                {
+                    format!("peer {kind}")
+                } else if let Some((n, _, _, _)) = windows
+                    .iter()
+                    .find(|(_, _, b, _)| *b <= wall && wall - *b <= RECOVERY_WINDOW_MS)
+                {
+                    if n == node {
+                        "writer recovering (<30s up)".to_string()
+                    } else {
+                        "peer recovering (<30s up)".to_string()
+                    }
+                } else {
+                    "both up".to_string()
+                };
+                format!(
+                    "{mech} missing_on={missing_on}: last {} on {node} while {state}",
+                    s(op, "kind")
+                )
+            }
+        };
+        *out.entry(label).or_default() += 1;
+    }
+    out
 }

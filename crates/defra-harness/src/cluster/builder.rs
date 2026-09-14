@@ -72,6 +72,7 @@ pub struct TestClusterBuilder {
     acp_receipt_timeout: Option<u64>,
     signing_multiplier_opt_out: bool,
     extra_rust_args: Vec<String>,
+    extra_go_args: Vec<String>,
 }
 
 impl Default for TestClusterBuilder {
@@ -111,6 +112,7 @@ impl TestClusterBuilder {
             acp_receipt_timeout: None,
             signing_multiplier_opt_out: false,
             extra_rust_args: Vec::new(),
+            extra_go_args: Vec::new(),
         }
     }
 
@@ -132,6 +134,17 @@ impl TestClusterBuilder {
     {
         self.extra_rust_args
             .extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// Extra flags appended to every Go node's `start` command, after the
+    /// managed flags (same contract as `with_extra_rust_args`).
+    pub fn with_extra_go_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.extra_go_args.extend(args.into_iter().map(Into::into));
         self
     }
 
@@ -598,7 +611,7 @@ impl TestClusterBuilder {
                 acp_circuit_breaker_reset_timeout: self.acp_circuit_breaker_reset_timeout,
                 acp_request_timeout: self.acp_request_timeout,
                 acp_receipt_timeout: self.acp_receipt_timeout,
-                extra_args: Vec::new(),
+                extra_args: self.extra_go_args.clone(),
             };
 
             let mut attempt = 1;
