@@ -5,25 +5,36 @@
 //! run artifact under `runs/<unix-secs>-<seed>/`.
 //!
 //! ```text
-//! soak [--seed N] [--ops N] [--rate OPS_PER_SEC]
+//! soak [--seed N] [--ops N] [--rate OPS_PER_SEC] [--settle SECS] [--control]
 //! ```
+//! `--control` adds a `Control` collection replicated Rust -> Go only and
+//! writes to the Go side, so the checker must report M1 and M3 divergences
+//! on it (the positive control).
 //! Env: `DEFRA_RUST_BINARY` (built `defra`), Go `defradb` on PATH with
 //! `DEFRA_GO_COMPAT_COMMIT` set.
 
+mod checker;
+mod confirm;
 mod executor;
 mod generator;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use defra_harness::{extract_p2p_addr, TestCluster};
 use eyre::{Result, WrapErr};
 use serde_json::json;
+use tokio::sync::{mpsc, oneshot};
 
+use checker::{Checker, CheckerConfig};
 use executor::{gql, Executor};
 use generator::{Generator, Profile};
 
 const SCHEMA: &str = "type Users { name: String age: Int score: Float blob: String }";
+const CONTROL: &str = "Control";
+const CONTROL_SCHEMA: &str = "type Control { v: Int }";
 const RUST: usize = 0;
 const GO: usize = 1;
 /// Durable store per node index; the Rust cli has no other durable engine
@@ -51,11 +62,31 @@ fn main() -> Result<()> {
     // artifact holds the node data and logs. Set before any thread exists.
     std::env::set_var("DEFRA_WORKSPACE_ROOT", &run_dir);
     std::env::set_var("DEFRA_E2E_KEEP", "1");
+    let control = std::env::args().any(|a| a == "--control");
+    let mut checker_cfg = CheckerConfig::default();
+    if let Some(secs) = flag("settle") {
+        checker_cfg.settle =
+            Duration::from_secs(secs.parse().wrap_err("--settle must be seconds")?);
+    }
     println!("run dir: {}  seed: {seed}  ops: {ops}", run_dir.display());
-    tokio::runtime::Runtime::new()?.block_on(run(&run_dir, seed, profile, ops))
+    tokio::runtime::Runtime::new()?.block_on(run(
+        &run_dir,
+        seed,
+        profile,
+        ops,
+        control,
+        checker_cfg,
+    ))
 }
 
-async fn run(run_dir: &Path, seed: u64, profile: Profile, ops: usize) -> Result<()> {
+async fn run(
+    run_dir: &Path,
+    seed: u64,
+    profile: Profile,
+    ops: usize,
+    control: bool,
+    checker_cfg: CheckerConfig,
+) -> Result<()> {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .go_nodes(1)
@@ -75,6 +106,11 @@ async fn run(run_dir: &Path, seed: u64, profile: Profile, ops: usize) -> Result<
     }
     wire_bidirectional(&cluster, &profile.collection)?;
     preflight(&cluster, &profile.collection).await?;
+    let mut collections = vec![profile.collection.clone()];
+    if control {
+        wire_control(&cluster).await?;
+        collections.push(CONTROL.to_string());
+    }
 
     let nodes: Vec<(String, String)> = (0..cluster.len())
         .map(|i| {
@@ -99,6 +135,24 @@ async fn run(run_dir: &Path, seed: u64, profile: Profile, ops: usize) -> Result<
         serde_json::to_string_pretty(&manifest)?,
     )?;
 
+    let op_index = Arc::new(AtomicU64::new(0));
+    let (touched_tx, touched_rx) = mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let run_id = run_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let checker = Checker::new(
+        [nodes[RUST].clone(), nodes[GO].clone()],
+        collections,
+        checker_cfg,
+        seed,
+        run_id,
+        Arc::clone(&op_index),
+        run_dir,
+    )?;
+    let checker_task = tokio::spawn(checker.run(touched_rx, stop_rx));
+
     let mut generator = Generator::new(seed, profile.clone(), nodes.len());
     let mut executor = Executor::new(nodes, &profile.collection, &run_dir.join("ops.jsonl"))?;
     let mut tick = tokio::time::interval(Duration::from_secs_f64(1.0 / profile.rate));
@@ -107,8 +161,12 @@ async fn run(run_dir: &Path, seed: u64, profile: Profile, ops: usize) -> Result<
     for op in generator.by_ref().take(ops) {
         tick.tick().await;
         let record = executor.execute(&op).await?;
+        op_index.store(op.index + 1, Ordering::Relaxed);
         if record.ok {
             ok += 1;
+            if let Some(id) = &record.doc_id {
+                let _ = touched_tx.send(id.clone());
+            }
         } else {
             failed += 1;
             println!(
@@ -125,6 +183,56 @@ async fn run(run_dir: &Path, seed: u64, profile: Profile, ops: usize) -> Result<
         ops as f64 / started.elapsed().as_secs_f64(),
         started.elapsed().as_secs_f64()
     );
+    let _ = stop_tx.send(());
+    let summary = checker_task.await?.wrap_err("checker")?;
+    println!(
+        "checks: {} ({} unreachable), divergence records: {}, still present at final sweep: {}",
+        summary.checks, summary.unreachable, summary.divergences, summary.unresolved
+    );
+    Ok(())
+}
+
+/// Positive control: `Control` replicates Rust -> Go only. A doc created on
+/// Go never reaches Rust (M1), and a Rust-created doc updated on Go has
+/// different heads on the two sides (M3).
+async fn wire_control(cluster: &TestCluster) -> Result<()> {
+    for i in [RUST, GO] {
+        cluster.client(i).schema_add(CONTROL_SCHEMA)?;
+    }
+    let go_addr = extract_p2p_addr(cluster, GO);
+    cluster
+        .client(RUST)
+        .p2p_replicator_set(&[CONTROL], &go_addr)?;
+    let http = reqwest::Client::new();
+    let go_url = cluster.api_url(GO);
+    let rust_url = cluster.api_url(RUST);
+    let create = |v: u32| format!("mutation {{ add_{CONTROL}(input: [{{v: {v}}}]) {{ _docID }} }}");
+    gql(&http, go_url, &create(1))
+        .await
+        .map_err(eyre::Report::msg)?;
+    let data = gql(&http, rust_url, &create(2))
+        .await
+        .map_err(eyre::Report::msg)?;
+    let id = data[format!("add_{CONTROL}")][0]["_docID"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("control create returned no _docID"))?
+        .to_string();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let seen = format!("{{ {CONTROL}(docID: \"{id}\") {{ _docID }} }}");
+    loop {
+        let data = gql(&http, go_url, &seen).await.map_err(eyre::Report::msg)?;
+        if data[CONTROL].as_array().map_or(0, Vec::len) == 1 {
+            break;
+        }
+        eyre::ensure!(Instant::now() < deadline, "control doc did not reach go-0");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let update =
+        format!("mutation {{ update_{CONTROL}(docID: \"{id}\", input: {{v: 3}}) {{ _docID }} }}");
+    gql(&http, go_url, &update)
+        .await
+        .map_err(eyre::Report::msg)?;
+    println!("control wired: M1 doc on go-0 only, M3 doc {id} updated on go-0 only");
     Ok(())
 }
 

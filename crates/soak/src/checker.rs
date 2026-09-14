@@ -1,0 +1,337 @@
+//! Convergence checker for one node pair.
+//!
+//! Every check: M1 docID-set diff over each collection (one POST per node),
+//! then M3 head-CID diff (`_commits(docID, depth: 1)`, alias-batched) over
+//! the docs touched since the last check plus a cold sample; the shutdown
+//! check sweeps M3 over every shared doc. Mismatches pass through
+//! [`Confirmer`] before they become records in `divergences.jsonl`; every
+//! check appends a line to `checks.jsonl`.
+//!
+//! ponytail: the M1 sweep is O(docs) per check, fine at M0 scale (<100k
+//! docs); add recent-window scoping for M1 when a sweep exceeds ~1s.
+
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use eyre::{eyre, Result, WrapErr};
+use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
+use serde_json::{json, Value};
+use tokio::sync::{mpsc, oneshot};
+
+use crate::confirm::{Confirmer, Key};
+use crate::executor::{gql, now_ms};
+
+/// A confirmed mismatch: key, detail, checks it persisted across.
+type Confirmed = (Key, Value, u32);
+
+pub struct CheckerConfig {
+    pub interval: Duration,
+    /// A mismatch younger than this is "sync in flight", never a divergence.
+    pub grace: Duration,
+    pub confirmations: u32,
+    /// Untouched shared docs to head-check per interval check.
+    pub cold_sample: usize,
+    /// `_commits` aliases per POST.
+    pub batch: usize,
+    /// After the workload stops, keep checking this long for a clear check
+    /// before the final sweep, so in-flight sync is not read as divergence.
+    pub settle: Duration,
+}
+
+impl Default for CheckerConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(10),
+            grace: Duration::from_secs(15),
+            confirmations: 3,
+            cold_sample: 50,
+            batch: 100,
+            settle: Duration::from_secs(120),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Summary {
+    pub checks: u64,
+    pub unreachable: u64,
+    /// Divergence records written.
+    pub divergences: u64,
+    /// Confirmed mismatches still present at the final sweep.
+    pub unresolved: usize,
+}
+
+pub struct Checker {
+    http: reqwest::Client,
+    /// (name, api_url) of side 0 and side 1.
+    pair: [(String, String); 2],
+    collections: Vec<String>,
+    cfg: CheckerConfig,
+    rng: StdRng,
+    confirmer: Confirmer,
+    run_id: String,
+    seed: u64,
+    /// Ops issued so far, kept current by the driver.
+    op_index: Arc<AtomicU64>,
+    /// Op index at the last check with zero mismatches; the record's
+    /// event window starts here.
+    last_clear_op: u64,
+    checks: BufWriter<File>,
+    divergences: BufWriter<File>,
+    summary: Summary,
+}
+
+impl Checker {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        pair: [(String, String); 2],
+        collections: Vec<String>,
+        cfg: CheckerConfig,
+        seed: u64,
+        run_id: String,
+        op_index: Arc<AtomicU64>,
+        run_dir: &Path,
+    ) -> Result<Self> {
+        let open = |name: &str| -> Result<BufWriter<File>> {
+            let path = run_dir.join(name);
+            Ok(BufWriter::new(File::create(&path).wrap_err_with(|| {
+                format!("creating {}", path.display())
+            })?))
+        };
+        Ok(Self {
+            http: reqwest::Client::new(),
+            pair,
+            collections,
+            confirmer: Confirmer::new(cfg.confirmations, cfg.grace),
+            cfg,
+            rng: StdRng::seed_from_u64(seed),
+            run_id,
+            seed,
+            op_index,
+            last_clear_op: 0,
+            checks: open("checks.jsonl")?,
+            divergences: open("divergences.jsonl")?,
+            summary: Summary::default(),
+        })
+    }
+
+    /// Check every `interval` until `stop` fires, then settle and run the
+    /// full sweep. `touched` feeds docIDs the workload wrote since the last
+    /// check.
+    pub async fn run(
+        mut self,
+        mut touched: mpsc::UnboundedReceiver<String>,
+        mut stop: oneshot::Receiver<()>,
+    ) -> Result<Summary> {
+        let mut tick = tokio::time::interval(self.cfg.interval);
+        tick.tick().await; // the immediate first tick
+        let mut recent = HashSet::new();
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    while let Ok(id) = touched.try_recv() {
+                        recent.insert(id);
+                    }
+                    self.check(std::mem::take(&mut recent), false).await?;
+                }
+                _ = &mut stop => {
+                    let deadline = Instant::now() + self.cfg.settle;
+                    loop {
+                        while let Ok(id) = touched.try_recv() {
+                            recent.insert(id);
+                        }
+                        let clear = self.check(std::mem::take(&mut recent), false).await?;
+                        if clear || Instant::now() >= deadline {
+                            break;
+                        }
+                        tokio::time::sleep(self.cfg.interval).await;
+                    }
+                    self.check(HashSet::new(), true).await?;
+                    self.summary.unresolved = self.confirmer.unresolved();
+                    return Ok(self.summary);
+                }
+            }
+        }
+    }
+
+    /// One check; returns whether it was clear. `Err` only for log I/O; an
+    /// unreachable node is logged and leaves the confirmer untouched, so
+    /// pending mismatches survive it.
+    async fn check(&mut self, recent: HashSet<String>, full: bool) -> Result<bool> {
+        let now = Instant::now();
+        let op_index = self.op_index.load(Ordering::Relaxed);
+        let mut line = json!({
+            "wall_ts_ms": now_ms(), "op_index": op_index, "full": full,
+        });
+        self.summary.checks += 1;
+        let mut clear = false;
+        match self.compare(&recent, full).await {
+            Err(e) => {
+                self.summary.unreachable += 1;
+                line["status"] = json!("unreachable");
+                line["error"] = json!(e.to_string());
+            }
+            Ok((mismatches, m3_docs)) => {
+                let n = mismatches.len();
+                let confirmed = self.confirmer.observe(now, mismatches);
+                self.record(&confirmed, op_index)?;
+                if n == 0 {
+                    self.last_clear_op = op_index;
+                    clear = true;
+                }
+                line["status"] = json!(if n == 0 { "clear" } else { "mismatch" });
+                line["m3_docs"] = json!(m3_docs);
+                line["mismatches"] = json!(n);
+                line["pending"] = json!(self.confirmer.pending());
+                line["confirmed"] = json!(confirmed.len());
+            }
+        }
+        serde_json::to_writer(&mut self.checks, &line)?;
+        self.checks.write_all(b"\n")?;
+        self.checks.flush()?;
+        Ok(clear)
+    }
+
+    /// M1 + M3 over all collections. Returns the mismatches and how many
+    /// docs got a head check.
+    async fn compare(
+        &mut self,
+        recent: &HashSet<String>,
+        full: bool,
+    ) -> Result<(Vec<(Key, Value)>, usize)> {
+        let mut mismatches = Vec::new();
+        let mut m3_docs = 0;
+        for col in self.collections.clone() {
+            let ids = [self.doc_ids(0, &col).await?, self.doc_ids(1, &col).await?];
+            for side in 0..2 {
+                for id in ids[side].difference(&ids[1 - side]) {
+                    let missing_on = &self.pair[1 - side].0;
+                    mismatches.push((
+                        (col.clone(), "M1", id.clone()),
+                        json!({ "missing_on": missing_on }),
+                    ));
+                }
+            }
+            let shared: Vec<&String> = ids[0].intersection(&ids[1]).collect();
+            let targets: Vec<String> = if full {
+                shared.iter().map(|s| s.to_string()).collect()
+            } else {
+                let (hot, cold): (Vec<&String>, Vec<&String>) =
+                    shared.iter().partition(|id| recent.contains(**id));
+                hot.into_iter()
+                    .chain(
+                        cold.choose_multiple(&mut self.rng, self.cfg.cold_sample)
+                            .copied(),
+                    )
+                    .cloned()
+                    .collect()
+            };
+            m3_docs += targets.len();
+            for chunk in targets.chunks(self.cfg.batch) {
+                let heads = [self.heads(0, chunk).await?, self.heads(1, chunk).await?];
+                for id in chunk {
+                    if heads[0][id] != heads[1][id] {
+                        mismatches.push((
+                            (col.clone(), "M3", id.clone()),
+                            json!({ "heads_a": heads[0][id], "heads_b": heads[1][id] }),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok((mismatches, m3_docs))
+    }
+
+    /// One record per (collection, mechanism) confirmed in this check.
+    fn record(&mut self, confirmed: &[Confirmed], op_index: u64) -> Result<()> {
+        let mut groups: HashMap<(String, &'static str), Vec<&Confirmed>> = HashMap::new();
+        for c in confirmed {
+            groups.entry((c.0 .0.clone(), c.0 .1)).or_default().push(c);
+        }
+        let mut keys: Vec<_> = groups.keys().cloned().collect();
+        keys.sort();
+        for (col, mech) in keys {
+            let items = &groups[&(col.clone(), mech)];
+            let record = json!({
+                "run_id": self.run_id,
+                "seed": self.seed,
+                "detected_wall_ts_ms": now_ms(),
+                "detected_op_index": op_index,
+                "pair": [self.pair[0].0, self.pair[1].0],
+                "collection": col,
+                "mechanism": mech,
+                "doc_ids": items.iter().map(|i| &i.0 .2).collect::<Vec<_>>(),
+                "details": items.iter().map(|i| &i.1).collect::<Vec<_>>(),
+                "event_window": {
+                    "op_index": [self.last_clear_op, op_index],
+                    "topology_events": [],
+                },
+                "tags": tags(),
+                "confirmations": items.iter().map(|i| i.2).max().unwrap_or(0),
+            });
+            serde_json::to_writer(&mut self.divergences, &record)?;
+            self.divergences.write_all(b"\n")?;
+            self.divergences.flush()?;
+            self.summary.divergences += 1;
+            println!(
+                "DIVERGENCE {mech} {col}: {} doc(s), window ops {}..{}",
+                items.len(),
+                self.last_clear_op,
+                op_index
+            );
+        }
+        Ok(())
+    }
+
+    async fn doc_ids(&self, side: usize, col: &str) -> Result<HashSet<String>> {
+        let (name, url) = &self.pair[side];
+        let data = gql(&self.http, url, &format!("{{ {col} {{ _docID }} }}"))
+            .await
+            .map_err(|e| eyre!("{name}: docID sweep of {col}: {e}"))?;
+        Ok(data[col]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| d["_docID"].as_str().map(String::from))
+            .collect())
+    }
+
+    /// Sorted head CIDs per docID, one POST for the whole chunk.
+    async fn heads(&self, side: usize, ids: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        let (name, url) = &self.pair[side];
+        let selections: Vec<String> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| format!("d{i}: _commits(docID: \"{id}\", depth: 1) {{ cid }}"))
+            .collect();
+        let data = gql(&self.http, url, &format!("{{ {} }}", selections.join(" ")))
+            .await
+            .map_err(|e| eyre!("{name}: head query for {} docs: {e}", ids.len()))?;
+        Ok(ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let mut cids: Vec<String> = data[format!("d{i}")]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c["cid"].as_str().map(String::from))
+                    .collect();
+                cids.sort();
+                (id.clone(), cids)
+            })
+            .collect())
+    }
+}
+
+/// Known-issue tags for a divergence. The rules table arrives with the
+/// encryption surface (M3 of the roadmap); nothing in the P0 profile can
+/// match a known issue yet.
+fn tags() -> Vec<String> {
+    Vec::new()
+}
