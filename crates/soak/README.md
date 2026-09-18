@@ -326,10 +326,16 @@ on every node through `acp node relationship add`: `admin` (the `admin`
 relation), `operator` (`add-p2p-collection` and `list-p2p-replicator` only),
 `outsider` (nothing).
 
+`--transport iroh` runs the same table on the iroh transport; the binary
+`DEFRA_RUST_BINARY` names must then be built with `--features iroh`. The
+transport is recorded in `manifest.json`, `summary.json` and the `cases.md`
+heading, and the bounds cases size against the transport's request bound
+(`bounds.rs`).
+
 Cases live by group in `src/manage/{routing,authz,state,bounds,partition}.rs`,
 the table and runner in `cases.rs`; each restores what it changed. `--cases`
 selects by name in table order, default all but B3, which locates the
-libp2p request size bound by bisection and runs under `--locate-size-bound`
+transport's request size bound by bisection and runs under `--locate-size-bound`
 (or by name) on its own; a case whose topology requirement the mesh cannot
 host is skipped, not failed. Outcomes: `Pass`, `Fail { expected, got }`,
 `Skip { reason }`, `Infra { error }` (a harness fault, never a product
