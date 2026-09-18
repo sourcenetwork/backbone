@@ -2,7 +2,8 @@
 //! expectation; it speaks to the cluster only through [`Channel`], so the
 //! runner and every case run against a scripted fake in the unit tests.
 //! Each case restores what it changed. The cases live by group in
-//! `routing.rs`, `authz.rs`, `state.rs`, `bounds.rs` and `partition.rs`.
+//! `routing.rs`, `authz.rs`, `state.rs`, `bounds.rs`, `partition.rs` and
+//! `hybrid.rs`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -15,7 +16,7 @@ use serde_json::{json, Value};
 use super::actors::Actor;
 use super::client::Reply;
 use super::data::list_users;
-use super::{authz, bounds, partition, routing, state};
+use super::{authz, bounds, hybrid, partition, routing, state};
 use crate::Transport;
 
 pub const COLLECTION: &str = "User";
@@ -121,6 +122,11 @@ pub trait Channel {
         Vec::new()
     }
     fn take_notes(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Rows a case ran on the runner's behalf (H1); they precede its own.
+    fn embed(&mut self, _reports: Vec<CaseReport>) {}
+    fn take_embedded(&mut self) -> Vec<CaseReport> {
         Vec::new()
     }
 }
@@ -290,6 +296,11 @@ pub fn all() -> Vec<Case> {
             run: |ch| Box::pin(partition::c1(ch)),
         },
         Case {
+            name: "H1",
+            requires: two,
+            run: |ch| Box::pin(hybrid::h1(ch)),
+        },
+        Case {
             name: "B1",
             requires: two,
             run: |ch| Box::pin(bounds::b1(ch)),
@@ -408,6 +419,7 @@ pub async fn run_all(ch: &mut dyn Channel, cases: &[&Case], rust_nodes: usize) -
         };
         let notes = ch.take_notes();
         println!("case {}: {outcome:?} {}", case.name, notes.join("; "));
+        reports.extend(ch.take_embedded());
         reports.push(CaseReport {
             name: case.name,
             outcome,
@@ -527,6 +539,7 @@ pub(super) mod fake {
         pub partition: bool,
         pub transport: Transport,
         pub go: Vec<usize>,
+        pub embedded: Vec<CaseReport>,
     }
 
     impl Fake {
@@ -544,6 +557,7 @@ pub(super) mod fake {
                 partition: true,
                 transport: Transport::Libp2p,
                 go: Vec::new(),
+                embedded: Vec::new(),
             }
         }
     }
@@ -610,6 +624,12 @@ pub(super) mod fake {
         }
         fn take_notes(&mut self) -> Vec<String> {
             std::mem::take(&mut self.notes)
+        }
+        fn embed(&mut self, reports: Vec<CaseReport>) {
+            self.embedded.extend(reports);
+        }
+        fn take_embedded(&mut self) -> Vec<CaseReport> {
+            std::mem::take(&mut self.embedded)
         }
     }
 
@@ -796,7 +816,7 @@ mod tests {
             names(select(&table, None).unwrap()),
             [
                 "R1", "R2", "R3", "A1", "A2", "A3", "A4", "A5", "A6", "S1", "S2", "S3", "S4", "P1",
-                "C1", "B1", "B2", "B4"
+                "C1", "H1", "B1", "B2", "B4"
             ]
         );
         assert_eq!(names(select(&table, Some("S1, R2")).unwrap()), ["S1", "R2"]);

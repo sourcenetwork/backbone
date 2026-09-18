@@ -8,6 +8,7 @@ pub mod bounds;
 pub mod cases;
 pub mod client;
 pub mod data;
+pub mod hybrid;
 pub mod partition;
 pub mod report;
 pub mod routing;
@@ -24,7 +25,7 @@ use crate::auth::auth_token;
 use crate::nodes::{NodeKind, Nodes};
 use crate::{flag, has_flag, start_nodes, RunArgs, Topology, Transport};
 use actors::{Actor, Actors};
-use cases::{Channel, OpRecord, Verb};
+use cases::{CaseReport, Channel, OpRecord, Verb};
 
 /// `age` is immutable so a replication filter may use it (S3). Go has no
 /// `@immutable`; the directive does not enter the collection id, so a Go
@@ -139,6 +140,7 @@ async fn drive(
         actors,
         records: RefCell::default(),
         notes: Vec::new(),
+        embedded: Vec::new(),
     };
     let reports = cases::run_all(&mut live, selected, topology.rust).await;
     report::write(out, &topology.label(), transport.label(), &reports)?;
@@ -203,6 +205,7 @@ struct Live<'n> {
     actors: Actors,
     records: RefCell<Vec<OpRecord>>,
     notes: Vec<String>,
+    embedded: Vec<CaseReport>,
 }
 
 fn family_list(kind: &str) -> Option<&'static str> {
@@ -430,6 +433,14 @@ impl Channel for Live<'_> {
 
     fn take_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
+    }
+
+    fn embed(&mut self, reports: Vec<CaseReport>) {
+        self.embedded.extend(reports);
+    }
+
+    fn take_embedded(&mut self) -> Vec<CaseReport> {
+        std::mem::take(&mut self.embedded)
     }
 }
 

@@ -58,7 +58,7 @@ The nodes' data and logs are kept under the run directory (the driver points
 | `soak replay --manifest <run>/manifest.json [--until-op N] [--hold]` | Rebuilds a run from its manifest: same seed, profile, executed op count and churn schedule, no disk budget. `--until-op` stops the workload early; `--hold` keeps the mesh up until Enter, printing each node's GraphQL URL. |
 | `soak summarize <run dir>` | Rewrites `profile.json` / `profile.md` from the artifact and prints the markdown. |
 | `soak compare <run A> <run B>` | Checks two runs against the replay contract; exits non-zero if they differ. |
-| `soak manage --topology <n>r0g --out <dir> [--cases R2,A2,S1]` | Pass/fail cases on the P2P management channel, see "Management channel". |
+| `soak manage --topology <n>r<m>g --out <dir> [--cases R2,A2,S1]` | Pass/fail cases on the P2P management channel, see "Management channel". |
 
 `run` flags (all optional):
 
@@ -332,15 +332,26 @@ transport is recorded in `manifest.json`, `summary.json` and the `cases.md`
 heading, and the bounds cases size against the transport's request bound
 (`bounds.rs`).
 
-Cases live by group in `src/manage/{routing,authz,state,bounds,partition}.rs`,
-the table and runner in `cases.rs`; each restores what it changed. `--cases`
+A topology with Go nodes (`--topology 2r2g`, libp2p only: Go does not speak
+iroh) puts them in the same mesh as replication peers, under the same NAC
+setup and owner, with the schema minus `@immutable` (Go lacks the directive;
+it does not enter the collection id). Go has no manage protocol, so a Go
+node is never a relay or a target; the cases still address nodes `0..rust`.
+`H1` runs the cases two Rust nodes can host (R2, A1, A2, S1, S3, S4), each
+its own row, and its own row says whether every Go node converged on the
+source's documents after S3 and S4 and kept the replicator set the mesh gave
+it. Without Go nodes H1 skips. `manifest.json` records each node's runtime.
+
+Cases live by group in
+`src/manage/{routing,authz,state,bounds,partition,hybrid}.rs`, the table and
+runner in `cases.rs`; each restores what it changed. `--cases`
 runs the named cases in the order given; the default is every case but B3 in
 table order, with the bounds group last so a target they wedge cannot poison
 the rest. B3 locates the transport's request size bound by bisection and runs
 under `--locate-size-bound` (or by name) on its own. Before each case the
-runner sends the cheapest admin query to every node the case uses; a node
-that no longer answers makes the case `Infra`, naming the last case that used
-it. A case whose topology requirement the mesh cannot host is skipped, not
+runner sends the cheapest admin query to every node the case uses and to
+every Go node; a node that no longer answers makes the case `Infra`, naming
+the last case that used it. A case whose topology requirement the mesh cannot host is skipped, not
 failed. Outcomes: `Pass`, `Fail { expected, got }`, `Skip { reason }`,
 `Infra { error }` (a harness fault, never a product finding). `--out` receives `manifest.json` (nodes, peer ids, actors in
 cleartext like `run`), `summary.json` (per case: outcome, notes a case
