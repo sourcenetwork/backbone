@@ -86,7 +86,7 @@ pub(super) async fn r3(ch: &mut dyn Channel) -> Result<()> {
     let probe = ch.send(relay, target, Actor::Admin, list.clone()).await;
     ch.control(Verb::Start(target)).await?;
     let stopped = dial_check(probe, dial_budget_ms(ch.transport()));
-    ch.note(verdict("stopped target", &stopped));
+    ch.note(format!("stopped target: {}", verdict(&stopped)));
     let ready_ms = await_ready(ch, target).await?;
     let next = ch.send(relay, target, Actor::Admin, list).await;
     ch.control(Verb::Regrant(target)).await?;
@@ -96,17 +96,20 @@ pub(super) async fn r3(ch: &mut dyn Channel) -> Result<()> {
             200,
             "admin CollectionList via the relay after the target restarted",
         )
-        .map(|()| format!("ready after {ready_ms} ms; 200 on admin CollectionList via the relay"))
+        .map(|()| "200 on admin CollectionList via the relay".to_string())
     });
-    ch.note(verdict("restarted target", &restarted));
+    ch.note(format!(
+        "restarted target: ready after {ready_ms} ms; {}",
+        verdict(&restarted)
+    ));
     stopped?;
     restarted.map(drop)
 }
 
-fn verdict(half: &str, result: &Result<String>) -> String {
+fn verdict(result: &Result<String>) -> String {
     match result {
-        Ok(text) => format!("{half}: {text}"),
-        Err(e) => format!("{half}: FAIL {e:#}"),
+        Ok(text) => text.clone(),
+        Err(e) => format!("FAIL {e:#}"),
     }
 }
 
@@ -397,7 +400,7 @@ mod tests {
             notes,
             [
                 "stopped target: 400 after 9800 ms, within the 15000 ms dial budget",
-                "restarted target: FAIL expected 200 on admin CollectionList via the relay after the target restarted, got 403 null"
+                "restarted target: ready after 0 ms; FAIL expected 200 on admin CollectionList via the relay after the target restarted, got 403 null"
             ]
         );
         assert_eq!(
