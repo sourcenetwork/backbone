@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use super::actors::Actor;
 use super::client::Reply;
 use super::{authz, bounds, partition, routing, state};
+use crate::Transport;
 
 pub const COLLECTION: &str = "User";
 
@@ -74,6 +75,7 @@ pub enum Verb {
 /// Relay `op` through node `relay` to node `target` as `actor`.
 pub trait Channel {
     fn len(&self) -> usize;
+    fn transport(&self) -> Transport;
     fn addr(&self, node: usize) -> String;
     fn peer_id(&self, node: usize) -> String;
     /// `send` with the token minted for `audience` instead of the target.
@@ -448,6 +450,7 @@ pub(super) mod fake {
         pub verbs: Rc<RefCell<Vec<Verb>>>,
         pub notes: Vec<String>,
         pub partition: bool,
+        pub transport: Transport,
     }
 
     impl Fake {
@@ -460,6 +463,7 @@ pub(super) mod fake {
                 verbs: Rc::default(),
                 notes: Vec::new(),
                 partition: true,
+                transport: Transport::Libp2p,
             }
         }
     }
@@ -467,6 +471,9 @@ pub(super) mod fake {
     impl Channel for Fake {
         fn len(&self) -> usize {
             3
+        }
+        fn transport(&self) -> Transport {
+            self.transport
         }
         fn addr(&self, node: usize) -> String {
             format!("/ip4/127.0.0.1/tcp/{node}/p2p/peer{node}")

@@ -7,20 +7,50 @@ use serde_json::{json, Value};
 
 use super::actors::Actor;
 use super::cases::{expect_status, fail, Channel, Verb, COLLECTION};
+use crate::Transport;
 
 /// Wire bytes of one doc ref: a CBOR map of `Collection` "User" and a
 /// 40-character `DocID`. A request of `n` refs is `n * DOC_REF_BYTES`
 /// plus an 855-byte envelope (token, signature), well under `MARGIN`.
 const DOC_REF_BYTES: usize = 65;
 
-/// The request size bound per transport, in wire bytes. libp2p is what B3
-/// located on 2026-09-17: 258048 refs (16773977 B) land, 258112
-/// (16778137 B) are refused with "failed to write manage request:
-/// connection is closed" in 2 s, the target's `max_msg_size`. Iroh is
-/// `MAX_MANAGE_MSG_SIZE` (crates/p2p/src/iroh/protocols.rs:96).
-pub const LIBP2P_MAX_REQUEST: usize = 16 * 1024 * 1024;
-#[allow(dead_code)]
-pub const IROH_MAX_REQUEST: usize = 4 * 1024 * 1024;
+/// What the bounds cases size against, per transport.
+pub struct Bounds {
+    /// The request size bound, in wire bytes.
+    pub max_request: usize,
+    /// B4's request: big enough that the target is still applying it
+    /// `pause_after_ms` in, small enough that the target's document list
+    /// still fits a reply.
+    pub silent_request: usize,
+    pub pause_after_ms: u64,
+}
+
+/// libp2p is what B3 located on 2026-09-17: 258048 refs (16773977 B) land,
+/// 258112 (16778137 B) are refused with "failed to write manage request:
+/// connection is closed" in 2 s, the target's `max_msg_size`. B3 measured
+/// 12.5 MiB at 3.2 s round trip, so B4 pauses 1.5 s into 12 MiB.
+pub const LIBP2P: Bounds = Bounds {
+    max_request: 16 * 1024 * 1024,
+    silent_request: 12 * 1024 * 1024,
+    pause_after_ms: 1_500,
+};
+
+/// Iroh is `MAX_MANAGE_MSG_SIZE` (crates/p2p/src/iroh/protocols.rs:98).
+pub const IROH: Bounds = Bounds {
+    max_request: 4 * 1024 * 1024,
+    silent_request: 3 * 1024 * 1024,
+    pause_after_ms: 400,
+};
+
+const _: () = assert!(LIBP2P.silent_request < LIBP2P.max_request);
+const _: () = assert!(IROH.silent_request < IROH.max_request);
+
+pub fn for_transport(t: Transport) -> &'static Bounds {
+    match t {
+        Transport::Libp2p => &LIBP2P,
+        Transport::Iroh => &IROH,
+    }
+}
 
 /// How far under and over the bound B1 and B2 sit.
 const MARGIN: usize = 64 * 1024;
@@ -46,7 +76,7 @@ fn document_op(kind: &str, n: usize) -> Value {
 /// removed again.
 pub(super) async fn b1(ch: &mut dyn Channel) -> Result<()> {
     let (relay, target) = (0, 1);
-    let n = docs_for(LIBP2P_MAX_REQUEST - MARGIN);
+    let n = docs_for(for_transport(ch.transport()).max_request - MARGIN);
     let r = ch
         .send(relay, target, Actor::Admin, document_op("DocumentAdd", n))
         .await?;
@@ -67,7 +97,7 @@ pub(super) async fn b1(ch: &mut dyn Channel) -> Result<()> {
 /// so does the relay, for a third node.
 pub(super) async fn b2(ch: &mut dyn Channel) -> Result<()> {
     let (relay, target, other) = (0, 1, 2);
-    let n = docs_for(LIBP2P_MAX_REQUEST + MARGIN);
+    let n = docs_for(for_transport(ch.transport()).max_request + MARGIN);
     let r = ch
         .send(relay, target, Actor::Admin, document_op("DocumentAdd", n))
         .await?;
@@ -92,7 +122,7 @@ pub(super) async fn b2(ch: &mut dyn Channel) -> Result<()> {
     expect_status(&r, 200, "CollectionList through the relay to a third node")
 }
 
-/// B3: the libp2p bound, by doubling then bisecting the ref count of a
+/// B3: the transport's bound, by doubling then bisecting the ref count of a
 /// `DocumentAdd`; each probe and the located interval are recorded, not
 /// asserted. Landed probes are removed again; a refused probe leaves the
 /// target as it was, so this runs alone under `--locate-size-bound`.
@@ -143,18 +173,14 @@ pub(super) async fn b3(ch: &mut dyn Channel) -> Result<()> {
         ));
     };
     ch.note(format!(
-        "libp2p bound: between {lo} and {h} refs, {} and {} bytes; at {h}: {refusal}",
+        "{} bound: between {lo} and {h} refs, {} and {} bytes; at {h}: {refusal}",
+        ch.transport().label(),
         lo * DOC_REF_BYTES,
         h * DOC_REF_BYTES
     ));
     Ok(())
 }
 
-/// B4's request: big enough that the target is still applying it
-/// `PAUSE_AFTER_MS` in (B3 measured 12.5 MiB at 3.2 s round trip), small
-/// enough that the target's document list still fits a reply.
-const SILENT_REQUEST: usize = 12 * 1024 * 1024;
-const PAUSE_AFTER_MS: u64 = 1_500;
 /// After the resume, the target finishes applying before the restore.
 const APPLY_GRACE_MS: u64 = 10_000;
 
@@ -166,13 +192,14 @@ const APPLY_GRACE_MS: u64 = 10_000;
 /// way.
 pub(super) async fn b4(ch: &mut dyn Channel) -> Result<()> {
     let (relay, silent, healthy) = (0, 1, 2);
-    let n = docs_for(SILENT_REQUEST);
+    let bounds = for_transport(ch.transport());
+    let n = docs_for(bounds.silent_request);
     let list = json!({ "Kind": "CollectionList" });
     let r = ch.send(relay, silent, Actor::Admin, list.clone()).await?;
     expect_status(&r, 200, "CollectionList before the pause")?;
     ch.control(Verb::PauseAfter {
         node: silent,
-        delay_ms: PAUSE_AFTER_MS,
+        delay_ms: bounds.pause_after_ms,
     })
     .await?;
     let probe = ch
@@ -261,13 +288,22 @@ mod tests {
     }
 
     #[test]
+    fn bounds_follow_the_transport() {
+        assert_eq!(
+            for_transport(Transport::Libp2p).max_request,
+            16 * 1024 * 1024
+        );
+        assert_eq!(for_transport(Transport::Iroh).max_request, 4 * 1024 * 1024);
+    }
+
+    #[test]
     fn document_op_refs_are_well_formed_and_sized() {
         let op = document_op("DocumentAdd", 3);
         assert_eq!(
             op["docs"][2]["doc_id"],
             "bae-00000000-0000-0000-0000-000000000002"
         );
-        assert!(docs_for(LIBP2P_MAX_REQUEST) * DOC_REF_BYTES <= LIBP2P_MAX_REQUEST);
+        assert!(docs_for(LIBP2P.max_request) * DOC_REF_BYTES <= LIBP2P.max_request);
         assert!(docs_for(MARGIN) > 0);
     }
 
@@ -281,10 +317,22 @@ mod tests {
         })
         .await;
         assert_eq!(outcome, Outcome::Pass);
-        let n = docs_for(LIBP2P_MAX_REQUEST - MARGIN);
+        let n = docs_for(LIBP2P.max_request - MARGIN);
         let seen: Vec<_> = rx.try_iter().collect();
         assert_eq!(seen[0], ("DocumentAdd".to_string(), n));
         assert!(seen.contains(&("DocumentRemove".to_string(), n)));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut fake = Fake::new(move |_, _, _, _, op| {
+            tx.send(refs(op)).unwrap();
+            admin_view(op)
+        });
+        fake.transport = Transport::Iroh;
+        assert_eq!(run_fake("B1", fake).await.0, Outcome::Pass);
+        assert_eq!(
+            rx.try_iter().next(),
+            Some(docs_for(IROH.max_request - MARGIN))
+        );
 
         let (outcome, _) = run_fake(
             "B1",
@@ -299,7 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn b2_needs_a_refusal_then_the_target_then_the_relay() {
-        let n = docs_for(LIBP2P_MAX_REQUEST + MARGIN);
+        let n = docs_for(LIBP2P.max_request + MARGIN);
         let (outcome, notes) = run_noted(
             "B2",
             bounded(n - 1, replied(400, 30_000, "response timeout")),
@@ -391,7 +439,7 @@ mod tests {
 
     const PAUSE: Verb = Verb::PauseAfter {
         node: 1,
-        delay_ms: PAUSE_AFTER_MS,
+        delay_ms: LIBP2P.pause_after_ms,
     };
 
     /// Frozen: node 1 answers `reply` to the one request in flight while

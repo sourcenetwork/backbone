@@ -115,6 +115,7 @@ async fn drive(
         http: crate::executor::http_client(std::time::Duration::from_secs(60)),
         urls: (0..n).map(|i| nodes.api_url(i)).collect(),
         nodes,
+        transport,
         addrs,
         peer_ids,
         courier: owner,
@@ -168,6 +169,7 @@ fn wire_mesh(nodes: &Nodes, owner: &str, addrs: &[String]) -> Result<()> {
 /// `/acp/node/{disable,re-enable}` route as the owner.
 struct Live<'n> {
     nodes: &'n mut Nodes,
+    transport: Transport,
     http: reqwest::Client,
     urls: Vec<String>,
     addrs: Vec<String>,
@@ -243,6 +245,10 @@ impl Live<'_> {
 impl Channel for Live<'_> {
     fn len(&self) -> usize {
         self.urls.len()
+    }
+
+    fn transport(&self) -> Transport {
+        self.transport
     }
 
     fn addr(&self, node: usize) -> String {
