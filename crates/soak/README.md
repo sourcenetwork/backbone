@@ -334,12 +334,15 @@ heading, and the bounds cases size against the transport's request bound
 
 Cases live by group in `src/manage/{routing,authz,state,bounds,partition}.rs`,
 the table and runner in `cases.rs`; each restores what it changed. `--cases`
-selects by name in table order, default all but B3, which locates the
-transport's request size bound by bisection and runs under `--locate-size-bound`
-(or by name) on its own; a case whose topology requirement the mesh cannot
-host is skipped, not failed. Outcomes: `Pass`, `Fail { expected, got }`,
-`Skip { reason }`, `Infra { error }` (a harness fault, never a product
-finding). `--out` receives `manifest.json` (nodes, peer ids, actors in
+runs the named cases in the order given; the default is every case but B3 in
+table order, with the bounds group last so a target they wedge cannot poison
+the rest. B3 locates the transport's request size bound by bisection and runs
+under `--locate-size-bound` (or by name) on its own. Before each case the
+runner sends the cheapest admin query to every node the case uses; a node
+that no longer answers makes the case `Infra`, naming the last case that used
+it. A case whose topology requirement the mesh cannot host is skipped, not
+failed. Outcomes: `Pass`, `Fail { expected, got }`, `Skip { reason }`,
+`Infra { error }` (a harness fault, never a product finding). `--out` receives `manifest.json` (nodes, peer ids, actors in
 cleartext like `run`), `summary.json` (per case: outcome, notes a case
 recorded, every relayed op with status and latency, and the target's list for
 that op's family after each mutate) and `cases.md`. `--docker` is not

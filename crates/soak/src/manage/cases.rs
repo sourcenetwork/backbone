@@ -6,13 +6,14 @@
 
 use std::fmt;
 
-use eyre::{ensure, Result};
+use eyre::{eyre, Result};
 use futures::future::{BoxFuture, LocalBoxFuture};
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::actors::Actor;
 use super::client::Reply;
+use super::data::list_users;
 use super::{authz, bounds, partition, routing, state};
 use crate::Transport;
 
@@ -174,7 +175,7 @@ pub(super) fn expect_status(r: &Reply, want: u16, what: &str) -> Result<()> {
     }
 }
 
-/// Minimum Rust node count a case needs.
+/// Minimum Rust node count a case needs; the case uses nodes `0..min_rust`.
 #[derive(Clone, Copy, Debug)]
 pub struct Topo {
     pub min_rust: usize,
@@ -197,6 +198,8 @@ pub struct CaseReport {
 /// Cases a default selection leaves out; `--locate-size-bound` adds B3.
 pub const OPT_IN: &[&str] = &["B3"];
 
+/// The table, in the default order: the bounds group last, so a target
+/// it wedges cannot poison the state, partition or concurrency cases.
 pub fn all() -> Vec<Case> {
     let two = Topo { min_rust: 2 };
     let three = Topo { min_rust: 3 };
@@ -267,6 +270,16 @@ pub fn all() -> Vec<Case> {
             run: |ch| Box::pin(state::s4(ch)),
         },
         Case {
+            name: "P1",
+            requires: two,
+            run: |ch| Box::pin(partition::p1(ch)),
+        },
+        Case {
+            name: "C1",
+            requires: two,
+            run: |ch| Box::pin(partition::c1(ch)),
+        },
+        Case {
             name: "B1",
             requires: two,
             run: |ch| Box::pin(bounds::b1(ch)),
@@ -286,36 +299,70 @@ pub fn all() -> Vec<Case> {
             requires: three,
             run: |ch| Box::pin(bounds::b4(ch)),
         },
-        Case {
-            name: "P1",
-            requires: two,
-            run: |ch| Box::pin(partition::p1(ch)),
-        },
-        Case {
-            name: "C1",
-            requires: two,
-            run: |ch| Box::pin(partition::c1(ch)),
-        },
     ]
 }
 
-/// `--cases R2,S1` in table order; `None` is every case but [`OPT_IN`].
+/// `--cases S1,R2` in the order given; `None` is every case but [`OPT_IN`]
+/// in table order.
 pub fn select<'a>(all: &'a [Case], filter: Option<&str>) -> Result<Vec<&'a Case>> {
     let Some(filter) = filter else {
         return Ok(all.iter().filter(|c| !OPT_IN.contains(&c.name)).collect());
     };
-    let wanted: Vec<&str> = filter.split(',').map(str::trim).collect();
-    for w in &wanted {
-        ensure!(
-            all.iter().any(|c| c.name == *w),
-            "--cases: unknown case {w}"
-        );
+    filter
+        .split(',')
+        .map(str::trim)
+        .map(|w| {
+            all.iter()
+                .find(|c| c.name == w)
+                .ok_or_else(|| eyre!("--cases: unknown case {w}"))
+        })
+        .collect()
+}
+
+/// Before a case, the cheapest admin query to every node it uses: node 0
+/// over its own HTTP as the owner, the rest through node 0 as relay. A
+/// node that does not answer is named with the last case that used it,
+/// so a wedge left behind reads as `Infra`, not as this case's `Fail`.
+async fn unreachable(
+    ch: &mut dyn Channel,
+    case: &Case,
+    last_touch: &[Option<&str>],
+) -> Option<String> {
+    for (node, touched) in last_touch.iter().enumerate().take(case.requires.min_rust) {
+        let answered = if node == 0 {
+            ch.gql(0, list_users())
+                .await
+                .map(drop)
+                .map_err(|e| format!("{e:#}"))
+        } else {
+            match ch
+                .send(0, node, Actor::Admin, json!({ "Kind": "CollectionList" }))
+                .await
+            {
+                Ok(r) if r.status == 200 => Ok(()),
+                Ok(r) => Err(format!(
+                    "{} after {} ms: {}",
+                    r.status, r.latency_ms, r.body
+                )),
+                Err(e) => Err(format!("{e:#}")),
+            }
+        };
+        if let Err(why) = answered {
+            ch.take_records();
+            return Some(format!(
+                "node {node} unreachable before {}; last case to touch it: {} ({why})",
+                case.name,
+                touched.unwrap_or("none")
+            ));
+        }
     }
-    Ok(all.iter().filter(|c| wanted.contains(&c.name)).collect())
+    ch.take_records();
+    None
 }
 
 pub async fn run_all(ch: &mut dyn Channel, cases: &[&Case], rust_nodes: usize) -> Vec<CaseReport> {
     let mut reports = Vec::new();
+    let mut last_touch: Vec<Option<&str>> = vec![None; ch.len()];
     for case in cases {
         let outcome = if rust_nodes < case.requires.min_rust {
             Outcome::Skip {
@@ -324,7 +371,12 @@ pub async fn run_all(ch: &mut dyn Channel, cases: &[&Case], rust_nodes: usize) -
                     case.requires.min_rust
                 ),
             }
+        } else if let Some(error) = unreachable(ch, case, &last_touch).await {
+            Outcome::Infra { error }
         } else {
+            for touched in &mut last_touch[..case.requires.min_rust] {
+                *touched = Some(case.name);
+            }
             match (case.run)(ch).await {
                 Ok(()) => Outcome::Pass,
                 Err(e) => match (e.downcast_ref::<Failed>(), e.downcast_ref::<Skipped>()) {
@@ -642,18 +694,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn runner_reports_an_unreachable_node_as_infra_naming_the_last_case_to_touch_it() {
+        // Node 1 stops answering once R2's restoring CollectionRemove has landed.
+        let wedged = std::cell::Cell::new(false);
+        let mut fake = Fake::new(move |_, target, _, _, op| {
+            if target == 1 && wedged.get() {
+                return Ok(Reply {
+                    status: 400,
+                    body: json!({"error": "dial error: timed out"}),
+                    latency_ms: 30_012,
+                });
+            }
+            wedged.set(wedged.get() || op["Kind"] == "CollectionRemove");
+            admin_view(op)
+        });
+        let cases = [by_name("R2"), by_name("S1")];
+        let reports = run_all(&mut fake, &[&cases[0], &cases[1]], 3).await;
+        assert_eq!(reports[0].outcome, Outcome::Pass);
+        assert_eq!(
+            reports[1].outcome,
+            Outcome::Infra {
+                error: "node 1 unreachable before S1; last case to touch it: R2 (400 after 30012 ms: {\"error\":\"dial error: timed out\"})".into()
+            }
+        );
+
+        let untouched = run_one("S1", |_, _, _, _, _| eyre::bail!("connection refused")).await;
+        assert_eq!(
+            untouched,
+            Outcome::Infra {
+                error:
+                    "node 1 unreachable before S1; last case to touch it: none (connection refused)"
+                        .into()
+            }
+        );
+    }
+
     #[test]
-    fn select_keeps_table_order_and_rejects_unknown_names() {
+    fn select_runs_bounds_last_by_default_keeps_the_given_order_and_rejects_unknown_names() {
         let table = all();
         let names = |v: Vec<&Case>| v.iter().map(|c| c.name).collect::<Vec<_>>();
         assert_eq!(
             names(select(&table, None).unwrap()),
             [
-                "R1", "R2", "R3", "A1", "A2", "A3", "A4", "A5", "A6", "S1", "S2", "S3", "S4", "B1",
-                "B2", "B4", "P1", "C1"
+                "R1", "R2", "R3", "A1", "A2", "A3", "A4", "A5", "A6", "S1", "S2", "S3", "S4", "P1",
+                "C1", "B1", "B2", "B4"
             ]
         );
-        assert_eq!(names(select(&table, Some("S1, R2")).unwrap()), ["R2", "S1"]);
+        assert_eq!(names(select(&table, Some("S1, R2")).unwrap()), ["S1", "R2"]);
         assert_eq!(names(select(&table, Some("B3")).unwrap()), ["B3"]);
         assert!(select(&table, Some("R2,Z9")).is_err());
     }

@@ -446,7 +446,10 @@ mod tests {
         })
         .await;
         assert_eq!(outcome, Outcome::Pass);
-        let sent: Vec<_> = rx.try_iter().collect();
+        let sent: Vec<_> = rx
+            .try_iter()
+            .skip_while(|s| s.4 == "CollectionList")
+            .collect();
         assert_eq!(sent[0], (0, 2, 1, Actor::Admin, "CollectionAdd".into()));
         assert!(sent.iter().all(|s| s.0 == 0 && s.1 == 2), "{sent:?}");
 
@@ -527,16 +530,14 @@ mod tests {
             "{leaked:?}"
         );
 
-        let mut calls = 0;
+        let mut visited = false;
         let drifted = run_one("A2", move |_, _, _, actor, op| {
             if actor == Actor::Outsider {
+                visited = true;
                 return status(403);
             }
-            if op["Kind"] == "CollectionList" {
-                calls += 1;
-                if calls > 1 {
-                    return ok(json!({"Kind": "Strings", "values": []}));
-                }
+            if op["Kind"] == "CollectionList" && visited {
+                return ok(json!({"Kind": "Strings", "values": []}));
             }
             admin_view(op)
         })

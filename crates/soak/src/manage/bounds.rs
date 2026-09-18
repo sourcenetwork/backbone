@@ -335,7 +335,10 @@ mod tests {
         .await;
         assert_eq!(outcome, Outcome::Pass);
         let n = docs_for(LIBP2P.max_request - MARGIN);
-        let seen: Vec<_> = rx.try_iter().collect();
+        let seen: Vec<_> = rx
+            .try_iter()
+            .skip_while(|s| s.0 == "CollectionList")
+            .collect();
         assert_eq!(seen[0], ("DocumentAdd".to_string(), n));
         assert!(seen.contains(&("DocumentRemove".to_string(), n)));
 
@@ -347,7 +350,7 @@ mod tests {
         fake.transport = Transport::Iroh;
         assert_eq!(run_fake("B1", fake).await.0, Outcome::Pass);
         assert_eq!(
-            rx.try_iter().next(),
+            rx.try_iter().find(|n| *n > 0),
             Some(docs_for(IROH.max_request - MARGIN))
         );
 
@@ -386,10 +389,12 @@ mod tests {
         );
 
         for (down, what) in [(1, "on the target"), (2, "to a third node")] {
+            let mut added = false;
             let outcome = run_one("B2", move |_, target, _, _, op| {
                 if op["Kind"] == "DocumentAdd" {
+                    added = true;
                     replied(400, 30_000, "response timeout")
-                } else if target == down {
+                } else if target == down && added {
                     replied(400, 10_000, "dial timeout")
                 } else {
                     admin_view(op)
@@ -514,12 +519,10 @@ mod tests {
         }));
         let (outcome, _) = run_fake("B4", fake).await;
         assert_eq!(outcome, Outcome::Pass);
-        let asked: Vec<u64> = rx.try_iter().collect();
-        assert_eq!(asked.len(), 1, "{asked:?}");
+        let asked = rx.try_iter().last().unwrap();
         assert!(
-            asked[0] > LIBP2P.pause_after_ms && asked[0] < 30_050,
-            "asked at {} ms",
-            asked[0]
+            asked > LIBP2P.pause_after_ms && asked < 30_050,
+            "asked at {asked} ms"
         );
     }
 

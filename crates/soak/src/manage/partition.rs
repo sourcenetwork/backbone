@@ -320,13 +320,11 @@ mod tests {
             "{outcome:?}"
         );
 
-        let lists = RefCell::new(0);
+        let mut removed = false;
         let drifted = Fake::new(move |_, _, _, _, op| {
-            if op["Kind"] == "CollectionList" {
-                *lists.borrow_mut() += 1;
-                if *lists.borrow() > 1 {
-                    return ok(json!({"Kind": "Strings", "values": []}));
-                }
+            removed |= op["Kind"] == "CollectionRemove";
+            if op["Kind"] == "CollectionList" && removed {
+                return ok(json!({"Kind": "Strings", "values": []}));
             }
             admin_view(op)
         });

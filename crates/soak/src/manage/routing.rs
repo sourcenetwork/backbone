@@ -427,7 +427,7 @@ mod tests {
         })
         .await;
         assert_eq!(outcome, Outcome::Pass);
-        seen.extend(rx.try_iter());
+        seen.extend(rx.try_iter().skip_while(|s| s.3 == "CollectionList"));
         // The relay's own replicator is managed through the target as relay.
         assert_eq!(seen[0], (1, 0, Actor::Admin, "ReplicatorDelete".into()));
         assert_eq!(seen[1], (1, 0, Actor::Admin, "ReplicatorList".into()));
