@@ -3,9 +3,12 @@
 //! that node relays a signed request over P2P to the target.
 
 pub mod actors;
+pub mod authz;
 pub mod cases;
 pub mod client;
 pub mod report;
+pub mod routing;
+pub mod state;
 
 use std::path::Path;
 

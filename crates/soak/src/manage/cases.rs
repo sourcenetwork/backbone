@@ -1,7 +1,8 @@
 //! The case table and its runner. A case is one function with one
 //! expectation; it speaks to the cluster only through [`Channel`], so the
 //! runner and every case run against a scripted fake in the unit tests.
-//! Each case restores what it changed.
+//! Each case restores what it changed. The cases live by group in
+//! `routing.rs`, `authz.rs` and `state.rs`.
 
 use std::fmt;
 
@@ -12,6 +13,7 @@ use serde_json::{json, Value};
 
 use super::actors::Actor;
 use super::client::Reply;
+use super::{authz, routing, state};
 
 pub const COLLECTION: &str = "User";
 
@@ -70,7 +72,7 @@ impl fmt::Display for Failed {
 
 impl std::error::Error for Failed {}
 
-fn fail(expected: impl Into<String>, got: impl Into<String>) -> eyre::Report {
+pub(super) fn fail(expected: impl Into<String>, got: impl Into<String>) -> eyre::Report {
     Failed {
         expected: expected.into(),
         got: got.into(),
@@ -78,7 +80,7 @@ fn fail(expected: impl Into<String>, got: impl Into<String>) -> eyre::Report {
     .into()
 }
 
-fn expect_status(r: &Reply, want: u16, what: &str) -> Result<()> {
+pub(super) fn expect_status(r: &Reply, want: u16, what: &str) -> Result<()> {
     if r.status == want {
         Ok(())
     } else {
@@ -114,17 +116,17 @@ pub fn all() -> Vec<Case> {
         Case {
             name: "R2",
             requires: two,
-            run: |ch| Box::pin(r2(ch)),
+            run: |ch| Box::pin(routing::r2(ch)),
         },
         Case {
             name: "A2",
             requires: two,
-            run: |ch| Box::pin(a2(ch)),
+            run: |ch| Box::pin(authz::a2(ch)),
         },
         Case {
             name: "S1",
             requires: two,
-            run: |ch| Box::pin(s1(ch)),
+            run: |ch| Box::pin(state::s1(ch)),
         },
     ]
 }
@@ -178,91 +180,25 @@ pub async fn run_all(ch: &mut dyn Channel, cases: &[&Case], rust_nodes: usize) -
     reports
 }
 
-fn replicator_add(addr: &str) -> Value {
+pub(super) fn replicator_add(addr: &str) -> Value {
     json!({ "Kind": "ReplicatorAdd", "addresses": [addr], "collection_ids": [COLLECTION] })
 }
 
-fn replicator_delete(addr: &str) -> Value {
+pub(super) fn replicator_delete(addr: &str) -> Value {
     json!({ "Kind": "ReplicatorDelete", "addresses": [addr], "collection_ids": [COLLECTION] })
 }
 
 /// Entries of a `Replicators` reply whose peer is `peer_id`. The relayed
 /// body is the http crate's snake_case `ReplicatorInfo` (`id`, `address`,
 /// `collections` as collection ids), not the p2p wire type.
-fn replicators_for(body: &Value, peer_id: &str) -> usize {
+pub(super) fn replicators_for(body: &Value, peer_id: &str) -> usize {
     body["replicators"]
         .as_array()
         .map_or(0, |a| a.iter().filter(|r| r["id"] == peer_id).count())
 }
 
-/// R2: the relay (node 0) has no replicator to the target (node 1); an admin
-/// op still dials and lands. The relay's replicator is dropped and restored
-/// through the channel in the other direction.
-async fn r2(ch: &mut dyn Channel) -> Result<()> {
-    let (relay, target) = (0, 1);
-    let target_addr = ch.addr(target);
-    let r = ch
-        .send(target, relay, Actor::Admin, replicator_delete(&target_addr))
-        .await?;
-    expect_status(&r, 200, "ReplicatorDelete on the relay")?;
-    let list = ch
-        .send(
-            target,
-            relay,
-            Actor::Admin,
-            json!({ "Kind": "ReplicatorList" }),
-        )
-        .await?;
-    let left = replicators_for(&list.body, &ch.peer_id(target));
-    if left != 0 {
-        return Err(fail(
-            "no replicator from the relay to the target",
-            format!("{left} in {}", list.body),
-        ));
-    }
-    let r = ch
-        .send(
-            relay,
-            target,
-            Actor::Admin,
-            json!({ "Kind": "CollectionAdd", "collection_ids": [COLLECTION] }),
-        )
-        .await?;
-    expect_status(&r, 200, "CollectionAdd via a relay without a replicator")?;
-    let list = ch
-        .send(
-            relay,
-            target,
-            Actor::Admin,
-            json!({ "Kind": "CollectionList" }),
-        )
-        .await?;
-    if !list.body["values"]
-        .as_array()
-        .is_some_and(|v| v.iter().any(|c| c == COLLECTION))
-    {
-        return Err(fail(
-            format!("{COLLECTION} in the target's CollectionList"),
-            list.body.to_string(),
-        ));
-    }
-    let r = ch
-        .send(
-            relay,
-            target,
-            Actor::Admin,
-            json!({ "Kind": "CollectionRemove", "collection_ids": [COLLECTION] }),
-        )
-        .await?;
-    expect_status(&r, 200, "CollectionRemove (restore)")?;
-    let r = ch
-        .send(target, relay, Actor::Admin, replicator_add(&target_addr))
-        .await?;
-    expect_status(&r, 200, "ReplicatorAdd on the relay (restore)")
-}
-
 /// Every mutate and query op, with a payload that deserializes at the relay.
-fn every_op(relay_addr: &str) -> Vec<Value> {
+pub(super) fn every_op(relay_addr: &str) -> Vec<Value> {
     let doc =
         json!({ "collection": COLLECTION, "doc_id": "bae-00000000-0000-0000-0000-000000000000" });
     vec![
@@ -283,7 +219,11 @@ fn every_op(relay_addr: &str) -> Vec<Value> {
 /// The target's managed state as admin: replicators as (peer, collections),
 /// subscriptions, tracked documents. Connection health fields are left out
 /// so an idle status flip does not read as a change.
-async fn managed_state(ch: &mut dyn Channel, relay: usize, target: usize) -> Result<Value> {
+pub(super) async fn managed_state(
+    ch: &mut dyn Channel,
+    relay: usize,
+    target: usize,
+) -> Result<Value> {
     let mut out = Vec::new();
     for kind in ["ReplicatorList", "CollectionList", "DocumentList"] {
         let r = ch
@@ -306,70 +246,16 @@ async fn managed_state(ch: &mut dyn Channel, relay: usize, target: usize) -> Res
     }))
 }
 
-/// A2: the outsider is refused on every op with 403 at the relay, and the
-/// target's three lists are the same before and after.
-async fn a2(ch: &mut dyn Channel) -> Result<()> {
-    let (relay, target) = (0, 1);
-    let before = managed_state(ch, relay, target).await?;
-    for op in every_op(&ch.addr(relay)) {
-        let kind = op["Kind"].as_str().unwrap_or_default().to_string();
-        let r = ch.send(relay, target, Actor::Outsider, op).await?;
-        expect_status(&r, 403, &format!("outsider {kind}"))?;
-    }
-    let after = managed_state(ch, relay, target).await?;
-    if before != after {
-        return Err(fail(
-            format!("target state unchanged: {before}"),
-            after.to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// S1: `ReplicatorAdd` twice for the same peer leaves one entry. The mesh
-/// replicator from the target to the relay is dropped first so the first
-/// add is a real add; the second add restores the mesh.
-async fn s1(ch: &mut dyn Channel) -> Result<()> {
-    let (relay, target) = (0, 1);
-    let relay_addr = ch.addr(relay);
-    let r = ch
-        .send(relay, target, Actor::Admin, replicator_delete(&relay_addr))
-        .await?;
-    expect_status(&r, 200, "ReplicatorDelete before the double add")?;
-    for n in 1..=2 {
-        let r = ch
-            .send(relay, target, Actor::Admin, replicator_add(&relay_addr))
-            .await?;
-        expect_status(&r, 200, &format!("ReplicatorAdd #{n}"))?;
-    }
-    let list = ch
-        .send(
-            relay,
-            target,
-            Actor::Admin,
-            json!({ "Kind": "ReplicatorList" }),
-        )
-        .await?;
-    expect_status(&list, 200, "ReplicatorList")?;
-    let entries = replicators_for(&list.body, &ch.peer_id(relay));
-    if entries != 1 {
-        return Err(fail(
-            "one replicator entry for the relay after two adds",
-            format!("{entries} in {}", list.body),
-        ));
-    }
-    Ok(())
-}
-
+/// A scripted channel for the case tests in every group.
 #[cfg(test)]
-mod tests {
+pub(super) mod fake {
     use super::*;
 
-    type Rule = dyn FnMut(usize, usize, Actor, &Value) -> Result<Reply>;
+    pub type Rule = dyn FnMut(usize, usize, Actor, &Value) -> Result<Reply>;
 
     /// A channel that answers from a rule; `Err` from the rule is a
     /// transport fault.
-    struct Fake(Box<Rule>);
+    pub struct Fake(pub Box<Rule>);
 
     impl Channel for Fake {
         fn addr(&self, node: usize) -> String {
@@ -390,7 +276,7 @@ mod tests {
         }
     }
 
-    fn ok(body: Value) -> Result<Reply> {
+    pub fn ok(body: Value) -> Result<Reply> {
         Ok(Reply {
             status: 200,
             body,
@@ -398,7 +284,7 @@ mod tests {
         })
     }
 
-    fn status(code: u16) -> Result<Reply> {
+    pub fn status(code: u16) -> Result<Reply> {
         Ok(Reply {
             status: code,
             body: Value::Null,
@@ -408,7 +294,7 @@ mod tests {
 
     /// Admin sees a healthy mesh: node 1 replicates to node 0, subscribes to
     /// the collection, tracks no documents.
-    fn admin_view(op: &Value) -> Result<Reply> {
+    pub fn admin_view(op: &Value) -> Result<Reply> {
         match op["Kind"].as_str().unwrap() {
             "ReplicatorList" => ok(json!({"Kind": "Replicators", "replicators": [
                 {"id": "peer0", "address": "/ip4/127.0.0.1/tcp/0/p2p/peer0", "collections": ["bafy-user"]}
@@ -419,11 +305,11 @@ mod tests {
         }
     }
 
-    fn by_name(name: &str) -> Case {
+    pub fn by_name(name: &str) -> Case {
         all().into_iter().find(|c| c.name == name).unwrap()
     }
 
-    async fn run_one(
+    pub async fn run_one(
         name: &str,
         rule: impl FnMut(usize, usize, Actor, &Value) -> Result<Reply> + 'static,
     ) -> Outcome {
@@ -431,6 +317,12 @@ mod tests {
         let case = by_name(name);
         run_all(&mut fake, &[&case], 2).await.remove(0).outcome
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake::*;
+    use super::*;
 
     #[tokio::test]
     async fn runner_classifies_pass_fail_infra_and_skip() {
@@ -460,141 +352,10 @@ mod tests {
         let three = Case {
             name: "X",
             requires: Topo { min_rust: 3 },
-            run: |ch| Box::pin(r2(ch)),
+            run: |ch| Box::pin(routing::r2(ch)),
         };
         let r = run_all(&mut fake, &[&three], 2).await.remove(0);
         assert!(matches!(r.outcome, Outcome::Skip { .. }), "{:?}", r.outcome);
-    }
-
-    #[tokio::test]
-    async fn r2_drops_the_relay_replicator_before_the_probe_and_restores_it() {
-        let mut seen = Vec::new();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = run_one("R2", move |relay, target, actor, op| {
-            tx.send((
-                relay,
-                target,
-                actor,
-                op["Kind"].as_str().unwrap().to_string(),
-            ))
-            .unwrap();
-            admin_view(op)
-        })
-        .await;
-        assert_eq!(outcome, Outcome::Pass);
-        seen.extend(rx.try_iter());
-        // The relay's own replicator is managed through the target as relay.
-        assert_eq!(seen[0], (1, 0, Actor::Admin, "ReplicatorDelete".into()));
-        assert_eq!(seen[1], (1, 0, Actor::Admin, "ReplicatorList".into()));
-        assert!(seen
-            .iter()
-            .any(|s| s == &(0, 1, Actor::Admin, "CollectionAdd".into())));
-        assert_eq!(
-            seen.last().unwrap(),
-            &(1, 0, Actor::Admin, "ReplicatorAdd".into())
-        );
-    }
-
-    #[tokio::test]
-    async fn r2_fails_when_the_relay_still_replicates_to_the_target() {
-        let outcome = run_one("R2", |_, target, _, op| {
-            if op["Kind"] == "ReplicatorList" && target == 0 {
-                ok(json!({"Kind": "Replicators", "replicators": [{"id": "peer1", "collections": ["bafy-user"]}]}))
-            } else {
-                admin_view(op)
-            }
-        })
-        .await;
-        assert!(
-            matches!(&outcome, Outcome::Fail { expected, .. } if expected.contains("no replicator")),
-            "{outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a2_needs_403_on_every_op_and_unchanged_state() {
-        let mut kinds = Vec::new();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = run_one("A2", move |_, _, actor, op| {
-            if actor == Actor::Outsider {
-                tx.send(op["Kind"].as_str().unwrap().to_string()).unwrap();
-                status(403)
-            } else {
-                admin_view(op)
-            }
-        })
-        .await;
-        assert_eq!(outcome, Outcome::Pass);
-        kinds.extend(rx.try_iter());
-        kinds.sort();
-        assert_eq!(kinds.len(), 11, "{kinds:?}");
-        assert!(
-            kinds.contains(&"PeerDisconnect".to_string())
-                && kinds.contains(&"DocumentList".to_string())
-        );
-
-        let leaked = run_one("A2", |_, _, actor, op| {
-            if actor == Actor::Outsider && op["Kind"] == "CollectionAdd" {
-                status(200)
-            } else if actor == Actor::Outsider {
-                status(403)
-            } else {
-                admin_view(op)
-            }
-        })
-        .await;
-        assert!(
-            matches!(&leaked, Outcome::Fail { expected, got } if expected.contains("CollectionAdd") && got.starts_with("200")),
-            "{leaked:?}"
-        );
-
-        let mut calls = 0;
-        let drifted = run_one("A2", move |_, _, actor, op| {
-            if actor == Actor::Outsider {
-                return status(403);
-            }
-            if op["Kind"] == "CollectionList" {
-                calls += 1;
-                if calls > 1 {
-                    return ok(json!({"Kind": "Strings", "values": []}));
-                }
-            }
-            admin_view(op)
-        })
-        .await;
-        assert!(
-            matches!(&drifted, Outcome::Fail { expected, .. } if expected.contains("unchanged")),
-            "{drifted:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn s1_adds_twice_and_wants_one_entry() {
-        let mut adds = 0;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = run_one("S1", move |_, _, _, op| {
-            if op["Kind"] == "ReplicatorAdd" {
-                adds += 1;
-                tx.send(adds).unwrap();
-            }
-            admin_view(op)
-        })
-        .await;
-        assert_eq!(outcome, Outcome::Pass);
-        assert_eq!(rx.try_iter().last(), Some(2));
-
-        let doubled = run_one("S1", |_, _, _, op| {
-            if op["Kind"] == "ReplicatorList" {
-                ok(json!({"Kind": "Replicators", "replicators": [{"id": "peer0"}, {"id": "peer0"}]}))
-            } else {
-                admin_view(op)
-            }
-        })
-        .await;
-        assert!(
-            matches!(&doubled, Outcome::Fail { got, .. } if got.contains('2')),
-            "{doubled:?}"
-        );
     }
 
     #[test]
