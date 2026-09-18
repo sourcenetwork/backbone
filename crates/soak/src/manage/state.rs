@@ -53,7 +53,7 @@ mod tests {
     async fn s1_adds_twice_and_wants_one_entry() {
         let mut adds = 0;
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = run_one("S1", move |_, _, _, op| {
+        let outcome = run_one("S1", move |_, _, _, _, op| {
             if op["Kind"] == "ReplicatorAdd" {
                 adds += 1;
                 tx.send(adds).unwrap();
@@ -64,7 +64,7 @@ mod tests {
         assert_eq!(outcome, Outcome::Pass);
         assert_eq!(rx.try_iter().last(), Some(2));
 
-        let doubled = run_one("S1", |_, _, _, op| {
+        let doubled = run_one("S1", |_, _, _, _, op| {
             if op["Kind"] == "ReplicatorList" {
                 ok(json!({"Kind": "Replicators", "replicators": [{"id": "peer0"}, {"id": "peer0"}]}))
             } else {

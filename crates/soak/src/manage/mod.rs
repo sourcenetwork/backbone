@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use crate::nodes::Nodes;
 use crate::{flag, has_flag, start_nodes, RunArgs, Topology};
 use actors::{Actor, Actors};
-use cases::{Channel, OpRecord};
+use cases::{Channel, OpRecord, Verb};
 
 const SCHEMA: &str = "type User { name: String age: Int }";
 
@@ -35,8 +35,8 @@ pub async fn run(out: &Path, a: RunArgs) -> Result<()> {
     );
     let table = cases::all();
     let selected = cases::select(&table, flag("cases").as_deref())?;
-    let nodes = start_nodes(out, &a).await?;
-    let result = drive(out, topology, &nodes, &selected).await;
+    let mut nodes = start_nodes(out, &a).await?;
+    let result = drive(out, topology, &mut nodes, &selected).await;
     let shutdown = nodes.shutdown().await;
     result?;
     shutdown
@@ -45,10 +45,10 @@ pub async fn run(out: &Path, a: RunArgs) -> Result<()> {
 async fn drive(
     out: &Path,
     topology: Topology,
-    nodes: &Nodes,
+    nodes: &mut Nodes,
     selected: &[&cases::Case],
 ) -> Result<()> {
-    let owner = match nodes {
+    let owner = match &*nodes {
         Nodes::Process { cluster, .. } => cluster.startup_identity(),
         Nodes::Docker(_) => None,
     }
@@ -103,6 +103,7 @@ async fn drive(
     let mut live = Live {
         http: crate::executor::http_client(std::time::Duration::from_secs(60)),
         urls: (0..n).map(|i| nodes.api_url(i)).collect(),
+        nodes,
         addrs,
         peer_ids,
         courier: owner,
@@ -145,7 +146,9 @@ fn wire_mesh(nodes: &Nodes, owner: &str, addrs: &[String]) -> Result<()> {
 /// The real channel: actors' tokens, the relay's HTTP API, one record per
 /// request. After a mutate it reads the target's list for that op's
 /// family as admin, so the report shows the state every op left behind.
-struct Live {
+/// Verbs go to the harness.
+struct Live<'n> {
+    nodes: &'n mut Nodes,
     http: reqwest::Client,
     urls: Vec<String>,
     addrs: Vec<String>,
@@ -166,15 +169,16 @@ fn family_list(kind: &str) -> Option<&'static str> {
         })
 }
 
-impl Live {
+impl Live<'_> {
     async fn post(
         &mut self,
         relay: usize,
         target: usize,
+        audience: usize,
         actor: Actor,
         op: &Value,
     ) -> Result<client::Reply> {
-        let token = self.actors.token(actor, &self.peer_ids[target])?;
+        let token = self.actors.token(actor, &self.peer_ids[audience])?;
         client::post(
             &self.http,
             &self.urls[relay],
@@ -187,7 +191,11 @@ impl Live {
     }
 }
 
-impl Channel for Live {
+impl Channel for Live<'_> {
+    fn len(&self) -> usize {
+        self.urls.len()
+    }
+
     fn addr(&self, node: usize) -> String {
         self.addrs[node].clone()
     }
@@ -196,20 +204,27 @@ impl Channel for Live {
         self.peer_ids[node].clone()
     }
 
-    fn send<'a>(
+    fn send_for<'a>(
         &'a mut self,
         relay: usize,
         target: usize,
+        audience: usize,
         actor: Actor,
         op: Value,
     ) -> LocalBoxFuture<'a, Result<client::Reply>> {
         Box::pin(async move {
             let kind = op["Kind"].as_str().unwrap_or_default().to_string();
-            let reply = self.post(relay, target, actor, &op).await?;
+            let reply = self.post(relay, target, audience, actor, &op).await?;
             let target_state = match family_list(&kind).filter(|_| !client::is_query(&op)) {
                 Some(list) => Some(
                     match self
-                        .post(relay, target, Actor::Admin, &json!({ "Kind": list }))
+                        .post(
+                            relay,
+                            target,
+                            target,
+                            Actor::Admin,
+                            &json!({ "Kind": list }),
+                        )
                         .await
                     {
                         Ok(r) => r.body,
@@ -228,6 +243,15 @@ impl Channel for Live {
                 target_state,
             });
             Ok(reply)
+        })
+    }
+
+    fn control<'a>(&'a mut self, verb: Verb) -> LocalBoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            match verb {
+                Verb::Stop(i) => self.nodes.stop(i).await,
+                Verb::Start(i) => self.nodes.start_stopped(i).await,
+            }
         })
     }
 

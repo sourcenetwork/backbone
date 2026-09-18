@@ -37,7 +37,7 @@ mod tests {
     async fn a2_needs_403_on_every_op_and_unchanged_state() {
         let mut kinds = Vec::new();
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = run_one("A2", move |_, _, actor, op| {
+        let outcome = run_one("A2", move |_, _, _, actor, op| {
             if actor == Actor::Outsider {
                 tx.send(op["Kind"].as_str().unwrap().to_string()).unwrap();
                 status(403)
@@ -55,7 +55,7 @@ mod tests {
                 && kinds.contains(&"DocumentList".to_string())
         );
 
-        let leaked = run_one("A2", |_, _, actor, op| {
+        let leaked = run_one("A2", |_, _, _, actor, op| {
             if actor == Actor::Outsider && op["Kind"] == "CollectionAdd" {
                 status(200)
             } else if actor == Actor::Outsider {
@@ -71,7 +71,7 @@ mod tests {
         );
 
         let mut calls = 0;
-        let drifted = run_one("A2", move |_, _, actor, op| {
+        let drifted = run_one("A2", move |_, _, _, actor, op| {
             if actor == Actor::Outsider {
                 return status(403);
             }

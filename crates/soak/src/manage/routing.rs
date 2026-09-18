@@ -5,8 +5,79 @@ use serde_json::json;
 
 use super::actors::Actor;
 use super::cases::{
-    expect_status, fail, replicator_add, replicator_delete, replicators_for, Channel, COLLECTION,
+    expect_status, fail, replicator_add, replicator_delete, replicators_for, Channel, Verb,
+    COLLECTION,
 };
+
+/// The relay gives a dial 10 s; a clean error later than this is a hang.
+const DIAL_BUDGET_MS: u64 = 15_000;
+
+/// R1: for every ordered (relay, target, source) of distinct nodes, admin
+/// drops and restores the target's replicator to the source through the
+/// relay, and the target's list follows each op.
+pub(super) async fn r1(ch: &mut dyn Channel) -> Result<()> {
+    let n = ch.len();
+    for relay in 0..n {
+        for target in (0..n).filter(|t| *t != relay) {
+            for source in (0..n).filter(|s| *s != relay && *s != target) {
+                let addr = ch.addr(source);
+                let peer = ch.peer_id(source);
+                let steps = [
+                    (replicator_delete(&addr), 0, "ReplicatorDelete"),
+                    (replicator_add(&addr), 1, "ReplicatorAdd"),
+                ];
+                for (op, want, name) in steps {
+                    let what = format!("{name} via {relay} on {target} for {source}");
+                    let r = ch.send(relay, target, Actor::Admin, op).await?;
+                    expect_status(&r, 200, &what)?;
+                    let list = ch
+                        .send(
+                            relay,
+                            target,
+                            Actor::Admin,
+                            json!({ "Kind": "ReplicatorList" }),
+                        )
+                        .await?;
+                    let got = replicators_for(&list.body, &peer);
+                    if got != want {
+                        return Err(fail(
+                            format!("{want} replicator entry for node {source} after {what}"),
+                            format!("{got} in {}", list.body),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// R3: the target (node 1) is stopped before the call: the relay answers a
+/// clean 400 within the dial budget, and serves the target again once it
+/// is back. A missing reply is the hang the case exists to catch, not a
+/// harness fault.
+pub(super) async fn r3(ch: &mut dyn Channel) -> Result<()> {
+    let (relay, target) = (0, 1);
+    let list = json!({ "Kind": "CollectionList" });
+    ch.control(Verb::Stop(target)).await?;
+    let probe = ch.send(relay, target, Actor::Admin, list.clone()).await;
+    ch.control(Verb::Start(target)).await?;
+    let probe = probe.map_err(|e| {
+        fail(
+            "a reply while the target is stopped",
+            format!("no reply: {e:#}"),
+        )
+    })?;
+    expect_status(&probe, 400, "CollectionList to a stopped target")?;
+    if probe.latency_ms > DIAL_BUDGET_MS {
+        return Err(fail(
+            format!("a clean error within the {DIAL_BUDGET_MS} ms dial budget"),
+            format!("400 after {} ms: {}", probe.latency_ms, probe.body),
+        ));
+    }
+    let next = ch.send(relay, target, Actor::Admin, list).await?;
+    expect_status(&next, 200, "CollectionList after the target restarted")
+}
 
 /// R2: the relay (node 0) has no replicator to the target (node 1); an admin
 /// op still dials and lands. The relay's replicator is dropped and restored
@@ -76,15 +147,172 @@ pub(super) async fn r2(ch: &mut dyn Channel) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeSet, HashMap};
+
     use super::super::cases::fake::*;
     use super::super::cases::Outcome;
+    use super::super::client::Reply;
     use super::*;
+    use serde_json::Value;
+
+    /// A three-node mesh whose replicator lists follow the adds and deletes.
+    fn following_mesh() -> impl FnMut(usize, usize, usize, Actor, &Value) -> Result<Reply> {
+        let mut mesh: HashMap<usize, BTreeSet<String>> = (0..3)
+            .map(|t| {
+                (
+                    t,
+                    (0..3)
+                        .filter(|s| *s != t)
+                        .map(|s| format!("peer{s}"))
+                        .collect(),
+                )
+            })
+            .collect();
+        move |_, target, _, _, op| {
+            let peer = op["addresses"][0]
+                .as_str()
+                .and_then(|a| a.rsplit("/p2p/").next())
+                .unwrap_or_default()
+                .to_string();
+            match op["Kind"].as_str().unwrap() {
+                "ReplicatorDelete" => {
+                    mesh.get_mut(&target).unwrap().remove(&peer);
+                    status(200)
+                }
+                "ReplicatorAdd" => {
+                    mesh.get_mut(&target).unwrap().insert(peer);
+                    status(200)
+                }
+                "ReplicatorList" => ok(json!({"Kind": "Replicators", "replicators":
+                    mesh[&target].iter().map(|p| json!({"id": p, "collections": ["bafy-user"]})).collect::<Vec<_>>()
+                })),
+                _ => admin_view(op),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn r1_drops_and_restores_every_target_source_pair_through_every_third_node() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut mesh = following_mesh();
+        let outcome = run_one("R1", move |relay, target, _, actor, op| {
+            if op["Kind"] == "ReplicatorAdd" {
+                let src = op["addresses"][0]
+                    .as_str()
+                    .unwrap()
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .to_string();
+                tx.send((relay, target, src)).unwrap();
+            }
+            assert_eq!(actor, Actor::Admin);
+            mesh(relay, target, target, actor, op)
+        })
+        .await;
+        assert_eq!(outcome, Outcome::Pass);
+        let mut triples: Vec<_> = rx.try_iter().collect();
+        triples.sort();
+        assert_eq!(
+            triples,
+            [
+                (0, 1, "peer2".into()),
+                (0, 2, "peer1".into()),
+                (1, 0, "peer2".into()),
+                (1, 2, "peer0".into()),
+                (2, 0, "peer1".into()),
+                (2, 1, "peer0".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn r1_fails_when_a_list_does_not_follow_the_op() {
+        let stuck = run_one("R1", |_, _, _, _, op| {
+            if op["Kind"] == "ReplicatorList" {
+                ok(json!({"Kind": "Replicators", "replicators": [
+                    {"id": "peer0"}, {"id": "peer1"}, {"id": "peer2"}
+                ]}))
+            } else {
+                status(200)
+            }
+        })
+        .await;
+        assert!(
+            matches!(&stuck, Outcome::Fail { expected, got } if expected.contains("0 replicator") && expected.contains("ReplicatorDelete") && got.starts_with("1 in")),
+            "{stuck:?}"
+        );
+    }
+
+    /// While node 1 is stopped the relay answers `status` after `ms`.
+    fn stopped_target(
+        verbs: std::rc::Rc<std::cell::RefCell<Vec<Verb>>>,
+        reply: Result<Reply>,
+    ) -> Fake {
+        let reply = std::cell::Cell::new(Some(reply));
+        let seen = verbs.clone();
+        let mut fake = Fake::new(move |_, target, _, _, op| {
+            let down = seen.borrow().last() == Some(&Verb::Stop(1));
+            if target == 1 && down {
+                return reply.take().expect("one probe while stopped");
+            }
+            admin_view(op)
+        });
+        fake.verbs = verbs;
+        fake
+    }
+
+    fn after(status: u16, ms: u64) -> Result<Reply> {
+        Ok(Reply {
+            status,
+            body: json!({"error": "dial timeout"}),
+            latency_ms: ms,
+        })
+    }
+
+    #[tokio::test]
+    async fn r3_wants_a_clean_400_within_the_dial_budget_then_a_restart() {
+        let verbs = std::rc::Rc::default();
+        let (outcome, seen) = run_fake("R3", stopped_target(verbs, after(400, 9_800))).await;
+        assert_eq!(outcome, Outcome::Pass);
+        assert_eq!(seen, [Verb::Stop(1), Verb::Start(1)]);
+    }
+
+    #[tokio::test]
+    async fn r3_fails_on_a_slow_error_a_hang_or_a_200_and_still_restarts() {
+        let slow = run_fake("R3", stopped_target(Default::default(), after(400, 31_000))).await;
+        assert!(
+            matches!(&slow.0, Outcome::Fail { expected, got } if expected.contains("dial budget") && got.contains("31000 ms")),
+            "{:?}",
+            slow.0
+        );
+        assert_eq!(slow.1, [Verb::Stop(1), Verb::Start(1)]);
+
+        let hung = run_fake(
+            "R3",
+            stopped_target(Default::default(), Err(eyre::eyre!("operation timed out"))),
+        )
+        .await;
+        assert!(
+            matches!(&hung.0, Outcome::Fail { got, .. } if got.contains("timed out")),
+            "{:?}",
+            hung.0
+        );
+        assert_eq!(hung.1, [Verb::Stop(1), Verb::Start(1)]);
+
+        let served = run_fake("R3", stopped_target(Default::default(), after(200, 5))).await;
+        assert!(
+            matches!(&served.0, Outcome::Fail { expected, .. } if expected.starts_with("400")),
+            "{:?}",
+            served.0
+        );
+    }
 
     #[tokio::test]
     async fn r2_drops_the_relay_replicator_before_the_probe_and_restores_it() {
         let mut seen = Vec::new();
         let (tx, rx) = std::sync::mpsc::channel();
-        let outcome = run_one("R2", move |relay, target, actor, op| {
+        let outcome = run_one("R2", move |relay, target, _, actor, op| {
             tx.send((
                 relay,
                 target,
@@ -111,7 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn r2_fails_when_the_relay_still_replicates_to_the_target() {
-        let outcome = run_one("R2", |_, target, _, op| {
+        let outcome = run_one("R2", |_, target, _, _, op| {
             if op["Kind"] == "ReplicatorList" && target == 0 {
                 ok(json!({"Kind": "Replicators", "replicators": [{"id": "peer1", "collections": ["bafy-user"]}]}))
             } else {

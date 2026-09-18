@@ -61,17 +61,20 @@ impl Actors {
         Ok(())
     }
 
+    pub fn identity(&self, actor: Actor) -> &Identity {
+        match actor {
+            Actor::Admin => &self.admin,
+            Actor::Operator => &self.operator,
+            Actor::Outsider => &self.outsider,
+        }
+    }
+
     pub fn token(&mut self, actor: Actor, target_peer_id: &str) -> Result<String> {
-        let key = match actor {
-            Actor::Admin => &self.admin.key_hex,
-            Actor::Operator => &self.operator.key_hex,
-            Actor::Outsider => &self.outsider.key_hex,
-        };
         let k = (actor, target_peer_id.to_string());
         if let Some(tok) = self.tokens.get(&k) {
             return Ok(tok.clone());
         }
-        let tok = manage_token(key, target_peer_id)?;
+        let tok = manage_token(&self.identity(actor).key_hex, target_peer_id)?;
         self.tokens.insert(k, tok.clone());
         Ok(tok)
     }

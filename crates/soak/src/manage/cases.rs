@@ -30,17 +30,38 @@ pub struct OpRecord {
     pub target_state: Option<Value>,
 }
 
+/// A cluster verb a case needs beyond sending; the live channel maps each
+/// to the harness, the fake records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verb {
+    Stop(usize),
+    Start(usize),
+}
+
 /// Relay `op` through node `relay` to node `target` as `actor`.
 pub trait Channel {
+    fn len(&self) -> usize;
     fn addr(&self, node: usize) -> String;
     fn peer_id(&self, node: usize) -> String;
+    /// `send` with the token minted for `audience` instead of the target.
+    fn send_for<'a>(
+        &'a mut self,
+        relay: usize,
+        target: usize,
+        audience: usize,
+        actor: Actor,
+        op: Value,
+    ) -> LocalBoxFuture<'a, Result<Reply>>;
     fn send<'a>(
         &'a mut self,
         relay: usize,
         target: usize,
         actor: Actor,
         op: Value,
-    ) -> LocalBoxFuture<'a, Result<Reply>>;
+    ) -> LocalBoxFuture<'a, Result<Reply>> {
+        self.send_for(relay, target, target, actor, op)
+    }
+    fn control<'a>(&'a mut self, verb: Verb) -> LocalBoxFuture<'a, Result<()>>;
     /// The requests since the last call, for the report.
     fn take_records(&mut self) -> Vec<OpRecord> {
         Vec::new()
@@ -112,11 +133,22 @@ pub struct CaseReport {
 
 pub fn all() -> Vec<Case> {
     let two = Topo { min_rust: 2 };
+    let three = Topo { min_rust: 3 };
     vec![
+        Case {
+            name: "R1",
+            requires: three,
+            run: |ch| Box::pin(routing::r1(ch)),
+        },
         Case {
             name: "R2",
             requires: two,
             run: |ch| Box::pin(routing::r2(ch)),
+        },
+        Case {
+            name: "R3",
+            requires: two,
+            run: |ch| Box::pin(routing::r3(ch)),
         },
         Case {
             name: "A2",
@@ -251,28 +283,55 @@ pub(super) async fn managed_state(
 pub(super) mod fake {
     use super::*;
 
-    pub type Rule = dyn FnMut(usize, usize, Actor, &Value) -> Result<Reply>;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-    /// A channel that answers from a rule; `Err` from the rule is a
-    /// transport fault.
-    pub struct Fake(pub Box<Rule>);
+    /// `(relay, target, audience, actor, op)`.
+    pub type Rule = dyn FnMut(usize, usize, usize, Actor, &Value) -> Result<Reply>;
+
+    /// A channel that answers from a rule and records every verb; `Err`
+    /// from the rule is a transport fault. Share `verbs` with the rule
+    /// when a reply depends on a verb (a stopped node, a revoked grant).
+    pub struct Fake {
+        pub rule: Box<Rule>,
+        pub verbs: Rc<RefCell<Vec<Verb>>>,
+    }
+
+    impl Fake {
+        pub fn new(
+            rule: impl FnMut(usize, usize, usize, Actor, &Value) -> Result<Reply> + 'static,
+        ) -> Self {
+            Self {
+                rule: Box::new(rule),
+                verbs: Rc::default(),
+            }
+        }
+    }
 
     impl Channel for Fake {
+        fn len(&self) -> usize {
+            3
+        }
         fn addr(&self, node: usize) -> String {
             format!("/ip4/127.0.0.1/tcp/{node}/p2p/peer{node}")
         }
         fn peer_id(&self, node: usize) -> String {
             format!("peer{node}")
         }
-        fn send<'a>(
+        fn send_for<'a>(
             &'a mut self,
             relay: usize,
             target: usize,
+            audience: usize,
             actor: Actor,
             op: Value,
         ) -> LocalBoxFuture<'a, Result<Reply>> {
-            let r = (self.0)(relay, target, actor, &op);
+            let r = (self.rule)(relay, target, audience, actor, &op);
             Box::pin(async move { r })
+        }
+        fn control<'a>(&'a mut self, verb: Verb) -> LocalBoxFuture<'a, Result<()>> {
+            self.verbs.borrow_mut().push(verb);
+            Box::pin(async { Ok(()) })
         }
     }
 
@@ -309,13 +368,19 @@ pub(super) mod fake {
         all().into_iter().find(|c| c.name == name).unwrap()
     }
 
+    /// Run `name` on a three-node fake; the outcome and the verbs it used.
+    pub async fn run_fake(name: &str, mut fake: Fake) -> (Outcome, Vec<Verb>) {
+        let case = by_name(name);
+        let outcome = run_all(&mut fake, &[&case], 3).await.remove(0).outcome;
+        let verbs = fake.verbs.borrow().clone();
+        (outcome, verbs)
+    }
+
     pub async fn run_one(
         name: &str,
-        rule: impl FnMut(usize, usize, Actor, &Value) -> Result<Reply> + 'static,
+        rule: impl FnMut(usize, usize, usize, Actor, &Value) -> Result<Reply> + 'static,
     ) -> Outcome {
-        let mut fake = Fake(Box::new(rule));
-        let case = by_name(name);
-        run_all(&mut fake, &[&case], 2).await.remove(0).outcome
+        run_fake(name, Fake::new(rule)).await.0
     }
 }
 
@@ -327,10 +392,10 @@ mod tests {
     #[tokio::test]
     async fn runner_classifies_pass_fail_infra_and_skip() {
         assert_eq!(
-            run_one("R2", |_, _, _, op| admin_view(op)).await,
+            run_one("R2", |_, _, _, _, op| admin_view(op)).await,
             Outcome::Pass
         );
-        let failed = run_one("R2", |_, _, _, op| {
+        let failed = run_one("R2", |_, _, _, _, op| {
             if op["Kind"] == "CollectionAdd" {
                 status(400)
             } else {
@@ -342,13 +407,13 @@ mod tests {
             matches!(&failed, Outcome::Fail { expected, got } if expected.starts_with("200") && got.starts_with("400")),
             "{failed:?}"
         );
-        let infra = run_one("R2", |_, _, _, _| eyre::bail!("connection refused")).await;
+        let infra = run_one("R2", |_, _, _, _, _| eyre::bail!("connection refused")).await;
         assert!(
             matches!(&infra, Outcome::Infra { error } if error.contains("refused")),
             "{infra:?}"
         );
 
-        let mut fake = Fake(Box::new(|_, _, _, op| admin_view(op)));
+        let mut fake = Fake::new(|_, _, _, _, op| admin_view(op));
         let three = Case {
             name: "X",
             requires: Topo { min_rust: 3 },
@@ -362,7 +427,10 @@ mod tests {
     fn select_keeps_table_order_and_rejects_unknown_names() {
         let table = all();
         let names = |v: Vec<&Case>| v.iter().map(|c| c.name).collect::<Vec<_>>();
-        assert_eq!(names(select(&table, None).unwrap()), ["R2", "A2", "S1"]);
+        assert_eq!(
+            names(select(&table, None).unwrap()),
+            ["R1", "R2", "R3", "A2", "S1"]
+        );
         assert_eq!(names(select(&table, Some("S1, R2")).unwrap()), ["R2", "S1"]);
         assert!(select(&table, Some("R2,Z9")).is_err());
     }
