@@ -166,17 +166,17 @@ impl DefraNode for RustNode {
             args.push("--node-acp-enable".to_string());
         }
 
-        // DIVERGENCE: Only Rust supports --source-hub-* flags
-        if divergences::supports_source_hub_flags(NodeKind::Rust) {
-            if let Some(ref sh) = config.source_hub {
+        // DIVERGENCE: Only Rust supports --vera-* flags
+        if divergences::supports_vera_flags(NodeKind::Rust) {
+            if let Some(ref sh) = config.vera {
                 args.extend([
-                    "--source-hub-address".into(),
+                    "--vera-address".into(),
                     sh.lcd_url.clone(),
-                    "--source-hub-grpc-address".into(),
+                    "--vera-grpc-address".into(),
                     sh.grpc_url.clone(),
-                    "--source-hub-comet-address".into(),
+                    "--vera-comet-address".into(),
                     sh.comet_rpc_url.clone(),
-                    "--source-hub-chain-id".into(),
+                    "--vera-chain-id".into(),
                     sh.chain_id.clone(),
                 ]);
             }
@@ -268,26 +268,26 @@ mod tests {
     }
 
     #[test]
-    fn source_hub_passes_distinct_lcd_and_grpc_addresses() {
+    fn vera_passes_distinct_lcd_and_grpc_addresses() {
         let node = RustNode::from_binary("/nonexistent/defra");
         let mut config = test_config();
-        config.source_hub = Some(sourcehub_harness::SourceHubConfig {
+        config.vera = Some(vera_harness::VeraConfig {
             lcd_url: "http://127.0.0.1:1317".to_string(),
             comet_rpc_url: "http://127.0.0.1:26657".to_string(),
             grpc_url: "http://127.0.0.1:9090".to_string(),
-            chain_id: "sourcehub-test".to_string(),
+            chain_id: "vera-test".to_string(),
         });
 
         let (_binary, args, _envs) = node.command_parts(&config);
 
         let grpc_flag = args
             .iter()
-            .position(|argument| argument == "--source-hub-grpc-address")
+            .position(|argument| argument == "--vera-grpc-address")
             .expect("gRPC address flag should be present");
         assert_eq!(args[grpc_flag + 1], "http://127.0.0.1:9090");
         let lcd_flag = args
             .iter()
-            .position(|argument| argument == "--source-hub-address")
+            .position(|argument| argument == "--vera-address")
             .expect("LCD address flag should be present");
         assert_eq!(args[lcd_flag + 1], "http://127.0.0.1:1317");
     }

@@ -142,16 +142,21 @@ impl DefraNode for GoNode {
 
         if let Some(ref acp_type) = config.acp_document_type {
             args.push("--document-acp-type".to_string());
-            args.push(acp_type.clone());
+            // Go still exposes the legacy selector.
+            args.push(if acp_type == "vera" {
+                "source-hub".to_string()
+            } else {
+                acp_type.clone()
+            });
         }
 
         if config.nac_enabled {
             args.push("--node-acp-enable".to_string());
         }
 
-        // DIVERGENCE: Go does not support --source-hub-* flags
-        if config.source_hub.is_some() && divergences::supports_source_hub_flags(NodeKind::Go) {
-            unreachable!("Go node does not support SourceHub flags");
+        // DIVERGENCE: Go does not support --vera-* flags
+        if config.vera.is_some() && divergences::supports_vera_flags(NodeKind::Go) {
+            unreachable!("Go node does not support Vera flags");
         }
 
         if config.development {

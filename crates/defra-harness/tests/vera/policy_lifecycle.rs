@@ -3,16 +3,16 @@ use defra_harness::{generate_identity, users_schema_with_policy, TestCluster, US
 
 /// Full on-chain policy lifecycle test.
 ///
-/// 1. Create policy on Source Hub -> get policy ID
+/// 1. Create policy on Vera -> get policy ID
 /// 2. Verify policy exists on-chain via LCD query
 /// 3. Use policy ID in DefraDB schema
 /// 4. Create documents governed by policy
 /// 5. Grant/revoke relationships (on-chain transactions)
 /// 6. Verify access changes propagate
 ///
-/// The node is started with Alice's identity so SourceHub transactions work.
+/// The node is started with Alice's identity so Vera transactions work.
 #[tokio::test]
-async fn rust_sourcehub_policy_lifecycle() {
+async fn rust_vera_policy_lifecycle() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
     let alice = generate_identity(&binary).expect("Alice identity");
@@ -20,14 +20,14 @@ async fn rust_sourcehub_policy_lifecycle() {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .skip_build()
-        .with_source_hub()
+        .with_vera()
         .with_identity(&alice.private_key_hex)
         .build()
         .await
         .expect("failed to build cluster");
 
     let node = cluster.client(0);
-    let sh = cluster.source_hub().expect("source hub not available");
+    let sh = cluster.vera().expect("Vera not available");
 
     let bob = generate_identity(&binary).expect("Bob identity");
 
@@ -41,12 +41,9 @@ async fn rust_sourcehub_policy_lifecycle() {
         .expect("PolicyID")
         .to_string();
 
-    // Step 2: Verify policy exists on Source Hub via LCD
+    // Step 2: Verify policy exists on Vera via LCD
     let client = reqwest::Client::new();
-    let policy_url = format!(
-        "{}/sourcenetwork/sourcehub/acp/policy/{}",
-        sh.lcd_url, policy_id
-    );
+    let policy_url = format!("{}/sourcenetwork/vera/acp/policy/{}", sh.lcd_url, policy_id);
     let resp = client
         .get(&policy_url)
         .send()

@@ -29,9 +29,9 @@ fn add_policy(node: &defra_harness::DefraClient, policy: &str, identity: &str) -
 ///   Jack (owner), Agent-XArchive (writer), Agent-Hiking (writer),
 ///   Vanessa (reader), Outsider (none)
 ///
-/// The node is started with Jack's identity so SourceHub transactions work.
+/// The node is started with Jack's identity so Vera transactions work.
 #[tokio::test]
-async fn rust_sourcehub_compartments() {
+async fn rust_vera_compartments() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
     let jack = generate_identity(&binary).expect("Jack identity");
@@ -39,11 +39,11 @@ async fn rust_sourcehub_compartments() {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .skip_build()
-        .with_source_hub()
+        .with_vera()
         .with_identity(&jack.private_key_hex)
         .build()
         .await
-        .expect("failed to build source hub cluster");
+        .expect("failed to build Vera cluster");
 
     let node = cluster.client(0);
 
@@ -53,7 +53,7 @@ async fn rust_sourcehub_compartments() {
     let vanessa = generate_identity(&binary).expect("Vanessa identity");
     let outsider = generate_identity(&binary).expect("Outsider identity");
 
-    // Create policies on Source Hub (one at a time to avoid account sequence issues)
+    // Create policies on Vera (one at a time to avoid account sequence issues)
     let xarchive_policy_id = add_policy(&node, XARCHIVE_ACP_POLICY, &jack.private_key_hex);
     tokio::time::sleep(Duration::from_secs(2)).await;
     let hiking_policy_id = add_policy(&node, HIKING_ACP_POLICY, &jack.private_key_hex);
