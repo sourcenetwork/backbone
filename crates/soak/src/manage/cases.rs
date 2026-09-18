@@ -2,7 +2,7 @@
 //! expectation; it speaks to the cluster only through [`Channel`], so the
 //! runner and every case run against a scripted fake in the unit tests.
 //! Each case restores what it changed. The cases live by group in
-//! `routing.rs`, `authz.rs`, `state.rs` and `bounds.rs`.
+//! `routing.rs`, `authz.rs`, `state.rs`, `bounds.rs` and `partition.rs`.
 
 use std::fmt;
 
@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::actors::Actor;
 use super::client::Reply;
-use super::{authz, bounds, routing, state};
+use super::{authz, bounds, partition, routing, state};
 
 pub const COLLECTION: &str = "User";
 
@@ -282,6 +282,16 @@ pub fn all() -> Vec<Case> {
             name: "B4",
             requires: three,
             run: |ch| Box::pin(bounds::b4(ch)),
+        },
+        Case {
+            name: "P1",
+            requires: two,
+            run: |ch| Box::pin(partition::p1(ch)),
+        },
+        Case {
+            name: "C1",
+            requires: two,
+            run: |ch| Box::pin(partition::c1(ch)),
         },
     ]
 }
@@ -610,7 +620,7 @@ mod tests {
             names(select(&table, None).unwrap()),
             [
                 "R1", "R2", "R3", "A1", "A2", "A3", "A4", "A5", "A6", "S1", "S2", "S3", "S4", "B1",
-                "B2", "B4"
+                "B2", "B4", "P1", "C1"
             ]
         );
         assert_eq!(names(select(&table, Some("S1, R2")).unwrap()), ["R2", "S1"]);

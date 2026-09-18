@@ -8,6 +8,7 @@ pub mod bounds;
 pub mod cases;
 pub mod client;
 pub mod data;
+pub mod partition;
 pub mod report;
 pub mod routing;
 pub mod state;
