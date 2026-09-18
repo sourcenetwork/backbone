@@ -90,20 +90,38 @@ pub(super) async fn r3(ch: &mut dyn Channel) -> Result<()> {
     let ready_ms = await_ready(ch, target).await?;
     let next = ch.send(relay, target, Actor::Admin, list).await;
     ch.control(Verb::Regrant(target)).await?;
-    let restarted = next.and_then(|r| {
-        expect_status(
-            &r,
-            200,
-            "admin CollectionList via the relay after the target restarted",
-        )
-        .map(|()| "200 on admin CollectionList via the relay".to_string())
-    });
+    let (tail, restarted) = restart_check(next);
     ch.note(format!(
-        "restarted target: ready after {ready_ms} ms; {}",
-        verdict(&restarted)
+        "restarted target: ready after {ready_ms} ms; {tail}"
     ));
     stopped?;
-    restarted.map(drop)
+    restarted
+}
+
+/// The restarted-target half, as its note tail and result: 200 via the
+/// relay. A dial error once the target answers its own HTTP is the relay
+/// failing to re-dial a peer it knew before the restart, not the grants a
+/// 403 reports lost, and is named apart from that finding.
+fn restart_check(next: Result<Reply>) -> (String, Result<()>) {
+    let what = "admin CollectionList via the relay after the target restarted";
+    if let Ok(r) = &next {
+        if let Some(e) = r.body["error"]
+            .as_str()
+            .filter(|e| e.contains("dial error"))
+        {
+            let got = format!(
+                "relay could not re-dial the restarted peer ({} {e}); \
+                 distinct from the restart NAC finding",
+                r.status
+            );
+            return (got.clone(), Err(fail(format!("200 on {what}"), got)));
+        }
+    }
+    let checked = next.and_then(|r| {
+        expect_status(&r, 200, what)
+            .map(|()| "200 on admin CollectionList via the relay".to_string())
+    });
+    (verdict(&checked), checked.map(drop))
 }
 
 fn verdict(result: &Result<String>) -> String {
@@ -401,6 +419,45 @@ mod tests {
             [
                 "stopped target: 400 after 9800 ms, within the 15000 ms dial budget",
                 "restarted target: ready after 0 ms; FAIL expected 200 on admin CollectionList via the relay after the target restarted, got 403 null"
+            ]
+        );
+        assert_eq!(
+            *verbs.borrow(),
+            [Verb::Stop(1), Verb::Start(1), Verb::Regrant(1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn r3_names_a_relay_that_cannot_re_dial_the_restarted_target_apart_from_nac() {
+        let verbs: std::rc::Rc<std::cell::RefCell<Vec<Verb>>> = Default::default();
+        let seen = verbs.clone();
+        let mut fake = Fake::new(move |_, target, _, _, op| match seen.borrow().last() {
+            Some(Verb::Stop(1)) if target == 1 => after(400, 9_800),
+            Some(Verb::Start(1)) if target == 1 => Ok(Reply {
+                status: 400,
+                body: json!({"error": "dial error: timed out"}),
+                latency_ms: 30_012,
+            }),
+            _ => admin_view(op),
+        });
+        fake.verbs = verbs.clone();
+        let (outcome, notes) = run_noted("R3", fake).await;
+        assert_eq!(
+            outcome,
+            Outcome::Fail {
+                expected: "200 on admin CollectionList via the relay after the target restarted"
+                    .into(),
+                got: "relay could not re-dial the restarted peer (400 dial error: timed out); \
+                      distinct from the restart NAC finding"
+                    .into(),
+            }
+        );
+        assert_eq!(
+            notes,
+            [
+                "stopped target: 400 after 9800 ms, within the 15000 ms dial budget",
+                "restarted target: ready after 0 ms; relay could not re-dial the restarted peer \
+                 (400 dial error: timed out); distinct from the restart NAC finding"
             ]
         );
         assert_eq!(
