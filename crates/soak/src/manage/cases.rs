@@ -245,6 +245,21 @@ pub fn all() -> Vec<Case> {
             requires: two,
             run: |ch| Box::pin(state::s1(ch)),
         },
+        Case {
+            name: "S2",
+            requires: two,
+            run: |ch| Box::pin(state::s2(ch)),
+        },
+        Case {
+            name: "S3",
+            requires: two,
+            run: |ch| Box::pin(state::s3(ch)),
+        },
+        Case {
+            name: "S4",
+            requires: two,
+            run: |ch| Box::pin(state::s4(ch)),
+        },
     ]
 }
 
@@ -570,7 +585,7 @@ mod tests {
         let names = |v: Vec<&Case>| v.iter().map(|c| c.name).collect::<Vec<_>>();
         assert_eq!(
             names(select(&table, None).unwrap()),
-            ["R1", "R2", "R3", "A1", "A2", "A3", "A4", "A5", "A6", "S1"]
+            ["R1", "R2", "R3", "A1", "A2", "A3", "A4", "A5", "A6", "S1", "S2", "S3", "S4"]
         );
         assert_eq!(names(select(&table, Some("S1, R2")).unwrap()), ["R2", "S1"]);
         assert!(select(&table, Some("R2,Z9")).is_err());
