@@ -58,6 +58,7 @@ The nodes' data and logs are kept under the run directory (the driver points
 | `soak replay --manifest <run>/manifest.json [--until-op N] [--hold]` | Rebuilds a run from its manifest: same seed, profile, executed op count and churn schedule, no disk budget. `--until-op` stops the workload early; `--hold` keeps the mesh up until Enter, printing each node's GraphQL URL. |
 | `soak summarize <run dir>` | Rewrites `profile.json` / `profile.md` from the artifact and prints the markdown. |
 | `soak compare <run A> <run B>` | Checks two runs against the replay contract; exits non-zero if they differ. |
+| `soak manage --topology <n>r0g --out <dir> [--cases R2,A2,S1]` | Pass/fail cases on the P2P management channel, see "Management channel". |
 
 `run` flags (all optional):
 
@@ -304,6 +305,35 @@ its HTTP cost is linear in nodes. `profile.md`, though, prints one row per
 *directed* pair: 12 rows at four nodes, 30 at six, 380 at twenty, which stops
 being readable well before that. Node memory is the real ceiling. Size the run
 to the host.
+
+## Management channel
+
+`soak manage` is a minutes-long evaluation of `POST /api/v0/p2p/manage`: the
+caller hits one Rust node's HTTP API (the relay) with a JWT whose `aud` is
+the target's peer id, and the relay carries the op over P2P to the target,
+which authorizes the actor against NAC before applying it.
+
+```sh
+DEFRA_RUST_BINARY=<defradb.rs>/target/debug/defra \
+  soak manage --topology 2r0g --cases R2,A2,S1 --out runs/manage-1
+```
+
+The cluster is the `run` mesh with NAC enabled (`--node-acp-enable` and a
+startup identity, which is the NAC owner and the HTTP courier at every
+relay). Every node gets the `User` schema, peer connections and a replicator
+to every other node, all as the owner. Three actors are generated and granted
+on every node through `acp node relationship add`: `admin` (the `admin`
+relation), `operator` (`add-p2p-collection` and `list-p2p-replicator` only),
+`outsider` (nothing).
+
+Cases live in `src/manage/cases.rs`; each restores what it changed. `--cases`
+selects by name in table order, default all; a case whose topology
+requirement the mesh cannot host is skipped, not failed. Outcomes: `Pass`,
+`Fail { expected, got }`, `Skip { reason }`, `Infra { error }` (a harness
+fault, never a product finding). `--out` receives `manifest.json` (nodes,
+peer ids, actors in cleartext like `run`), `summary.json` (per case: outcome,
+every relayed op with status and latency, and the target's list for that op's
+family after each mutate) and `cases.md`. `--docker` is not supported yet.
 
 ## Not yet
 
