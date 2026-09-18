@@ -21,8 +21,7 @@ pub(super) async fn h1(ch: &mut dyn Channel) -> Result<()> {
         return Err(skip("no Go nodes in the topology"));
     }
     let rust = ch.len();
-    let peers = rust + go.len() - 1;
-    let before = go_replicator_sets(ch, &go, peers)?;
+    let before = go_replicator_sets(ch, &go)?;
     let table = cases::all();
     // Embedded rows drain the channel's notes; H1's own wait until the end.
     let mut notes = Vec::new();
@@ -38,7 +37,7 @@ pub(super) async fn h1(ch: &mut dyn Channel) -> Result<()> {
         ch.note(note);
     }
     verdict?;
-    let after = go_replicator_sets(ch, &go, peers)?;
+    let after = go_replicator_sets(ch, &go)?;
     if before != after {
         return Err(fail(
             format!("the Go nodes' replicator sets untouched: {before}"),
@@ -83,8 +82,9 @@ async fn converged(
 /// Each Go node's replicators as (peer id, collection ids), the fields a
 /// manage op could change; the status fields flip on their own. The list
 /// is the Go CLI's `client.Replicator` shape. The mesh gave every Go node
-/// one replicator per peer; another count is a finding in its own right.
-fn go_replicator_sets(ch: &dyn Channel, go: &[usize], peers: usize) -> Result<Value> {
+/// one replicator per other node; another set is a finding in its own
+/// right.
+fn go_replicator_sets(ch: &dyn Channel, go: &[usize]) -> Result<Value> {
     let mut sets = Vec::new();
     for &g in go {
         let list = ch.replicators(g)?;
@@ -99,10 +99,21 @@ fn go_replicator_sets(ch: &dyn Channel, go: &[usize], peers: usize) -> Result<Va
             })
             .collect();
         set.sort_by_key(|v| v.to_string());
-        if set.len() != peers {
+        let mut want: Vec<String> = (0..ch.len())
+            .chain(go.iter().copied())
+            .filter(|&n| n != g)
+            .map(|n| ch.peer_id(n))
+            .collect();
+        want.sort();
+        let mut have: Vec<String> = set
+            .iter()
+            .map(|r| r[0].as_str().unwrap_or_default().to_string())
+            .collect();
+        have.sort();
+        if have != want {
             return Err(fail(
-                format!("go node {g} with the mesh's {peers} replicators"),
-                format!("{} in {list}", set.len()),
+                format!("go node {g} with a replicator per mesh peer {want:?}"),
+                format!("{have:?} in {list}"),
             ));
         }
         sets.push(json!({ "node": g, "replicators": set }));
@@ -119,18 +130,20 @@ mod tests {
     use super::super::data::fake::store;
     use super::*;
 
-    /// A Go node's list on the three-Rust, two-Go fake: one per peer.
-    fn go_mesh() -> Value {
-        json!([{"ID": "peer0", "CollectionIDs": ["bafy-user"], "Status": 1},
-               {"ID": "peer1", "CollectionIDs": ["bafy-user"], "Status": 0},
-               {"ID": "peer2", "CollectionIDs": ["bafy-user"], "Status": 0},
-               {"ID": "peer9", "CollectionIDs": ["bafy-user"], "Status": 0}])
+    /// A Go node's list on the three-Rust, two-Go fake: one per other node.
+    fn go_mesh(node: usize) -> Value {
+        Value::Array(
+            (0..5)
+                .filter(|&p| p != node)
+                .map(|p| json!({"ID": format!("peer{p}"), "CollectionIDs": ["bafy-user"], "Status": (p == 0) as u8}))
+                .collect(),
+        )
     }
 
     fn hybrid(sees: impl Fn(usize) -> bool + 'static) -> Fake {
         let mut fake = Fake::new(|_, _, _, _, op| admin_view(op));
         fake.go = vec![3, 4];
-        fake.own = RefCell::new(Box::new(|_| Ok(go_mesh())));
+        fake.own = RefCell::new(Box::new(|node| Ok(go_mesh(node))));
         let mut inner = store(|age| age == 1);
         fake.gql = RefCell::new(Box::new(move |node, q| {
             if !sees(node) && !q.starts_with("mutation") {
@@ -204,7 +217,7 @@ mod tests {
         let reads = std::cell::Cell::new(0);
         fake.own = RefCell::new(Box::new(move |node| {
             reads.set(reads.get() + 1);
-            let mut list = go_mesh();
+            let mut list = go_mesh(node);
             list[0]["Status"] = json!(reads.get());
             if node == 4 && reads.get() > 2 {
                 list[0]["CollectionIDs"] = json!(["bafy-other"]);
@@ -223,15 +236,33 @@ mod tests {
     async fn h1_fails_when_a_go_node_does_not_show_the_mesh() {
         let mut fake = hybrid(|_| true);
         fake.own = RefCell::new(Box::new(|node| {
-            Ok(if node == 3 { json!([]) } else { go_mesh() })
+            Ok(if node == 3 { json!([]) } else { go_mesh(node) })
         }));
         let rows = run_h1(fake).await;
         assert_eq!(
             rows.last().unwrap().outcome,
             Outcome::Fail {
-                expected: "go node 3 with the mesh's 4 replicators".into(),
-                got: "0 in []".into()
+                expected: r#"go node 3 with a replicator per mesh peer ["peer0", "peer1", "peer2", "peer4"]"#.into(),
+                got: "[] in []".into()
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn h1_fails_when_a_go_replicator_is_not_a_mesh_peer() {
+        let mut fake = hybrid(|_| true);
+        fake.own = RefCell::new(Box::new(|node| {
+            let mut list = go_mesh(node);
+            if node == 4 {
+                list[3]["ID"] = json!("peer9");
+            }
+            Ok(list)
+        }));
+        let rows = run_h1(fake).await;
+        let outcome = &rows.last().unwrap().outcome;
+        assert!(
+            matches!(outcome, Outcome::Fail { expected, got } if expected.starts_with("go node 4 with a replicator per mesh peer") && got.starts_with(r#"["peer0", "peer1", "peer2", "peer9"] in "#)),
+            "{outcome:?}"
         );
     }
 }
