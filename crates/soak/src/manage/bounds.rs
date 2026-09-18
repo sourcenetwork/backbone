@@ -35,7 +35,14 @@ pub const LIBP2P: Bounds = Bounds {
     pause_after_ms: 1_500,
 };
 
-/// Iroh is `MAX_MANAGE_MSG_SIZE` (crates/p2p/src/iroh/protocols.rs:98).
+/// Iroh is `MAX_MANAGE_MSG_SIZE` (crates/p2p/src/iroh/protocols.rs:98),
+/// which B2 confirmed from above on 2026-09-18: 65536 refs are refused in
+/// 212 ms with "codec error: failed to write payload: sending stopped by
+/// peer: error 0". B3 could not bracket it from below: a `DocumentAdd` of
+/// 1024 refs (~65 KiB) gets "response timeout" after 30 s, the target
+/// stops accepting after its 165th document-topic join, and every later
+/// dial of it is "dial error: timed out". B4's request wedges the target
+/// the same way, so its pause has not been calibrated.
 pub const IROH: Bounds = Bounds {
     max_request: 4 * 1024 * 1024,
     silent_request: 3 * 1024 * 1024,
