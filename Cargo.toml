@@ -10,7 +10,7 @@ publish = false
 resolver = "2"
 members = [
     "crates/test-infra",
-    "crates/sourcehub-harness",
+    "crates/vera-harness",
     "crates/defra-harness",
     "crates/hub-harness",
     "crates/orbis-harness",

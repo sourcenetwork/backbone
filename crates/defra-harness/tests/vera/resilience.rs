@@ -3,13 +3,13 @@ use std::time::Duration;
 use defra_harness::node::{DefraNode, RustNode};
 use defra_harness::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
 
-/// Circuit breaker fail-closed: when SourceHub becomes unreachable after
+/// Circuit breaker fail-closed: when Vera becomes unreachable after
 /// initial setup, ACP-protected queries deny ALL access (including owner).
 ///
 /// Sequence:
-/// 1. Start cluster with SourceHub, create policy + protected doc
+/// 1. Start cluster with Vera, create policy + protected doc
 /// 2. Verify Jack (owner) can read during normal operation
-/// 3. Stop the SourceHub process (simulates network partition)
+/// 3. Stop the Vera process (simulates network partition)
 /// 4. Verify Jack is DENIED (node can't verify ACP -> fail-closed)
 /// 5. Verify anonymous is also denied
 #[tokio::test]
@@ -21,7 +21,7 @@ async fn rust_circuit_breaker_trip_recovery() {
     let mut cluster = TestCluster::builder()
         .rust_nodes(1)
         .skip_build()
-        .with_source_hub()
+        .with_vera()
         .with_identity(&jack.private_key_hex)
         .build()
         .await
@@ -58,23 +58,21 @@ async fn rust_circuit_breaker_trip_recovery() {
         "Jack should see 1 doc during normal operation"
     );
 
-    // Phase 2: Stop SourceHub — kill the devnet process
-    cluster
-        .stop_source_hub()
-        .expect("failed to stop source hub");
+    // Phase 2: Stop Vera — kill the devnet process
+    cluster.stop_vera().expect("failed to stop Vera");
 
     // Give time for connections to notice the shutdown
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Phase 3: Fail-closed — even the owner is denied when SourceHub is unreachable.
-    // The node cannot verify ACP permissions without SourceHub, so it denies all access.
+    // Phase 3: Fail-closed — even the owner is denied when Vera is unreachable.
+    // The node cannot verify ACP permissions without Vera, so it denies all access.
     let jack_after_stop = node
         .query_with_identity("query { User { _docID name } }", &jack.private_key_hex)
-        .expect("Jack read after SourceHub stop");
+        .expect("Jack read after Vera stop");
     assert_eq!(
         jack_after_stop["User"].as_array().unwrap().len(),
         0,
-        "Jack should be denied when SourceHub is down (fail-closed)"
+        "Jack should be denied when Vera is down (fail-closed)"
     );
 
     // Anonymous is also denied
@@ -84,11 +82,11 @@ async fn rust_circuit_breaker_trip_recovery() {
     assert_eq!(
         anon_after_stop["User"].as_array().unwrap().len(),
         0,
-        "anonymous must be denied with SourceHub down (fail-closed)"
+        "anonymous must be denied with Vera down (fail-closed)"
     );
 }
 
-/// Policy cache verification: after creating a policy on SourceHub,
+/// Policy cache verification: after creating a policy on Vera,
 /// subsequent ACP operations use the cached policy without hitting
 /// the chain for every request.
 ///
@@ -105,7 +103,7 @@ async fn rust_policy_cache_ttl_expiry() {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .skip_build()
-        .with_source_hub()
+        .with_vera()
         .with_identity(&alice.private_key_hex)
         .build()
         .await
@@ -178,7 +176,7 @@ async fn rust_policy_cache_ttl_expiry() {
 
 /// Go runtime variant — circuit breaker behavior
 #[tokio::test]
-#[ignore = "Go node with SourceHub not yet supported"]
+#[ignore = "Go node with Vera not yet supported"]
 async fn go_circuit_breaker_trip_recovery() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
@@ -186,7 +184,7 @@ async fn go_circuit_breaker_trip_recovery() {
 
     let cluster = TestCluster::builder()
         .go_nodes(1)
-        .with_source_hub()
+        .with_vera()
         .with_identity(&jack.private_key_hex)
         .build()
         .await
@@ -220,7 +218,7 @@ async fn go_circuit_breaker_trip_recovery() {
 
 /// Go runtime variant — policy cache behavior
 #[tokio::test]
-#[ignore = "Go node with SourceHub not yet supported"]
+#[ignore = "Go node with Vera not yet supported"]
 async fn go_policy_cache_ttl_expiry() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
@@ -228,7 +226,7 @@ async fn go_policy_cache_ttl_expiry() {
 
     let cluster = TestCluster::builder()
         .go_nodes(1)
-        .with_source_hub()
+        .with_vera()
         .with_identity(&alice.private_key_hex)
         .build()
         .await

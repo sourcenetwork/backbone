@@ -86,11 +86,11 @@ pub fn p2p_listening_pattern(_kind: NodeKind) -> &'static str {
     r"Created LibP2P host"
 }
 
-// -- SourceHub support --
+// -- Vera support --
 
-/// Whether the node supports `--source-hub-*` start flags.
+/// Whether the node supports `--vera-*` start flags.
 /// Rust: yes, Go: not yet
-pub fn supports_source_hub_flags(kind: NodeKind) -> bool {
+pub fn supports_vera_flags(kind: NodeKind) -> bool {
     match kind {
         NodeKind::Rust => true,
         NodeKind::Go => false,

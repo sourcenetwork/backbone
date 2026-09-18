@@ -74,7 +74,7 @@ Everything needed to start and observe Hub.rs validator clusters:
 Everything needed to orchestrate Orbis DKG rings:
 
 - `OrbisRingBuilder` — multi-node ring setup with threshold configuration
-- `DkgFixture` — complete SourceHub + Orbis ring with DKG ceremony
+- `DkgFixture` — complete Vera + Orbis ring with DKG ceremony
 - Event-based synchronization — WebSocket subscriptions for DKG completion
 
 ## How Component Repos Use Backbone
