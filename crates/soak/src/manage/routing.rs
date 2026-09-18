@@ -8,9 +8,23 @@ use super::cases::{
     expect_status, fail, replicator_add, replicator_delete, replicators_for, Channel, Verb,
     COLLECTION,
 };
+use super::client::Reply;
+use crate::Transport;
 
-/// The relay gives a dial 10 s; a clean error later than this is a hang.
-const DIAL_BUDGET_MS: u64 = 15_000;
+/// The relay gives a libp2p dial 10 s; a clean error later than this is a
+/// hang.
+const LIBP2P_DIAL_BUDGET_MS: u64 = 15_000;
+
+/// Iroh gives up on a dead peer only after ~30 s (defradb.rs
+/// `endpoint_commands.rs:761-766`), so its budget admits that.
+const IROH_DIAL_BUDGET_MS: u64 = 35_000;
+
+fn dial_budget_ms(t: Transport) -> u64 {
+    match t {
+        Transport::Libp2p => LIBP2P_DIAL_BUDGET_MS,
+        Transport::Iroh => IROH_DIAL_BUDGET_MS,
+    }
+}
 
 /// R1: for every ordered (relay, target, source) of distinct nodes, admin
 /// drops and restores the target's replicator to the source through the
@@ -52,11 +66,13 @@ pub(super) async fn r1(ch: &mut dyn Channel) -> Result<()> {
     Ok(())
 }
 
-/// R3: the target (node 1) is stopped before the call: the relay answers a
-/// clean 400 within the dial budget, and serves the target again once it
-/// is back. A missing reply is the hang the case exists to catch, not a
-/// harness fault. The grants are re-applied after the check: a node that
-/// comes back without them is reported here and must not poison the rest.
+/// R3, two halves, each noted: the target (node 1) is stopped before the
+/// call and the relay answers a clean 400 within the transport's dial
+/// budget; then the relay serves the target again once it is back. A
+/// missing reply is the hang the first half exists to catch, not a
+/// harness fault. The outcome is the first half that fails. The grants
+/// are re-applied after the check: a node that comes back without them
+/// is reported here and must not poison the rest.
 pub(super) async fn r3(ch: &mut dyn Channel) -> Result<()> {
     let (relay, target) = (0, 1);
     let list = json!({ "Kind": "CollectionList" });
@@ -65,6 +81,30 @@ pub(super) async fn r3(ch: &mut dyn Channel) -> Result<()> {
     ch.control(Verb::Start(target)).await?;
     let next = ch.send(relay, target, Actor::Admin, list).await;
     ch.control(Verb::Regrant(target)).await?;
+    let stopped = dial_check(probe, dial_budget_ms(ch.transport()));
+    let restarted = next.and_then(|r| {
+        expect_status(
+            &r,
+            200,
+            "admin CollectionList via the relay after the target restarted",
+        )
+        .map(|()| "200 on admin CollectionList via the relay".to_string())
+    });
+    for (half, verdict) in [
+        ("stopped target", &stopped),
+        ("restarted target", &restarted),
+    ] {
+        ch.note(match verdict {
+            Ok(text) => format!("{half}: {text}"),
+            Err(e) => format!("{half}: FAIL {e:#}"),
+        });
+    }
+    stopped?;
+    restarted.map(drop)
+}
+
+/// The stopped-target half: a clean 400 within `budget_ms`.
+fn dial_check(probe: Result<Reply>, budget_ms: u64) -> Result<String> {
     let probe = probe.map_err(|e| {
         fail(
             "a reply while the target is stopped",
@@ -72,17 +112,16 @@ pub(super) async fn r3(ch: &mut dyn Channel) -> Result<()> {
         )
     })?;
     expect_status(&probe, 400, "CollectionList to a stopped target")?;
-    if probe.latency_ms > DIAL_BUDGET_MS {
+    if probe.latency_ms > budget_ms {
         return Err(fail(
-            format!("a clean error within the {DIAL_BUDGET_MS} ms dial budget"),
+            format!("a clean error within the {budget_ms} ms dial budget"),
             format!("400 after {} ms: {}", probe.latency_ms, probe.body),
         ));
     }
-    expect_status(
-        &next?,
-        200,
-        "admin CollectionList via the relay after the target restarted",
-    )
+    Ok(format!(
+        "400 after {} ms, within the {budget_ms} ms dial budget",
+        probe.latency_ms
+    ))
 }
 
 /// R2: the relay (node 0) has no replicator to the target (node 1); an admin
@@ -157,7 +196,6 @@ mod tests {
 
     use super::super::cases::fake::*;
     use super::super::cases::Outcome;
-    use super::super::client::Reply;
     use super::*;
     use serde_json::Value;
 
@@ -323,13 +361,54 @@ mod tests {
             Some(Verb::Start(1)) if target == 1 => status(403),
             _ => admin_view(op),
         });
-        fake.verbs = verbs;
-        let (outcome, verbs) = run_fake("R3", fake).await;
+        fake.verbs = verbs.clone();
+        let (outcome, notes) = run_noted("R3", fake).await;
         assert!(
             matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("restarted") && got.starts_with("403")),
             "{outcome:?}"
         );
-        assert_eq!(verbs, [Verb::Stop(1), Verb::Start(1), Verb::Regrant(1)]);
+        assert_eq!(
+            notes,
+            [
+                "stopped target: 400 after 9800 ms, within the 15000 ms dial budget",
+                "restarted target: FAIL expected 200 on admin CollectionList via the relay after the target restarted, got 403 null"
+            ]
+        );
+        assert_eq!(
+            *verbs.borrow(),
+            [Verb::Stop(1), Verb::Start(1), Verb::Regrant(1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn r3_notes_both_halves_and_gives_iroh_its_slow_dead_peer_dial() {
+        let (outcome, notes) =
+            run_noted("R3", stopped_target(Default::default(), after(400, 9_800))).await;
+        assert_eq!(outcome, Outcome::Pass);
+        assert_eq!(
+            notes,
+            [
+                "stopped target: 400 after 9800 ms, within the 15000 ms dial budget",
+                "restarted target: 200 on admin CollectionList via the relay"
+            ]
+        );
+
+        let mut iroh = stopped_target(Default::default(), after(400, 31_000));
+        iroh.transport = Transport::Iroh;
+        let (outcome, notes) = run_noted("R3", iroh).await;
+        assert_eq!(outcome, Outcome::Pass, "{notes:?}");
+        assert_eq!(
+            notes[0],
+            "stopped target: 400 after 31000 ms, within the 35000 ms dial budget"
+        );
+
+        let mut iroh = stopped_target(Default::default(), after(400, 36_000));
+        iroh.transport = Transport::Iroh;
+        let (outcome, _) = run_noted("R3", iroh).await;
+        assert!(
+            matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("35000 ms dial budget") && got.contains("36000 ms")),
+            "{outcome:?}"
+        );
     }
 
     #[tokio::test]
