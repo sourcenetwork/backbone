@@ -9,7 +9,7 @@ use super::cases::{
     expect_status, fail, managed_state, replicator_add, replicator_delete, replicators_for,
     Channel, Verb, COLLECTION,
 };
-use super::data::{converge, update_user, write_docs};
+use super::data::{converge, ids_in, list_users, name_of, settle, update_user, write_docs};
 
 /// A reply later than this is the correlator's 30 s, not the node's answer.
 const CLEAN_MS: u64 = 5_000;
@@ -158,7 +158,8 @@ pub(super) async fn s3(ch: &mut dyn Channel) -> Result<()> {
 /// S4: with the source's replicators dropped, a document written at the
 /// source stays there; `DocumentAdd` for it on the target (relayed by the
 /// source, the only other node), then an update at the source, and the
-/// target has it. Restores the target's document list and the mesh.
+/// target has it with the update. Restores the target's document list
+/// and the mesh.
 pub(super) async fn s4(ch: &mut dyn Channel) -> Result<()> {
     let (relay, source) = (0, 1);
     let target = relay;
@@ -172,19 +173,32 @@ pub(super) async fn s4(ch: &mut dyn Channel) -> Result<()> {
         .await?;
     expect_status(&r, 200, "DocumentAdd on the target")?;
     ch.gql(source, update_user(&id, "touched")).await?;
-    let have = converge(ch, target, std::slice::from_ref(&id)).await?;
+    let data = settle(ch, target, &list_users(), |data| {
+        name_of(data, &id).as_deref() == Some("touched")
+    })
+    .await?;
     let r = ch
         .send(source, target, Actor::Admin, document_remove(&id))
         .await?;
     expect_status(&r, 200, "DocumentRemove (restore)")?;
     mesh_from(ch, relay, source, true).await?;
-    if !have.contains(&id) {
-        return Err(fail(
-            format!("the target to have {id} after DocumentAdd and an update at the source"),
-            format!("{} documents, not it", have.len()),
-        ));
+    let expected = format!(
+        "the target to have {id} named touched after DocumentAdd and an update at the source"
+    );
+    match name_of(&data, &id).as_deref() {
+        Some("touched") => Ok(()),
+        Some(name) => Err(fail(
+            expected,
+            format!("{id} named {name}: the document without the update"),
+        )),
+        None => Err(fail(
+            expected,
+            format!(
+                "no document {id} among {} on the target",
+                ids_in(&data, COLLECTION).len()
+            ),
+        )),
     }
-    Ok(())
 }
 
 /// S1: `ReplicatorAdd` twice for the same peer leaves one entry. The mesh
@@ -462,7 +476,24 @@ mod tests {
         fake.gql = RefCell::new(Box::new(store(|_| false)));
         let (outcome, _) = run_fake("S4", fake).await;
         assert!(
-            matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("bae-0") && got == "0 documents, not it"),
+            matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("bae-0 named touched") && got == "no document bae-0 among 0 on the target"),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn s4_fails_when_the_target_has_the_doc_without_the_update() {
+        let mut fake = Fake::new(|_, _, _, _, op| admin_view(op));
+        let mut inner = store(|_| true);
+        fake.gql = RefCell::new(Box::new(move |node, q| {
+            if q.starts_with("mutation { update_") {
+                return Ok(json!({}));
+            }
+            inner(node, q)
+        }));
+        let (outcome, _) = run_fake("S4", fake).await;
+        assert!(
+            matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("bae-0 named touched") && got.starts_with("bae-0 named u") && got.ends_with(": the document without the update")),
             "{outcome:?}"
         );
     }
