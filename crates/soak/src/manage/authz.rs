@@ -88,44 +88,53 @@ pub(super) async fn a2(ch: &mut dyn Channel) -> Result<()> {
 }
 
 /// A3: `operator` lands `CollectionAdd`, its grant is revoked on the
-/// target, the same op is refused. The grant comes back either way.
+/// target, the same op is refused. The post-revoke op goes out even when
+/// the first was refused, so the verdict says whether the revoke was
+/// enforced, not enforced, or untested because the grant was inert. The
+/// grant comes back either way.
 pub(super) async fn a3(ch: &mut dyn Channel) -> Result<()> {
     let (relay, target) = (0, 1);
     let relation = permission("CollectionAdd");
-    let first = ch
-        .send(relay, target, Actor::Operator, collection_add())
-        .await?;
-    expect_status(
-        &first,
-        200,
-        &format!("operator CollectionAdd with {relation} granted, before the revoke"),
-    )?;
     let actor = Actor::Operator;
     let node = target;
+    let first = ch.send(relay, target, actor, collection_add()).await?;
     ch.control(Verb::Revoke {
         node,
         actor,
         relation,
     })
     .await?;
-    let second = ch
-        .send(relay, target, Actor::Operator, collection_add())
-        .await;
+    let second = ch.send(relay, target, actor, collection_add()).await;
     ch.control(Verb::Grant {
         node,
         actor,
         relation,
     })
     .await?;
-    let r = ch
-        .send(relay, target, Actor::Admin, collection_remove())
-        .await?;
-    expect_status(&r, 200, "CollectionRemove (restore)")?;
-    expect_status(
-        &second?,
-        403,
-        &format!("operator CollectionAdd after revoking {relation}"),
-    )
+    let second = second?;
+    if first.status == 200 || second.status == 200 {
+        let r = ch
+            .send(relay, target, Actor::Admin, collection_remove())
+            .await?;
+        expect_status(&r, 200, "CollectionRemove (restore)")?;
+    }
+    match (first.status, second.status) {
+        (200, 403) => {
+            ch.note("revoke enforced: 200 before, 403 after".into());
+            Ok(())
+        }
+        (200, after) => Err(fail(
+            format!("403 on operator CollectionAdd after revoking {relation}"),
+            format!("{after} {}: revoke not enforced", second.body),
+        )),
+        (before, after) => Err(fail(
+            format!("200 on operator CollectionAdd with {relation} granted, before the revoke"),
+            format!(
+                "{before} {} before, {after} after; revoke untested: pre-revoke op refused (grant inert, defect 1)",
+                first.body
+            ),
+        )),
+    }
 }
 
 /// A4: `outsider` is refused `CollectionAdd`, is granted its permission on
@@ -346,8 +355,10 @@ mod tests {
 
     #[tokio::test]
     async fn a3_revokes_then_wants_a_403_and_restores_the_grant() {
-        let (outcome, verbs) = run_fake("A3", live_grants(Rc::default(), false)).await;
+        let verbs: Rc<RefCell<Vec<Verb>>> = Rc::default();
+        let (outcome, notes) = run_noted("A3", live_grants(verbs.clone(), false)).await;
         assert_eq!(outcome, Outcome::Pass);
+        assert_eq!(notes, ["revoke enforced: 200 before, 403 after"]);
         let revoke = Verb::Revoke {
             node: 1,
             actor: Actor::Operator,
@@ -358,14 +369,14 @@ mod tests {
             actor: Actor::Operator,
             relation: ADD,
         };
-        assert_eq!(verbs, [revoke, grant]);
+        assert_eq!(*verbs.borrow(), [revoke.clone(), grant.clone()]);
 
         let (defect, verbs) = run_fake("A3", live_grants(Rc::default(), true)).await;
         assert!(
-            matches!(&defect, Outcome::Fail { expected, got } if expected.contains(ADD) && expected.contains("before") && got.starts_with("403")),
+            matches!(&defect, Outcome::Fail { expected, got } if expected.contains(ADD) && expected.contains("before") && got.starts_with("403") && got.ends_with("revoke untested: pre-revoke op refused (grant inert, defect 1)")),
             "{defect:?}"
         );
-        assert!(verbs.is_empty(), "{verbs:?}");
+        assert_eq!(verbs, [revoke, grant]);
 
         let (stale, verbs) = run_fake(
             "A3",
@@ -379,7 +390,7 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(&stale, Outcome::Fail { expected, .. } if expected.contains("403") && expected.contains("revok")),
+            matches!(&stale, Outcome::Fail { expected, got } if expected.contains("403") && expected.contains("revok") && got.ends_with("revoke not enforced")),
             "{stale:?}"
         );
         assert_eq!(verbs.len(), 2, "{verbs:?}");
