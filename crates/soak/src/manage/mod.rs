@@ -13,6 +13,7 @@ pub mod report;
 pub mod routing;
 pub mod state;
 
+use std::cell::RefCell;
 use std::path::Path;
 
 use eyre::{ensure, eyre, Result, WrapErr};
@@ -120,7 +121,7 @@ async fn drive(
         peer_ids,
         courier: owner,
         actors,
-        records: Vec::new(),
+        records: RefCell::default(),
         notes: Vec::new(),
     };
     let reports = cases::run_all(&mut live, selected, topology.rust).await;
@@ -176,7 +177,7 @@ struct Live<'n> {
     peer_ids: Vec<String>,
     courier: String,
     actors: Actors,
-    records: Vec<OpRecord>,
+    records: RefCell<Vec<OpRecord>>,
     notes: Vec<String>,
 }
 
@@ -222,7 +223,7 @@ impl Live<'_> {
     }
 
     async fn post(
-        &mut self,
+        &self,
         relay: usize,
         target: usize,
         audience: usize,
@@ -260,7 +261,7 @@ impl Channel for Live<'_> {
     }
 
     fn send_for<'a>(
-        &'a mut self,
+        &'a self,
         relay: usize,
         target: usize,
         audience: usize,
@@ -290,7 +291,7 @@ impl Channel for Live<'_> {
                 ),
                 None => None,
             };
-            self.records.push(OpRecord {
+            self.records.borrow_mut().push(OpRecord {
                 relay,
                 target,
                 actor,
@@ -389,7 +390,7 @@ impl Channel for Live<'_> {
     }
 
     fn take_records(&mut self) -> Vec<OpRecord> {
-        std::mem::take(&mut self.records)
+        self.records.take()
     }
 
     fn take_notes(&mut self) -> Vec<String> {

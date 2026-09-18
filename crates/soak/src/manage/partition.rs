@@ -163,14 +163,11 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         let mut fake = partitioned(replied(200, 15, "ok"), true);
-        let inner = RefCell::new(std::mem::replace(
-            &mut fake.rule,
-            Box::new(|_, _, _, _, _| status(200)),
-        ));
-        fake.rule = Box::new(move |r, t, a, actor, op| {
+        let inner = RefCell::new(fake.rule.replace(Box::new(|_, _, _, _, _| status(200))));
+        fake.rule = RefCell::new(Box::new(move |r, t, a, actor, op| {
             tx.send(op["Kind"].as_str().unwrap().to_string()).unwrap();
             (inner.borrow_mut())(r, t, a, actor, op)
-        });
+        }));
         let (outcome, notes) = run_noted("P1", fake).await;
         assert_eq!(outcome, Outcome::Pass);
         assert!(notes[0].ends_with("after rejoin: landed"), "{notes:?}");

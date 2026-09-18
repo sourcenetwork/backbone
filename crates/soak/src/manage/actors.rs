@@ -2,6 +2,7 @@
 //! target. Grants go through `acp node relationship add` as the cluster's
 //! startup identity (the NAC owner), live, no restart.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -32,7 +33,7 @@ pub struct Actors {
     pub outsider: Identity,
     /// Manage tokens per (actor, target peer id); they outlive a run.
     #[serde(skip)]
-    tokens: HashMap<(Actor, String), String>,
+    tokens: RefCell<HashMap<(Actor, String), String>>,
 }
 
 impl Actors {
@@ -41,7 +42,7 @@ impl Actors {
             admin: crate::generate_identity(bin, "admin")?,
             operator: crate::generate_identity(bin, "operator")?,
             outsider: crate::generate_identity(bin, "outsider")?,
-            tokens: HashMap::new(),
+            tokens: RefCell::default(),
         })
     }
 
@@ -68,13 +69,13 @@ impl Actors {
         }
     }
 
-    pub fn token(&mut self, actor: Actor, target_peer_id: &str) -> Result<String> {
+    pub fn token(&self, actor: Actor, target_peer_id: &str) -> Result<String> {
         let k = (actor, target_peer_id.to_string());
-        if let Some(tok) = self.tokens.get(&k) {
+        if let Some(tok) = self.tokens.borrow().get(&k) {
             return Ok(tok.clone());
         }
         let tok = manage_token(&self.identity(actor).key_hex, target_peer_id)?;
-        self.tokens.insert(k, tok.clone());
+        self.tokens.borrow_mut().insert(k, tok.clone());
         Ok(tok)
     }
 }

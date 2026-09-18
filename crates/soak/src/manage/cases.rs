@@ -72,7 +72,8 @@ pub enum Verb {
     },
 }
 
-/// Relay `op` through node `relay` to node `target` as `actor`.
+/// Relay `op` through node `relay` to node `target` as `actor`. Sends
+/// borrow the channel shared, so a case can hold two in flight at once.
 pub trait Channel {
     fn len(&self) -> usize;
     fn transport(&self) -> Transport;
@@ -80,7 +81,7 @@ pub trait Channel {
     fn peer_id(&self, node: usize) -> String;
     /// `send` with the token minted for `audience` instead of the target.
     fn send_for<'a>(
-        &'a mut self,
+        &'a self,
         relay: usize,
         target: usize,
         audience: usize,
@@ -88,7 +89,7 @@ pub trait Channel {
         op: Value,
     ) -> LocalBoxFuture<'a, Result<Reply>>;
     fn send<'a>(
-        &'a mut self,
+        &'a self,
         relay: usize,
         target: usize,
         actor: Actor,
@@ -445,7 +446,7 @@ pub(super) mod fake {
     /// when a reply depends on a verb (a stopped node, a revoked grant).
     /// `gql` answers the data plane; the default is an empty node.
     pub struct Fake {
-        pub rule: Box<Rule>,
+        pub rule: RefCell<Box<Rule>>,
         pub gql: RefCell<Box<GqlRule>>,
         pub verbs: Rc<RefCell<Vec<Verb>>>,
         pub notes: Vec<String>,
@@ -458,7 +459,7 @@ pub(super) mod fake {
             rule: impl FnMut(usize, usize, usize, Actor, &Value) -> Result<Reply> + 'static,
         ) -> Self {
             Self {
-                rule: Box::new(rule),
+                rule: RefCell::new(Box::new(rule)),
                 gql: RefCell::new(Box::new(|_, _| Ok(json!({ "User": [] })))),
                 verbs: Rc::default(),
                 notes: Vec::new(),
@@ -482,14 +483,14 @@ pub(super) mod fake {
             format!("peer{node}")
         }
         fn send_for<'a>(
-            &'a mut self,
+            &'a self,
             relay: usize,
             target: usize,
             audience: usize,
             actor: Actor,
             op: Value,
         ) -> LocalBoxFuture<'a, Result<Reply>> {
-            let r = (self.rule)(relay, target, audience, actor, &op);
+            let r = (self.rule.borrow_mut())(relay, target, audience, actor, &op);
             Box::pin(async move { r })
         }
         fn control<'a>(&'a mut self, verb: Verb) -> LocalBoxFuture<'a, Result<()>> {

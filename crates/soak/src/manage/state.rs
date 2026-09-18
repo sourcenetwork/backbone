@@ -407,13 +407,13 @@ mod tests {
     async fn s3_fails_when_the_sink_never_converges_and_still_restores_the_mesh() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut fake = source_lists(json!({"User": {"Field": "age", "Value": 1}}));
-        let inner = std::mem::replace(&mut fake.rule, Box::new(|_, _, _, _, _| status(200)));
+        let inner = fake.rule.replace(Box::new(|_, _, _, _, _| status(200)));
         let inner = RefCell::new(inner);
-        fake.rule = Box::new(move |r, t, a, actor, op| {
+        fake.rule = RefCell::new(Box::new(move |r, t, a, actor, op| {
             tx.send((t, op["Kind"].as_str().unwrap().to_string()))
                 .unwrap();
             (inner.borrow_mut())(r, t, a, actor, op)
-        });
+        }));
         fake.gql = RefCell::new(Box::new(store(|_| false)));
         let (outcome, _) = run_fake("S3", fake).await;
         assert!(

@@ -397,15 +397,12 @@ mod tests {
     async fn b3_brackets_the_bound_and_restores_what_landed() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut fake = bounded(100_000, replied(400, 30_000, "response timeout"));
-        let inner = RefCell::new(std::mem::replace(
-            &mut fake.rule,
-            Box::new(|_, _, _, _, _| status(200)),
-        ));
-        fake.rule = Box::new(move |r, t, a, actor, op| {
+        let inner = RefCell::new(fake.rule.replace(Box::new(|_, _, _, _, _| status(200))));
+        fake.rule = RefCell::new(Box::new(move |r, t, a, actor, op| {
             tx.send((op["Kind"].as_str().unwrap().to_string(), refs(op)))
                 .unwrap();
             (inner.borrow_mut())(r, t, a, actor, op)
-        });
+        }));
         let (outcome, notes) = run_noted("B3", fake).await;
         assert_eq!(outcome, Outcome::Pass);
         let last = notes.last().unwrap();
@@ -511,16 +508,13 @@ mod tests {
         assert_eq!(verbs, [PAUSE, Verb::Resume(1)]);
 
         let mut fake = paused_target(replied(400, 30_050, "response timeout"));
-        let inner = RefCell::new(std::mem::replace(
-            &mut fake.rule,
-            Box::new(|_, _, _, _, _| status(200)),
-        ));
-        fake.rule = Box::new(move |r, t, a, actor, op| {
+        let inner = RefCell::new(fake.rule.replace(Box::new(|_, _, _, _, _| status(200))));
+        fake.rule = RefCell::new(Box::new(move |r, t, a, actor, op| {
             if op["Kind"] == "DocumentList" {
                 return ok(json!({"Kind": "Documents", "documents": [{"doc_id": "bae-1"}]}));
             }
             (inner.borrow_mut())(r, t, a, actor, op)
-        });
+        }));
         let (outcome, _) = run_fake("B4", fake).await;
         assert!(
             matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("empty after the restore") && got == "1 tracked"),
