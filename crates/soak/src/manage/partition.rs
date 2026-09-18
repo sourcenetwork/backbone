@@ -69,8 +69,9 @@ pub(super) async fn p1(ch: &mut dyn Channel) -> Result<()> {
 /// C1: a fixed op sequence on the source while a burst of documents is
 /// written there: every op lands, at least one is answered before the
 /// burst's own reply comes back (the timestamps are noted), the source's
-/// managed state is back where it started, and the sink has as many
-/// documents as the source.
+/// managed state is back where it started, and every burst document
+/// reaches the sink. The sink's total against the source's is noted, not
+/// asserted: documents earlier cases left in the mesh are not C1's.
 pub(super) async fn c1(ch: &mut dyn Channel) -> Result<()> {
     let (relay, source) = (0, 1);
     let sink = relay;
@@ -138,10 +139,23 @@ pub(super) async fn c1(ch: &mut dyn Channel) -> Result<()> {
         ));
     }
     let at_source = doc_ids(ch, source).await?.len();
-    if have.len() != at_source {
+    ch.note(format!(
+        "after settle: sink {} of the source's {at_source} documents",
+        have.len()
+    ));
+    let missing: Vec<&str> = written
+        .iter()
+        .filter(|w| !have.contains(w))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
         return Err(fail(
-            format!("the sink with the source's {at_source} documents after the burst"),
-            format!("{}", have.len()),
+            format!("the sink with all {BURST} burst documents after the settle window"),
+            format!(
+                "{} of {BURST}; missing {}",
+                BURST - missing.len(),
+                missing.join(", ")
+            ),
         ));
     }
     Ok(())
@@ -261,7 +275,10 @@ mod tests {
         assert_eq!(outcome, Outcome::Pass);
         assert_eq!(
             notes,
-            ["burst 0..100 ms; CollectionAdd 0..0 ms, DocumentAdd 0..0 ms, CollectionRemove 0..0 ms, DocumentRemove 0..0 ms; 4 of 4 ops inside"]
+            [
+                "burst 0..100 ms; CollectionAdd 0..0 ms, DocumentAdd 0..0 ms, CollectionRemove 0..0 ms, DocumentRemove 0..0 ms; 4 of 4 ops inside",
+                "after settle: sink 50 of the source's 50 documents"
+            ]
         );
         let kinds: Vec<String> = rx
             .try_iter()
@@ -296,12 +313,27 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn c1_fails_when_the_count_diverges_after_settle() {
+    async fn c1_fails_when_a_burst_document_never_reaches_the_sink() {
         let fake = Fake::new(|_, _, _, _, op| admin_view(op));
         let (outcome, _) = run_fake("C1", bursting(fake, |_| false)).await;
         assert!(
-            matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("50 documents") && got == "0"),
+            matches!(&outcome, Outcome::Fail { expected, got } if expected == "the sink with all 50 burst documents after the settle window" && got.starts_with("0 of 50; missing bae-0, bae-1, ")),
             "{outcome:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c1_notes_a_leftover_count_gap_without_failing() {
+        let mut fake = Fake::new(|_, _, _, _, op| admin_view(op));
+        let mut inner = store(|age| age == 1);
+        inner(1, &create_users(1, 2)).unwrap();
+        fake.gql = RefCell::new(Box::new(inner));
+        fake.gql_ms = 100;
+        let (outcome, notes) = run_noted("C1", fake).await;
+        assert_eq!(outcome, Outcome::Pass, "{notes:?}");
+        assert_eq!(
+            notes[1],
+            "after settle: sink 50 of the source's 51 documents"
         );
     }
 
