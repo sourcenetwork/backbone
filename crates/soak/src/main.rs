@@ -15,7 +15,8 @@
 //!             [--grace SECS] [--settle SECS]
 //! soak summarize <run dir>
 //! soak compare <run dir A> <run dir B>
-//! soak manage --topology 2r0g --out <dir> [--cases R2,A2,S1] [--node-env KEY=VALUE]...
+//! soak manage --topology 2r0g --out <dir> [--cases R2,A2,S1] [--transport libp2p|iroh]
+//!             [--node-env KEY=VALUE]...
 //! ```
 //! Env: `DEFRA_RUST_BINARY` (built `defra`), Go `defradb` on PATH with
 //! `DEFRA_GO_COMPAT_COMMIT` set.
@@ -68,7 +69,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use defra_harness::TestCluster;
+use defra_harness::{BinarySource, TestCluster};
 use eyre::{bail, eyre, Result, WrapErr};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
@@ -155,6 +156,30 @@ impl Topology {
     }
 }
 
+/// The Rust nodes' P2P transport, `--transport libp2p|iroh` (`manage`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transport {
+    Libp2p,
+    Iroh,
+}
+
+impl Transport {
+    fn parse(s: Option<&str>) -> Result<Self> {
+        match s {
+            None | Some("libp2p") => Ok(Self::Libp2p),
+            Some("iroh") => Ok(Self::Iroh),
+            Some(other) => bail!("unknown --transport {other}; use libp2p or iroh"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Libp2p => "libp2p",
+            Self::Iroh => "iroh",
+        }
+    }
+}
+
 /// Kind and store per node index. Without `--topology` each backend keeps the
 /// shape every published run used: the M2 six in containers, two of each as
 /// processes.
@@ -214,6 +239,7 @@ struct RunArgs {
     topology: Option<Topology>,
     /// `--node-acp-enable` with a startup identity on every node (`manage`).
     nac: bool,
+    transport: Transport,
 }
 
 impl RunArgs {
@@ -299,6 +325,7 @@ impl RunArgs {
             reuse_network: has_flag("reuse-network"),
             topology,
             nac: false,
+            transport: Transport::Libp2p,
         })
     }
 
@@ -370,6 +397,7 @@ impl RunArgs {
             },
             reuse_network: has_flag("reuse-network"),
             nac: false,
+            transport: Transport::Libp2p,
         })
     }
 }
@@ -443,6 +471,7 @@ fn main() -> Result<()> {
             );
             let mut args = RunArgs::from_flags()?;
             args.nac = true;
+            args.transport = Transport::parse(flag("transport").as_deref())?;
             let out = flag("out").ok_or_else(|| eyre!("manage needs --out <dir>"))?;
             std::fs::create_dir_all(&out)?;
             let out = Path::new(&out).canonicalize()?;
@@ -570,6 +599,16 @@ async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
     }
     if a.nac {
         builder = builder.with_acp_local().with_nac();
+    }
+    if a.transport == Transport::Iroh {
+        // Under iroh the builder would otherwise build the workspace with
+        // the feature; `DEFRA_RUST_BINARY` must already carry it.
+        let bin = std::env::var("DEFRA_RUST_BINARY").wrap_err(
+            "--transport iroh needs DEFRA_RUST_BINARY, a `defra` built with --features iroh",
+        )?;
+        builder = builder
+            .with_iroh_transport()
+            .with_rust_binary(BinarySource::Path(bin.into()));
     }
     if let Some(intervals) = &a.retry_intervals {
         let flag = ["--replicator-retry-intervals", intervals.as_str()];
@@ -1356,6 +1395,15 @@ mod tests {
         for bad in ["0r0g", "2r2", "r2g", "2g2r", "", "2r2gx", "-1r2g"] {
             assert!(Topology::parse(bad).is_err(), "{bad} should be rejected");
         }
+    }
+
+    #[test]
+    fn transport_parses_and_defaults_to_libp2p() {
+        assert_eq!(Transport::parse(None).unwrap(), Transport::Libp2p);
+        assert_eq!(Transport::parse(Some("libp2p")).unwrap(), Transport::Libp2p);
+        assert_eq!(Transport::parse(Some("iroh")).unwrap(), Transport::Iroh);
+        assert!(Transport::parse(Some("quic")).is_err());
+        assert_eq!(Transport::Iroh.label(), "iroh");
     }
 
     #[test]

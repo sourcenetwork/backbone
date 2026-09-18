@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 
 use crate::auth::auth_token;
 use crate::nodes::Nodes;
-use crate::{flag, has_flag, start_nodes, RunArgs, Topology};
+use crate::{flag, has_flag, start_nodes, RunArgs, Topology, Transport};
 use actors::{Actor, Actors};
 use cases::{Channel, OpRecord, Verb};
 
@@ -48,7 +48,7 @@ pub async fn run(out: &Path, a: RunArgs) -> Result<()> {
         selected.extend(table.iter().filter(|c| c.name == "B3"));
     }
     let mut nodes = start_nodes(out, &a).await?;
-    let result = drive(out, topology, &mut nodes, &selected).await;
+    let result = drive(out, topology, a.transport, &mut nodes, &selected).await;
     let shutdown = nodes.shutdown().await;
     result?;
     shutdown
@@ -57,6 +57,7 @@ pub async fn run(out: &Path, a: RunArgs) -> Result<()> {
 async fn drive(
     out: &Path,
     topology: Topology,
+    transport: Transport,
     nodes: &mut Nodes,
     selected: &[&cases::Case],
 ) -> Result<()> {
@@ -78,10 +79,7 @@ async fn drive(
             .ok_or_else(|| eyre!("{} has no P2P address: {info}", nodes.name(i)))?;
         addrs.push(addr.to_string());
     }
-    let peer_ids: Vec<String> = addrs
-        .iter()
-        .map(|a| a.rsplit("/p2p/").next().unwrap_or(a).to_string())
-        .collect();
+    let peer_ids: Vec<String> = addrs.iter().map(|a| peer_id_of(a).to_string()).collect();
     for (i, pid) in peer_ids.iter().enumerate() {
         println!("{} at {} peer id {pid}", nodes.name(i), nodes.api_url(i));
     }
@@ -100,6 +98,7 @@ async fn drive(
     let manifest = json!({
         "arm": "manage",
         "topology": topology.label(),
+        "transport": transport.label(),
         "nodes": (0..n).map(|i| json!({
             "name": nodes.name(i), "api_url": nodes.api_url(i), "p2p_addr": addrs[i], "peer_id": peer_ids[i],
         })).collect::<Vec<_>>(),
@@ -124,9 +123,15 @@ async fn drive(
         notes: Vec::new(),
     };
     let reports = cases::run_all(&mut live, selected, topology.rust).await;
-    report::write(out, &topology.label(), &reports)?;
+    report::write(out, &topology.label(), transport.label(), &reports)?;
     println!("report: {}", out.join("cases.md").display());
     Ok(())
+}
+
+/// The peer id `/p2p/info` reports: the multiaddr's last `/p2p/` segment
+/// under libp2p, the endpoint id after `host:port/p2p/` under iroh.
+fn peer_id_of(addr: &str) -> &str {
+    addr.rsplit("/p2p/").next().unwrap_or(addr)
 }
 
 /// Schema, peer connections and a replicator per ordered pair, every verb
@@ -383,5 +388,20 @@ impl Channel for Live<'_> {
 
     fn take_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_id_of_reads_the_libp2p_and_iroh_address_forms() {
+        assert_eq!(
+            peer_id_of("/ip4/127.0.0.1/tcp/9171/p2p/12D3KooWabc"),
+            "12D3KooWabc"
+        );
+        assert_eq!(peer_id_of("127.0.0.1:9171/p2p/1a2b3c"), "1a2b3c");
+        assert_eq!(peer_id_of("1a2b3c"), "1a2b3c");
     }
 }
