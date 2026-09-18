@@ -326,15 +326,18 @@ on every node through `acp node relationship add`: `admin` (the `admin`
 relation), `operator` (`add-p2p-collection` and `list-p2p-replicator` only),
 `outsider` (nothing).
 
-Cases live by group in `src/manage/{routing,authz,state}.rs`, the table and
-runner in `cases.rs`; each restores what it changed. `--cases`
-selects by name in table order, default all; a case whose topology
-requirement the mesh cannot host is skipped, not failed. Outcomes: `Pass`,
-`Fail { expected, got }`, `Skip { reason }`, `Infra { error }` (a harness
-fault, never a product finding). `--out` receives `manifest.json` (nodes,
-peer ids, actors in cleartext like `run`), `summary.json` (per case: outcome,
-every relayed op with status and latency, and the target's list for that op's
-family after each mutate) and `cases.md`. `--docker` is not supported yet.
+Cases live by group in `src/manage/{routing,authz,state,bounds,partition}.rs`,
+the table and runner in `cases.rs`; each restores what it changed. `--cases`
+selects by name in table order, default all but B3, which locates the
+libp2p request size bound by bisection and runs under `--locate-size-bound`
+(or by name) on its own; a case whose topology requirement the mesh cannot
+host is skipped, not failed. Outcomes: `Pass`, `Fail { expected, got }`,
+`Skip { reason }`, `Infra { error }` (a harness fault, never a product
+finding). `--out` receives `manifest.json` (nodes, peer ids, actors in
+cleartext like `run`), `summary.json` (per case: outcome, notes a case
+recorded, every relayed op with status and latency, and the target's list for
+that op's family after each mutate) and `cases.md`. `--docker` is not
+supported yet, so P1 (partition) skips.
 
 ## Not yet
 
