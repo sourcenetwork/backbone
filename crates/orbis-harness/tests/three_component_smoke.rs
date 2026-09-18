@@ -100,7 +100,7 @@ async fn three_component_smoke() {
     );
     config.p2p_enabled = true;
     config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", ports[1]));
-    config.source_hub = Some(SourceHubConfig::from(&sourcehub));
+    config.vera = Some(SourceHubConfig::from(&sourcehub));
     config.acp_document_type = Some("source-hub".to_string());
     config.identity = Some(defra_key.clone());
     config.keyring = KeyringBackend::File {

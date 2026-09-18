@@ -10,7 +10,7 @@ use crate::node::{
     start_node, BinarySource, GoNode, KeyringBackend, NodeConfig, PortConflict, RustNode,
 };
 use crate::ports::allocate_node_ports;
-use sourcehub_harness::{allocate_source_hub_ports, SourceHubConfig, SourceHubNode};
+use vera_harness::{allocate_vera_ports, VeraConfig, VeraNode};
 
 use super::health::health_check_all;
 use super::runtime::TestCluster;
@@ -57,7 +57,7 @@ pub struct TestClusterBuilder {
     encryption_enabled: bool,
     signing_enabled: bool,
     nac_enabled: bool,
-    source_hub_enabled: bool,
+    vera_enabled: bool,
     development: bool,
     store: Option<String>,
     query_timeout: Option<u64>,
@@ -97,7 +97,7 @@ impl TestClusterBuilder {
             encryption_enabled: false,
             signing_enabled: false,
             nac_enabled: false,
-            source_hub_enabled: false,
+            vera_enabled: false,
             development: false,
             store: None,
             query_timeout: None,
@@ -247,9 +247,9 @@ impl TestClusterBuilder {
         self
     }
 
-    pub fn with_source_hub(mut self) -> Self {
-        self.source_hub_enabled = true;
-        self.acp_document_type = Some("source-hub".to_string());
+    pub fn with_vera(mut self) -> Self {
+        self.vera_enabled = true;
+        self.acp_document_type = Some("vera".to_string());
         self
     }
 
@@ -393,8 +393,8 @@ impl TestClusterBuilder {
             None
         };
 
-        // Source Hub or NAC requires an identity at startup.
-        if (self.nac_enabled || self.source_hub_enabled) && self.node_identity.is_none() {
+        // Vera or NAC requires an identity at startup.
+        if (self.nac_enabled || self.vera_enabled) && self.node_identity.is_none() {
             let binary = if let Some(ref p) = go_binary_path {
                 p.clone()
             } else if let Some(ref p) = rust_binary_path {
@@ -403,7 +403,7 @@ impl TestClusterBuilder {
                 eyre::bail!("no binary available for identity generation");
             };
             let id = crate::identity::generate_identity(&binary)
-                .wrap_err("auto-generating identity for NAC/SourceHub")?;
+                .wrap_err("auto-generating identity for NAC/Vera")?;
             self.node_identity = Some(id.private_key_hex);
         }
 
@@ -422,17 +422,17 @@ impl TestClusterBuilder {
             "DEFRA_E2E_KEEP",
         )?;
 
-        // Start Source Hub if enabled
-        let source_hub = if self.source_hub_enabled {
-            let sh_ports = allocate_source_hub_ports().wrap_err("allocating source hub ports")?;
+        // Start Vera if enabled
+        let vera = if self.vera_enabled {
+            let sh_ports = allocate_vera_ports().wrap_err("allocating Vera ports")?;
 
-            let sh_home = run_dir.node_dir("sourcehub")?;
+            let sh_home = run_dir.node_dir("vera")?;
             let sh_log_dir = sh_home.join("logs");
             std::fs::create_dir_all(&sh_log_dir)?;
 
             let identity_keys: Vec<String> = self.node_identity.iter().cloned().collect();
 
-            let sh_node = SourceHubNode::start(
+            let sh_node = VeraNode::start(
                 sh_home,
                 sh_log_dir,
                 &sh_ports,
@@ -440,14 +440,14 @@ impl TestClusterBuilder {
                 Duration::from_secs(60),
             )
             .await
-            .wrap_err("failed to start source hub node")?;
+            .wrap_err("failed to start Vera node")?;
 
             Some(sh_node)
         } else {
             None
         };
 
-        let sh_config: Option<SourceHubConfig> = source_hub.as_ref().map(SourceHubConfig::from);
+        let sh_config: Option<VeraConfig> = vera.as_ref().map(VeraConfig::from);
 
         let mut nodes = Vec::with_capacity(total);
 
@@ -492,7 +492,7 @@ impl TestClusterBuilder {
                 encryption_enabled: self.encryption_enabled,
                 signing_enabled: self.signing_enabled,
                 nac_enabled: self.nac_enabled,
-                source_hub: sh_config.clone(),
+                vera: sh_config.clone(),
                 hub_rs_address: None,
                 orbis_signer: None,
                 keyring,
@@ -592,7 +592,7 @@ impl TestClusterBuilder {
                 encryption_enabled: self.encryption_enabled,
                 signing_enabled: self.signing_enabled,
                 nac_enabled: self.nac_enabled,
-                source_hub: sh_config.clone(),
+                vera: sh_config.clone(),
                 hub_rs_address: None,
                 orbis_signer: None,
                 keyring,
@@ -673,7 +673,7 @@ impl TestClusterBuilder {
             run_dir,
             self.node_identity,
             effective_identities,
-            source_hub,
+            vera,
         ))
     }
 }

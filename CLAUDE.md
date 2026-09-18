@@ -4,7 +4,7 @@ Full-stack integration test infrastructure and coordination repo for the Source 
 
 ## Hot path: ACP Light Client (#18)
 
-The primary workstream is building a shared proof-validated ACP cache consumed by both DefraDB (query gate) and Orbis (signing gate). This is the critical path to making `tests/full_stack.rs` pass end-to-end with hub.rs as the SourceHub backend.
+The primary workstream is building a shared proof-validated ACP cache consumed by both DefraDB (query gate) and Orbis (signing gate). This is the critical path to making `tests/full_stack.rs` pass end-to-end with hub.rs as the Vera backend.
 
 ### Trust chain (every document write is cryptographically verified)
 
@@ -46,7 +46,7 @@ See `docs/architecture.md` for the full security architecture.
 backbone/
 ├── crates/
 │   ├── test-infra/       # Shared primitives (ManagedProcess, ports, log tracking, run dirs)
-│   ├── sourcehub-harness/ # Go sourcehubd manager (legacy, being replaced by hub-harness)
+│   ├── vera-harness/ # Go verad manager (legacy, being replaced by hub-harness)
 │   ├── defra-harness/    # DefraDB node manager + CLI client + test fixtures
 │   ├── hub-harness/      # Hub.rs node manager + cluster builder + observability
 │   └── orbis-harness/    # Orbis ring builder + DKG fixtures + event subscriptions
@@ -84,7 +84,7 @@ cargo fmt --all                    # Format
 ## Running the canonical test
 
 ```bash
-# Requires sourcehubd, defra, and orbis-node binaries on PATH
+# Requires verad, defra, and orbis-node binaries on PATH
 cargo test --test full_stack -- --ignored --nocapture
 ```
 

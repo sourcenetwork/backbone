@@ -9,7 +9,7 @@ use crate::divergences::NodeKind;
 use crate::node::{start_node, DefraNode, NodeConfig, PortConflict, RunningNode, RustNode};
 use crate::observe::LogTracker;
 use crate::ports::{multiaddr_ports, reserve_ports, ReservedPorts};
-use sourcehub_harness::SourceHubNode;
+use vera_harness::VeraNode;
 
 use super::health::health_check;
 
@@ -94,7 +94,7 @@ async fn reserve_until_free(
 
 /// A cluster of running DefraDB nodes.
 ///
-/// Field order matters: `nodes` and `source_hub` are dropped before `run_dir`,
+/// Field order matters: `nodes` and `vera` are dropped before `run_dir`,
 /// ensuring processes are killed before their data directories are removed.
 /// A node stopped by [`TestCluster::stop_node`]: everything needed to start
 /// it again on the same ports, which stay reserved meanwhile.
@@ -112,7 +112,7 @@ pub struct StoppedNode {
 
 pub struct TestCluster {
     pub nodes: Vec<RunningNode>,
-    source_hub: Option<SourceHubNode>,
+    vera: Option<VeraNode>,
     #[allow(dead_code)]
     run_dir: test_infra::TestRunDir,
     startup_identity: Option<String>,
@@ -125,11 +125,11 @@ impl TestCluster {
         run_dir: test_infra::TestRunDir,
         startup_identity: Option<String>,
         node_identities: Vec<Option<String>>,
-        source_hub: Option<SourceHubNode>,
+        vera: Option<VeraNode>,
     ) -> Self {
         Self {
             nodes,
-            source_hub,
+            vera,
             run_dir,
             startup_identity,
             node_identities,
@@ -171,16 +171,16 @@ impl TestCluster {
         self.nodes.is_empty()
     }
 
-    pub fn source_hub(&self) -> Option<&SourceHubNode> {
-        self.source_hub.as_ref()
+    pub fn vera(&self) -> Option<&VeraNode> {
+        self.vera.as_ref()
     }
 
-    /// Stop the SourceHub process. Drops the node, sending SIGTERM.
-    pub fn stop_source_hub(&mut self) -> Result<()> {
-        if self.source_hub.take().is_some() {
+    /// Stop the Vera process. Drops the node, sending SIGTERM.
+    pub fn stop_vera(&mut self) -> Result<()> {
+        if self.vera.take().is_some() {
             Ok(())
         } else {
-            eyre::bail!("no SourceHub node to stop")
+            eyre::bail!("no Vera node to stop")
         }
     }
 
