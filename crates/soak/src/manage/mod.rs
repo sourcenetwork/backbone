@@ -4,6 +4,7 @@
 
 pub mod actors;
 pub mod authz;
+pub mod bounds;
 pub mod cases;
 pub mod client;
 pub mod data;
@@ -26,6 +27,10 @@ use cases::{Channel, OpRecord, Verb};
 /// `age` is immutable so a replication filter may use it (S3).
 const SCHEMA: &str = "type User { name: String age: Int @immutable }";
 
+/// Past this many doc refs a mutate's after-state is not report material
+/// (the bounds cases send hundreds of thousands).
+const STATE_READ_MAX_DOCS: usize = 100;
+
 pub async fn run(out: &Path, a: RunArgs) -> Result<()> {
     let topology = a
         .topology
@@ -37,7 +42,10 @@ pub async fn run(out: &Path, a: RunArgs) -> Result<()> {
         "manage --docker: unsupported yet"
     );
     let table = cases::all();
-    let selected = cases::select(&table, flag("cases").as_deref())?;
+    let mut selected = cases::select(&table, flag("cases").as_deref())?;
+    if has_flag("locate-size-bound") && !selected.iter().any(|c| c.name == "B3") {
+        selected.extend(table.iter().filter(|c| c.name == "B3"));
+    }
     let mut nodes = start_nodes(out, &a).await?;
     let result = drive(out, topology, &mut nodes, &selected).await;
     let shutdown = nodes.shutdown().await;
@@ -250,7 +258,9 @@ impl Channel for Live<'_> {
         Box::pin(async move {
             let kind = op["Kind"].as_str().unwrap_or_default().to_string();
             let reply = self.post(relay, target, audience, actor, &op).await?;
-            let target_state = match family_list(&kind).filter(|_| !client::is_query(&op)) {
+            let small = op["docs"].as_array().map_or(0, Vec::len) <= STATE_READ_MAX_DOCS;
+            let target_state = match family_list(&kind).filter(|_| !client::is_query(&op) && small)
+            {
                 Some(list) => Some(
                     match self
                         .post(

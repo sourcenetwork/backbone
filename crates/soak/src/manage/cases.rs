@@ -2,7 +2,7 @@
 //! expectation; it speaks to the cluster only through [`Channel`], so the
 //! runner and every case run against a scripted fake in the unit tests.
 //! Each case restores what it changed. The cases live by group in
-//! `routing.rs`, `authz.rs` and `state.rs`.
+//! `routing.rs`, `authz.rs`, `state.rs` and `bounds.rs`.
 
 use std::fmt;
 
@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::actors::Actor;
 use super::client::Reply;
-use super::{authz, routing, state};
+use super::{authz, bounds, routing, state};
 
 pub const COLLECTION: &str = "User";
 
@@ -191,6 +191,9 @@ pub struct CaseReport {
     pub notes: Vec<String>,
 }
 
+/// Cases a default selection leaves out; `--locate-size-bound` adds B3.
+pub const OPT_IN: &[&str] = &["B3"];
+
 pub fn all() -> Vec<Case> {
     let two = Topo { min_rust: 2 };
     let three = Topo { min_rust: 3 };
@@ -260,13 +263,33 @@ pub fn all() -> Vec<Case> {
             requires: two,
             run: |ch| Box::pin(state::s4(ch)),
         },
+        Case {
+            name: "B1",
+            requires: two,
+            run: |ch| Box::pin(bounds::b1(ch)),
+        },
+        Case {
+            name: "B2",
+            requires: three,
+            run: |ch| Box::pin(bounds::b2(ch)),
+        },
+        Case {
+            name: "B3",
+            requires: two,
+            run: |ch| Box::pin(bounds::b3(ch)),
+        },
+        Case {
+            name: "B4",
+            requires: three,
+            run: |ch| Box::pin(bounds::b4(ch)),
+        },
     ]
 }
 
-/// `--cases R2,S1` in table order; `None` is every case.
+/// `--cases R2,S1` in table order; `None` is every case but [`OPT_IN`].
 pub fn select<'a>(all: &'a [Case], filter: Option<&str>) -> Result<Vec<&'a Case>> {
     let Some(filter) = filter else {
-        return Ok(all.iter().collect());
+        return Ok(all.iter().filter(|c| !OPT_IN.contains(&c.name)).collect());
     };
     let wanted: Vec<&str> = filter.split(',').map(str::trim).collect();
     for w in &wanted {
@@ -585,9 +608,13 @@ mod tests {
         let names = |v: Vec<&Case>| v.iter().map(|c| c.name).collect::<Vec<_>>();
         assert_eq!(
             names(select(&table, None).unwrap()),
-            ["R1", "R2", "R3", "A1", "A2", "A3", "A4", "A5", "A6", "S1", "S2", "S3", "S4"]
+            [
+                "R1", "R2", "R3", "A1", "A2", "A3", "A4", "A5", "A6", "S1", "S2", "S3", "S4", "B1",
+                "B2", "B4"
+            ]
         );
         assert_eq!(names(select(&table, Some("S1, R2")).unwrap()), ["R2", "S1"]);
+        assert_eq!(names(select(&table, Some("B3")).unwrap()), ["B3"]);
         assert!(select(&table, Some("R2,Z9")).is_err());
     }
 }
