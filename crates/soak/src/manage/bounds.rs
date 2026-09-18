@@ -191,12 +191,16 @@ pub(super) async fn b3(ch: &mut dyn Channel) -> Result<()> {
 /// After the resume, the target finishes applying before the restore.
 const APPLY_GRACE_MS: u64 = 10_000;
 
+/// The healthy request goes out this long after the pause has landed,
+/// while the probe still waits on the relay's correlator.
+const HEALTHY_AFTER_MS: u64 = 1_000;
+
 /// B4: the target is frozen mid-request (SIGSTOP, while it is still
 /// reading or applying a big `DocumentAdd`), so the request is on its way
 /// and no reply ever comes: the relay must give up with its correlator's
 /// "response timeout", not a dial or stream error, and serve a healthy
-/// target meanwhile. The target is resumed and its list restored either
-/// way.
+/// target while that probe is still outstanding. The target is resumed
+/// and its list restored either way.
 pub(super) async fn b4(ch: &mut dyn Channel) -> Result<()> {
     let (relay, silent, healthy) = (0, 1, 2);
     let bounds = for_transport(ch.transport());
@@ -209,10 +213,16 @@ pub(super) async fn b4(ch: &mut dyn Channel) -> Result<()> {
         delay_ms: bounds.pause_after_ms,
     })
     .await?;
-    let probe = ch
-        .send(relay, silent, Actor::Admin, document_op("DocumentAdd", n))
-        .await;
-    let next = ch.send(relay, healthy, Actor::Admin, list).await;
+    let (probe, next) = tokio::join!(
+        ch.send(relay, silent, Actor::Admin, document_op("DocumentAdd", n)),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                bounds.pause_after_ms + HEALTHY_AFTER_MS,
+            ))
+            .await;
+            ch.send(relay, healthy, Actor::Admin, list).await
+        }
+    );
     ch.control(Verb::Resume(silent)).await?;
     tokio::time::sleep(std::time::Duration::from_millis(APPLY_GRACE_MS)).await;
     let r = ch
@@ -487,6 +497,30 @@ mod tests {
             hung.0
         );
         assert_eq!(hung.1, [PAUSE, Verb::Resume(1)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn b4_asks_the_healthy_target_while_the_probe_is_outstanding() {
+        let t0 = tokio::time::Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut fake = paused_target(replied(400, 30_050, "response timeout"));
+        fake.timed = true;
+        let inner = RefCell::new(fake.rule.replace(Box::new(|_, _, _, _, _| status(200))));
+        fake.rule = RefCell::new(Box::new(move |r, t, a, actor, op| {
+            if t == 2 {
+                tx.send(t0.elapsed().as_millis() as u64).unwrap();
+            }
+            (inner.borrow_mut())(r, t, a, actor, op)
+        }));
+        let (outcome, _) = run_fake("B4", fake).await;
+        assert_eq!(outcome, Outcome::Pass);
+        let asked: Vec<u64> = rx.try_iter().collect();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(
+            asked[0] > LIBP2P.pause_after_ms && asked[0] < 30_050,
+            "asked at {} ms",
+            asked[0]
+        );
     }
 
     #[tokio::test(start_paused = true)]

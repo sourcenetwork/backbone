@@ -444,10 +444,12 @@ pub(super) mod fake {
     /// A channel that answers from a rule and records every verb; `Err`
     /// from the rule is a transport fault. Share `verbs` with the rule
     /// when a reply depends on a verb (a stopped node, a revoked grant).
+    /// With `timed`, a reply arrives its `latency_ms` later in tokio time.
     /// `gql` answers the data plane `gql_ms` later, in tokio time; the
     /// default is an empty node answering at once.
     pub struct Fake {
         pub rule: RefCell<Box<Rule>>,
+        pub timed: bool,
         pub gql: RefCell<Box<GqlRule>>,
         pub gql_ms: u64,
         pub verbs: Rc<RefCell<Vec<Verb>>>,
@@ -462,6 +464,7 @@ pub(super) mod fake {
         ) -> Self {
             Self {
                 rule: RefCell::new(Box::new(rule)),
+                timed: false,
                 gql: RefCell::new(Box::new(|_, _| Ok(json!({ "User": [] })))),
                 gql_ms: 0,
                 verbs: Rc::default(),
@@ -494,7 +497,17 @@ pub(super) mod fake {
             op: Value,
         ) -> LocalBoxFuture<'a, Result<Reply>> {
             let r = (self.rule.borrow_mut())(relay, target, audience, actor, &op);
-            Box::pin(async move { r })
+            let delay = r
+                .as_ref()
+                .ok()
+                .filter(|_| self.timed)
+                .map(|r| std::time::Duration::from_millis(r.latency_ms));
+            Box::pin(async move {
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+                r
+            })
         }
         fn control<'a>(&'a mut self, verb: Verb) -> LocalBoxFuture<'a, Result<()>> {
             self.verbs.borrow_mut().push(verb);
