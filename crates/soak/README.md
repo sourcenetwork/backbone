@@ -326,7 +326,8 @@ on every node through `acp node relationship add`: `admin` (the `admin`
 relation), `operator` (`add-p2p-collection` and `list-p2p-replicator` only),
 `outsider` (nothing).
 
-Cases live in `src/manage/cases.rs`; each restores what it changed. `--cases`
+Cases live by group in `src/manage/{routing,authz,state}.rs`, the table and
+runner in `cases.rs`; each restores what it changed. `--cases`
 selects by name in table order, default all; a case whose topology
 requirement the mesh cannot host is skipped, not failed. Outcomes: `Pass`,
 `Fail { expected, got }`, `Skip { reason }`, `Infra { error }` (a harness
