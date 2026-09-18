@@ -1,6 +1,8 @@
 //! Routing cases: the relay reaches the target whatever their relationship.
 
-use eyre::Result;
+use std::time::Duration;
+
+use eyre::{Result, WrapErr};
 use serde_json::json;
 
 use super::actors::Actor;
@@ -18,6 +20,10 @@ const LIBP2P_DIAL_BUDGET_MS: u64 = 15_000;
 /// Iroh gives up on a dead peer only after ~30 s (defradb.rs
 /// `endpoint_commands.rs:761-766`), so its budget admits that.
 const IROH_DIAL_BUDGET_MS: u64 = 35_000;
+
+/// A restarted target gets this long to answer its own HTTP as the owner
+/// before the restart half runs; longer is a harness fault, not a finding.
+const READY_BUDGET: Duration = Duration::from_secs(30);
 
 fn dial_budget_ms(t: Transport) -> u64 {
     match t {
@@ -68,39 +74,59 @@ pub(super) async fn r1(ch: &mut dyn Channel) -> Result<()> {
 
 /// R3, two halves, each noted: the target (node 1) is stopped before the
 /// call and the relay answers a clean 400 within the transport's dial
-/// budget; then the relay serves the target again once it is back. A
-/// missing reply is the hang the first half exists to catch, not a
-/// harness fault. The outcome is the first half that fails. The grants
-/// are re-applied after the check: a node that comes back without them
-/// is reported here and must not poison the rest.
+/// budget; then, once the target is back and answers its own HTTP, the
+/// relay serves it again. A missing reply is the hang the first half
+/// exists to catch, not a harness fault. The outcome is the first half
+/// that fails. The grants are re-applied after the check: a node that
+/// comes back without them is reported here and must not poison the rest.
 pub(super) async fn r3(ch: &mut dyn Channel) -> Result<()> {
     let (relay, target) = (0, 1);
     let list = json!({ "Kind": "CollectionList" });
     ch.control(Verb::Stop(target)).await?;
     let probe = ch.send(relay, target, Actor::Admin, list.clone()).await;
     ch.control(Verb::Start(target)).await?;
+    let stopped = dial_check(probe, dial_budget_ms(ch.transport()));
+    ch.note(verdict("stopped target", &stopped));
+    let ready_ms = await_ready(ch, target).await?;
     let next = ch.send(relay, target, Actor::Admin, list).await;
     ch.control(Verb::Regrant(target)).await?;
-    let stopped = dial_check(probe, dial_budget_ms(ch.transport()));
     let restarted = next.and_then(|r| {
         expect_status(
             &r,
             200,
             "admin CollectionList via the relay after the target restarted",
         )
-        .map(|()| "200 on admin CollectionList via the relay".to_string())
+        .map(|()| format!("ready after {ready_ms} ms; 200 on admin CollectionList via the relay"))
     });
-    for (half, verdict) in [
-        ("stopped target", &stopped),
-        ("restarted target", &restarted),
-    ] {
-        ch.note(match verdict {
-            Ok(text) => format!("{half}: {text}"),
-            Err(e) => format!("{half}: FAIL {e:#}"),
-        });
-    }
+    ch.note(verdict("restarted target", &restarted));
     stopped?;
     restarted.map(drop)
+}
+
+fn verdict(half: &str, result: &Result<String>) -> String {
+    match result {
+        Ok(text) => format!("{half}: {text}"),
+        Err(e) => format!("{half}: FAIL {e:#}"),
+    }
+}
+
+/// Poll `node`'s own HTTP half a second apart until it answers or
+/// [`READY_BUDGET`] passes; the milliseconds it took.
+async fn await_ready(ch: &dyn Channel, node: usize) -> Result<u64> {
+    let start = tokio::time::Instant::now();
+    loop {
+        let last = match ch.replicators(node) {
+            Ok(_) => return Ok(start.elapsed().as_millis() as u64),
+            Err(e) => e,
+        };
+        if start.elapsed() >= READY_BUDGET {
+            return Err(last).wrap_err(format!(
+                "target not reachable {} ms after restart",
+                start.elapsed().as_millis()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// The stopped-target half: a clean 400 within `budget_ms`.
@@ -389,7 +415,7 @@ mod tests {
             notes,
             [
                 "stopped target: 400 after 9800 ms, within the 15000 ms dial budget",
-                "restarted target: 200 on admin CollectionList via the relay"
+                "restarted target: ready after 0 ms; 200 on admin CollectionList via the relay"
             ]
         );
 
@@ -408,6 +434,72 @@ mod tests {
         assert!(
             matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("35000 ms dial budget") && got.contains("36000 ms")),
             "{outcome:?}"
+        );
+    }
+
+    /// A restarted node 1 that answers its own HTTP from poll `from` on.
+    fn ready_from(from: usize) -> impl FnMut(usize) -> Result<Value> {
+        let mut polls = 0;
+        move |node| {
+            if node != 1 {
+                return Ok(json!([]));
+            }
+            polls += 1;
+            if polls >= from {
+                Ok(json!([]))
+            } else {
+                eyre::bail!("connection refused")
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r3_waits_for_the_restarted_target_to_answer_its_own_http_then_checks() {
+        let verbs: std::rc::Rc<std::cell::RefCell<Vec<Verb>>> = Default::default();
+        let seen = verbs.clone();
+        let ready = std::rc::Rc::new(std::cell::Cell::new(false));
+        let up = ready.clone();
+        let mut fake = Fake::new(move |_, target, _, _, op| match seen.borrow().last() {
+            Some(Verb::Stop(1)) if target == 1 => after(400, 9_800),
+            Some(Verb::Start(1)) if target == 1 && !up.get() => after(400, 30_012),
+            _ => admin_view(op),
+        });
+        fake.verbs = verbs.clone();
+        let mut polls = ready_from(3);
+        fake.own = std::cell::RefCell::new(Box::new(move |node| {
+            let r = polls(node);
+            ready.set(r.is_ok());
+            r
+        }));
+        let (outcome, notes) = run_noted("R3", fake).await;
+        assert_eq!(outcome, Outcome::Pass, "{notes:?}");
+        assert_eq!(
+            notes[1],
+            "restarted target: ready after 1000 ms; 200 on admin CollectionList via the relay"
+        );
+        assert_eq!(
+            *verbs.borrow(),
+            [Verb::Stop(1), Verb::Start(1), Verb::Regrant(1)]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn r3_is_infra_not_fail_when_the_restarted_target_never_answers() {
+        let mut fake = stopped_target(Default::default(), after(400, 9_800));
+        fake.own = std::cell::RefCell::new(Box::new(|node| {
+            if node == 1 {
+                eyre::bail!("connection refused")
+            }
+            Ok(json!([]))
+        }));
+        let (outcome, notes) = run_noted("R3", fake).await;
+        assert!(
+            matches!(&outcome, Outcome::Infra { error } if error.starts_with("target not reachable 30000 ms after restart: ") && error.ends_with("connection refused")),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            notes,
+            ["stopped target: 400 after 9800 ms, within the 15000 ms dial budget"]
         );
     }
 

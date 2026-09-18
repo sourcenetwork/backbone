@@ -102,6 +102,9 @@ pub trait Channel {
     /// GraphQL on `node`'s own HTTP API as the owner; the `data` object.
     /// Owned so a case can spawn it beside its ops.
     fn gql(&self, node: usize, query: String) -> BoxFuture<'static, Result<Value>>;
+    /// `node`'s replicator list over its own HTTP API as the owner, in the
+    /// runtime's own shape; `Err` while the node is not up.
+    fn replicators(&self, node: usize) -> Result<Value>;
     fn can_partition(&self) -> bool;
     /// Something the report keeps beside the outcome: a mode the case
     /// observed and did not assert.
@@ -493,17 +496,22 @@ pub(super) mod fake {
     /// `(node, query)`.
     pub type GqlRule = dyn FnMut(usize, &str) -> Result<Value>;
 
+    /// `(node)`: the node's own replicator list.
+    pub type OwnRule = dyn FnMut(usize) -> Result<Value>;
+
     /// A channel that answers from a rule and records every verb; `Err`
     /// from the rule is a transport fault. Share `verbs` with the rule
     /// when a reply depends on a verb (a stopped node, a revoked grant).
     /// With `timed`, a reply arrives its `latency_ms` later in tokio time.
     /// `gql` answers the data plane `gql_ms` later, in tokio time; the
-    /// default is an empty node answering at once.
+    /// default is an empty node answering at once. `own` answers a node's
+    /// own replicator list; the default is an empty list.
     pub struct Fake {
         pub rule: RefCell<Box<Rule>>,
         pub timed: bool,
         pub gql: RefCell<Box<GqlRule>>,
         pub gql_ms: u64,
+        pub own: RefCell<Box<OwnRule>>,
         pub verbs: Rc<RefCell<Vec<Verb>>>,
         pub notes: Vec<String>,
         pub partition: bool,
@@ -519,6 +527,7 @@ pub(super) mod fake {
                 timed: false,
                 gql: RefCell::new(Box::new(|_, _| Ok(json!({ "User": [] })))),
                 gql_ms: 0,
+                own: RefCell::new(Box::new(|_| Ok(json!([])))),
                 verbs: Rc::default(),
                 notes: Vec::new(),
                 partition: true,
@@ -574,6 +583,9 @@ pub(super) mod fake {
                 }
                 r
             })
+        }
+        fn replicators(&self, node: usize) -> Result<Value> {
+            (self.own.borrow_mut())(node)
         }
         fn can_partition(&self) -> bool {
             self.partition

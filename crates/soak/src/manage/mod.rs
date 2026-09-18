@@ -381,6 +381,13 @@ impl Channel for Live<'_> {
         })
     }
 
+    fn replicators(&self, node: usize) -> Result<Value> {
+        self.nodes
+            .client(node)
+            .p2p_replicator_list_with_identity(&self.courier)
+            .wrap_err_with(|| format!("replicator list on {}", self.nodes.name(node)))
+    }
+
     fn can_partition(&self) -> bool {
         self.nodes.supports_partition()
     }
