@@ -15,6 +15,7 @@
 //!             [--grace SECS] [--settle SECS]
 //! soak summarize <run dir>
 //! soak compare <run dir A> <run dir B>
+//! soak manage --topology 2r0g --out <dir> [--cases R2,A2,S1] [--node-env KEY=VALUE]...
 //! ```
 //! Env: `DEFRA_RUST_BINARY` (built `defra`), Go `defradb` on PATH with
 //! `DEFRA_GO_COMPAT_COMMIT` set.
@@ -42,6 +43,10 @@
 //! `--nodes docker` runs the M2 six-node topology as containers on a
 //! `soak-<run_id>` network instead of harness processes (p0-crud only);
 //! the backend is recorded in the manifest and honoured by `replay`.
+//!
+//! `manage` runs the management-channel cases (`manage/cases.rs`) on a
+//! NAC-enabled Rust mesh and writes `summary.json` + `cases.md` under
+//! `--out`; `--cases` selects from the table, default all.
 
 mod auth;
 mod checker;
@@ -49,6 +54,7 @@ mod churn;
 mod confirm;
 mod executor;
 mod generator;
+mod manage;
 mod meter;
 mod nodes;
 mod sse;
@@ -206,6 +212,8 @@ struct RunArgs {
     /// Start even if a `soak-*` network is left over from an earlier run.
     reuse_network: bool,
     topology: Option<Topology>,
+    /// `--node-acp-enable` with a startup identity on every node (`manage`).
+    nac: bool,
 }
 
 impl RunArgs {
@@ -290,6 +298,7 @@ impl RunArgs {
             docker,
             reuse_network: has_flag("reuse-network"),
             topology,
+            nac: false,
         })
     }
 
@@ -360,6 +369,7 @@ impl RunArgs {
                 None => None,
             },
             reuse_network: has_flag("reuse-network"),
+            nac: false,
         })
     }
 }
@@ -426,7 +436,24 @@ fn main() -> Result<()> {
             );
             tokio::runtime::Runtime::new()?.block_on(run(&run_dir, args))
         }
-        other => eyre::bail!("unknown command {other}; use run, replay, summarize or compare"),
+        "manage" => {
+            eyre::ensure!(
+                std::env::var_os("DEFRA_RUST_BINARY").is_some(),
+                "set DEFRA_RUST_BINARY to a built `defra` (e.g. <defradb.rs>/target/debug/defra)"
+            );
+            let mut args = RunArgs::from_flags()?;
+            args.nac = true;
+            let out = flag("out").ok_or_else(|| eyre!("manage needs --out <dir>"))?;
+            std::fs::create_dir_all(&out)?;
+            let out = Path::new(&out).canonicalize()?;
+            std::env::set_var("DEFRA_WORKSPACE_ROOT", &out);
+            std::env::set_var("DEFRA_E2E_KEEP", "1");
+            println!("out dir: {}", out.display());
+            tokio::runtime::Runtime::new()?.block_on(manage::run(&out, args))
+        }
+        other => {
+            eyre::bail!("unknown command {other}; use run, replay, manage, summarize or compare")
+        }
     }
 }
 
@@ -540,6 +567,9 @@ async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
     }
     if a.profile.is_acp() {
         builder = builder.with_acp_local();
+    }
+    if a.nac {
+        builder = builder.with_acp_local().with_nac();
     }
     if let Some(intervals) = &a.retry_intervals {
         let flag = ["--replicator-retry-intervals", intervals.as_str()];
