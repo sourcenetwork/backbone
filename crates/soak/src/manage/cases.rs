@@ -449,9 +449,9 @@ pub(super) fn every_op(relay_addr: &str) -> Vec<Value> {
     ]
 }
 
-/// The target's managed state as admin: replicators as (peer, collections),
-/// subscriptions, tracked documents. Connection health fields are left out
-/// so an idle status flip does not read as a change.
+/// The target's managed state as admin: replicators as (peer, collections,
+/// filters), subscriptions, tracked documents. Connection health fields
+/// are left out so an idle status flip does not read as a change.
 pub(super) async fn managed_state(
     ch: &mut dyn Channel,
     relay: usize,
@@ -469,7 +469,7 @@ pub(super) async fn managed_state(
         .as_array()
         .into_iter()
         .flatten()
-        .map(|r| json!([r["id"], r["collections"]]))
+        .map(|r| json!([r["id"], r["collections"], r["filters"]]))
         .collect();
     replicators.sort_by_key(|v| v.to_string());
     Ok(json!({

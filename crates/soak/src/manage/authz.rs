@@ -546,5 +546,24 @@ mod tests {
             matches!(&drifted, Outcome::Fail { expected, .. } if expected.contains("unchanged")),
             "{drifted:?}"
         );
+
+        let mut visited = false;
+        let refiltered = run_one("A2", move |_, _, _, actor, op| {
+            if actor == Actor::Outsider {
+                visited = true;
+                return status(403);
+            }
+            if op["Kind"] == "ReplicatorList" && visited {
+                return ok(json!({"Kind": "Replicators", "replicators": [
+                    {"id": "peer0", "address": "/ip4/127.0.0.1/tcp/0/p2p/peer0", "collections": ["bafy-user"], "filters": {"bafy-user": {"Field": "age", "Value": 1}}}
+                ]}));
+            }
+            admin_view(op)
+        })
+        .await;
+        assert!(
+            matches!(&refiltered, Outcome::Fail { expected, got } if expected.contains("unchanged") && got.contains("age")),
+            "{refiltered:?}"
+        );
     }
 }
