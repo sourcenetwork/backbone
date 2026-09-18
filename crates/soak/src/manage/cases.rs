@@ -36,6 +36,21 @@ pub struct OpRecord {
 pub enum Verb {
     Stop(usize),
     Start(usize),
+    Grant {
+        node: usize,
+        actor: Actor,
+        relation: &'static str,
+    },
+    Revoke {
+        node: usize,
+        actor: Actor,
+        relation: &'static str,
+    },
+    /// NAC on or off on one node, as the owner.
+    Nac {
+        node: usize,
+        on: bool,
+    },
 }
 
 /// Relay `op` through node `relay` to node `target` as `actor`.
@@ -151,9 +166,34 @@ pub fn all() -> Vec<Case> {
             run: |ch| Box::pin(routing::r3(ch)),
         },
         Case {
+            name: "A1",
+            requires: two,
+            run: |ch| Box::pin(authz::a1(ch)),
+        },
+        Case {
             name: "A2",
             requires: two,
             run: |ch| Box::pin(authz::a2(ch)),
+        },
+        Case {
+            name: "A3",
+            requires: two,
+            run: |ch| Box::pin(authz::a3(ch)),
+        },
+        Case {
+            name: "A4",
+            requires: two,
+            run: |ch| Box::pin(authz::a4(ch)),
+        },
+        Case {
+            name: "A5",
+            requires: three,
+            run: |ch| Box::pin(authz::a5(ch)),
+        },
+        Case {
+            name: "A6",
+            requires: two,
+            run: |ch| Box::pin(authz::a6(ch)),
         },
         Case {
             name: "S1",
@@ -218,6 +258,14 @@ pub(super) fn replicator_add(addr: &str) -> Value {
 
 pub(super) fn replicator_delete(addr: &str) -> Value {
     json!({ "Kind": "ReplicatorDelete", "addresses": [addr], "collection_ids": [COLLECTION] })
+}
+
+pub(super) fn collection_add() -> Value {
+    json!({ "Kind": "CollectionAdd", "collection_ids": [COLLECTION] })
+}
+
+pub(super) fn collection_remove() -> Value {
+    json!({ "Kind": "CollectionRemove", "collection_ids": [COLLECTION] })
 }
 
 /// Entries of a `Replicators` reply whose peer is `peer_id`. The relayed
@@ -429,7 +477,7 @@ mod tests {
         let names = |v: Vec<&Case>| v.iter().map(|c| c.name).collect::<Vec<_>>();
         assert_eq!(
             names(select(&table, None).unwrap()),
-            ["R1", "R2", "R3", "A2", "S1"]
+            ["R1", "R2", "R3", "A1", "A2", "A3", "A4", "A5", "A6", "S1"]
         );
         assert_eq!(names(select(&table, Some("S1, R2")).unwrap()), ["R2", "S1"]);
         assert!(select(&table, Some("R2,Z9")).is_err());

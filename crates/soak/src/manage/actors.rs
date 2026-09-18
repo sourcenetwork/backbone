@@ -17,8 +17,7 @@ pub enum Actor {
     Admin,
     /// `add-p2p-collection` and `list-p2p-replicator` only, so `CollectionAdd`
     /// lands and `ReplicatorAdd` is refused from the same actor. Granted on
-    /// every run; the first case to speak as it is A1.
-    #[allow(dead_code)]
+    /// every run.
     Operator,
     /// No grants.
     Outsider,

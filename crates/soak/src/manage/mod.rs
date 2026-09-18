@@ -16,6 +16,7 @@ use eyre::{ensure, eyre, Result, WrapErr};
 use futures::future::LocalBoxFuture;
 use serde_json::{json, Value};
 
+use crate::auth::auth_token;
 use crate::nodes::Nodes;
 use crate::{flag, has_flag, start_nodes, RunArgs, Topology};
 use actors::{Actor, Actors};
@@ -146,7 +147,8 @@ fn wire_mesh(nodes: &Nodes, owner: &str, addrs: &[String]) -> Result<()> {
 /// The real channel: actors' tokens, the relay's HTTP API, one record per
 /// request. After a mutate it reads the target's list for that op's
 /// family as admin, so the report shows the state every op left behind.
-/// Verbs go to the harness.
+/// Verbs go to the harness, except the NAC toggle, which is the node's own
+/// `/acp/node/{disable,re-enable}` route as the owner.
 struct Live<'n> {
     nodes: &'n mut Nodes,
     http: reqwest::Client,
@@ -251,6 +253,50 @@ impl Channel for Live<'_> {
             match verb {
                 Verb::Stop(i) => self.nodes.stop(i).await,
                 Verb::Start(i) => self.nodes.start_stopped(i).await,
+                Verb::Grant {
+                    node,
+                    actor,
+                    relation,
+                } => self
+                    .nodes
+                    .client(node)
+                    .acp_node_relationship_add(
+                        relation,
+                        &self.actors.identity(actor).did,
+                        &self.courier,
+                    )
+                    .map(drop),
+                Verb::Revoke {
+                    node,
+                    actor,
+                    relation,
+                } => self
+                    .nodes
+                    .client(node)
+                    .acp_node_relationship_delete(
+                        relation,
+                        &self.actors.identity(actor).did,
+                        &self.courier,
+                    )
+                    .map(drop),
+                Verb::Nac { node, on } => {
+                    let url = &self.urls[node];
+                    let route = if on { "re-enable" } else { "disable" };
+                    let resp = self
+                        .http
+                        .post(format!("{url}/api/v0/acp/node/{route}"))
+                        .bearer_auth(auth_token(&self.courier, url)?)
+                        .send()
+                        .await
+                        .wrap_err_with(|| format!("acp node {route} at {url}"))?;
+                    let status = resp.status();
+                    ensure!(
+                        status.is_success(),
+                        "acp node {route} at {url}: {status} {}",
+                        resp.text().await.unwrap_or_default()
+                    );
+                    Ok(())
+                }
             }
         })
     }
