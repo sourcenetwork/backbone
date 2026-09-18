@@ -55,13 +55,16 @@ pub(super) async fn r1(ch: &mut dyn Channel) -> Result<()> {
 /// R3: the target (node 1) is stopped before the call: the relay answers a
 /// clean 400 within the dial budget, and serves the target again once it
 /// is back. A missing reply is the hang the case exists to catch, not a
-/// harness fault.
+/// harness fault. The grants are re-applied after the check: a node that
+/// comes back without them is reported here and must not poison the rest.
 pub(super) async fn r3(ch: &mut dyn Channel) -> Result<()> {
     let (relay, target) = (0, 1);
     let list = json!({ "Kind": "CollectionList" });
     ch.control(Verb::Stop(target)).await?;
     let probe = ch.send(relay, target, Actor::Admin, list.clone()).await;
     ch.control(Verb::Start(target)).await?;
+    let next = ch.send(relay, target, Actor::Admin, list).await;
+    ch.control(Verb::Regrant(target)).await?;
     let probe = probe.map_err(|e| {
         fail(
             "a reply while the target is stopped",
@@ -75,8 +78,11 @@ pub(super) async fn r3(ch: &mut dyn Channel) -> Result<()> {
             format!("400 after {} ms: {}", probe.latency_ms, probe.body),
         ));
     }
-    let next = ch.send(relay, target, Actor::Admin, list).await?;
-    expect_status(&next, 200, "CollectionList after the target restarted")
+    expect_status(
+        &next?,
+        200,
+        "admin CollectionList via the relay after the target restarted",
+    )
 }
 
 /// R2: the relay (node 0) has no replicator to the target (node 1); an admin
@@ -275,7 +281,7 @@ mod tests {
         let verbs = std::rc::Rc::default();
         let (outcome, seen) = run_fake("R3", stopped_target(verbs, after(400, 9_800))).await;
         assert_eq!(outcome, Outcome::Pass);
-        assert_eq!(seen, [Verb::Stop(1), Verb::Start(1)]);
+        assert_eq!(seen, [Verb::Stop(1), Verb::Start(1), Verb::Regrant(1)]);
     }
 
     #[tokio::test]
@@ -286,7 +292,7 @@ mod tests {
             "{:?}",
             slow.0
         );
-        assert_eq!(slow.1, [Verb::Stop(1), Verb::Start(1)]);
+        assert_eq!(slow.1, [Verb::Stop(1), Verb::Start(1), Verb::Regrant(1)]);
 
         let hung = run_fake(
             "R3",
@@ -298,7 +304,7 @@ mod tests {
             "{:?}",
             hung.0
         );
-        assert_eq!(hung.1, [Verb::Stop(1), Verb::Start(1)]);
+        assert_eq!(hung.1, [Verb::Stop(1), Verb::Start(1), Verb::Regrant(1)]);
 
         let served = run_fake("R3", stopped_target(Default::default(), after(200, 5))).await;
         assert!(
@@ -306,6 +312,24 @@ mod tests {
             "{:?}",
             served.0
         );
+    }
+
+    #[tokio::test]
+    async fn r3_fails_when_the_restarted_target_refuses_admin_and_still_regrants() {
+        let verbs: std::rc::Rc<std::cell::RefCell<Vec<Verb>>> = Default::default();
+        let seen = verbs.clone();
+        let mut fake = Fake::new(move |_, target, _, _, op| match seen.borrow().last() {
+            Some(Verb::Stop(1)) if target == 1 => after(400, 9_800),
+            Some(Verb::Start(1)) if target == 1 => status(403),
+            _ => admin_view(op),
+        });
+        fake.verbs = verbs;
+        let (outcome, verbs) = run_fake("R3", fake).await;
+        assert!(
+            matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("restarted") && got.starts_with("403")),
+            "{outcome:?}"
+        );
+        assert_eq!(verbs, [Verb::Stop(1), Verb::Start(1), Verb::Regrant(1)]);
     }
 
     #[tokio::test]

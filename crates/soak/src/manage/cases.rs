@@ -36,6 +36,8 @@ pub struct OpRecord {
 pub enum Verb {
     Stop(usize),
     Start(usize),
+    /// The actors' grants on one node again, after a restart.
+    Regrant(usize),
     Grant {
         node: usize,
         actor: Actor,

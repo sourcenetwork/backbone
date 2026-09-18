@@ -253,6 +253,7 @@ impl Channel for Live<'_> {
             match verb {
                 Verb::Stop(i) => self.nodes.stop(i).await,
                 Verb::Start(i) => self.nodes.start_stopped(i).await,
+                Verb::Regrant(i) => self.actors.grant_on(self.nodes, i, &self.courier),
                 Verb::Grant {
                     node,
                     actor,
