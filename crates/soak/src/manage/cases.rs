@@ -7,7 +7,7 @@
 use std::fmt;
 
 use eyre::{ensure, Result};
-use futures::future::LocalBoxFuture;
+use futures::future::{BoxFuture, LocalBoxFuture};
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -53,6 +53,22 @@ pub enum Verb {
         node: usize,
         on: bool,
     },
+    Partition(usize),
+    Rejoin(usize),
+    /// Freeze the node's process `delay_ms` from now, without waiting: its
+    /// connections stay up, it reads nothing until `Resume`.
+    PauseAfter {
+        node: usize,
+        delay_ms: u64,
+    },
+    Resume(usize),
+    /// A replicator from `node` to `peer` through `node`'s own HTTP API as
+    /// the owner, with the suite's collection and these filters.
+    LocalReplicatorAdd {
+        node: usize,
+        peer: usize,
+        filters: Value,
+    },
 }
 
 /// Relay `op` through node `relay` to node `target` as `actor`.
@@ -79,8 +95,18 @@ pub trait Channel {
         self.send_for(relay, target, target, actor, op)
     }
     fn control<'a>(&'a mut self, verb: Verb) -> LocalBoxFuture<'a, Result<()>>;
+    /// GraphQL on `node`'s own HTTP API as the owner; the `data` object.
+    /// Owned so a case can spawn it beside its ops.
+    fn gql(&self, node: usize, query: String) -> BoxFuture<'static, Result<Value>>;
+    fn can_partition(&self) -> bool;
+    /// Something the report keeps beside the outcome: a mode the case
+    /// observed and did not assert.
+    fn note(&mut self, text: String);
     /// The requests since the last call, for the report.
     fn take_records(&mut self) -> Vec<OpRecord> {
+        Vec::new()
+    }
+    fn take_notes(&mut self) -> Vec<String> {
         Vec::new()
     }
 }
@@ -118,6 +144,22 @@ pub(super) fn fail(expected: impl Into<String>, got: impl Into<String>) -> eyre:
     .into()
 }
 
+/// A case that cannot run here; the runner turns it into [`Outcome::Skip`].
+#[derive(Debug)]
+pub struct Skipped(pub String);
+
+impl fmt::Display for Skipped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "skipped: {}", self.0)
+    }
+}
+
+impl std::error::Error for Skipped {}
+
+pub(super) fn skip(reason: impl Into<String>) -> eyre::Report {
+    Skipped(reason.into()).into()
+}
+
 pub(super) fn expect_status(r: &Reply, want: u16, what: &str) -> Result<()> {
     if r.status == want {
         Ok(())
@@ -146,6 +188,7 @@ pub struct CaseReport {
     pub name: &'static str,
     pub outcome: Outcome,
     pub ops: Vec<OpRecord>,
+    pub notes: Vec<String>,
 }
 
 pub fn all() -> Vec<Case> {
@@ -233,22 +276,27 @@ pub async fn run_all(ch: &mut dyn Channel, cases: &[&Case], rust_nodes: usize) -
         } else {
             match (case.run)(ch).await {
                 Ok(()) => Outcome::Pass,
-                Err(e) => match e.downcast_ref::<Failed>() {
-                    Some(f) => Outcome::Fail {
+                Err(e) => match (e.downcast_ref::<Failed>(), e.downcast_ref::<Skipped>()) {
+                    (Some(f), _) => Outcome::Fail {
                         expected: f.expected.clone(),
                         got: f.got.clone(),
                     },
-                    None => Outcome::Infra {
+                    (_, Some(s)) => Outcome::Skip {
+                        reason: s.0.clone(),
+                    },
+                    _ => Outcome::Infra {
                         error: format!("{e:#}"),
                     },
                 },
             }
         };
-        println!("case {}: {outcome:?}", case.name);
+        let notes = ch.take_notes();
+        println!("case {}: {outcome:?} {}", case.name, notes.join("; "));
         reports.push(CaseReport {
             name: case.name,
             outcome,
             ops: ch.take_records(),
+            notes,
         });
     }
     reports
@@ -339,12 +387,19 @@ pub(super) mod fake {
     /// `(relay, target, audience, actor, op)`.
     pub type Rule = dyn FnMut(usize, usize, usize, Actor, &Value) -> Result<Reply>;
 
+    /// `(node, query)`.
+    pub type GqlRule = dyn FnMut(usize, &str) -> Result<Value>;
+
     /// A channel that answers from a rule and records every verb; `Err`
     /// from the rule is a transport fault. Share `verbs` with the rule
     /// when a reply depends on a verb (a stopped node, a revoked grant).
+    /// `gql` answers the data plane; the default is an empty node.
     pub struct Fake {
         pub rule: Box<Rule>,
+        pub gql: RefCell<Box<GqlRule>>,
         pub verbs: Rc<RefCell<Vec<Verb>>>,
+        pub notes: Vec<String>,
+        pub partition: bool,
     }
 
     impl Fake {
@@ -353,7 +408,10 @@ pub(super) mod fake {
         ) -> Self {
             Self {
                 rule: Box::new(rule),
+                gql: RefCell::new(Box::new(|_, _| Ok(json!({ "User": [] })))),
                 verbs: Rc::default(),
+                notes: Vec::new(),
+                partition: true,
             }
         }
     }
@@ -382,6 +440,19 @@ pub(super) mod fake {
         fn control<'a>(&'a mut self, verb: Verb) -> LocalBoxFuture<'a, Result<()>> {
             self.verbs.borrow_mut().push(verb);
             Box::pin(async { Ok(()) })
+        }
+        fn gql(&self, node: usize, query: String) -> BoxFuture<'static, Result<Value>> {
+            let r = (self.gql.borrow_mut())(node, &query);
+            Box::pin(async move { r })
+        }
+        fn can_partition(&self) -> bool {
+            self.partition
+        }
+        fn note(&mut self, text: String) {
+            self.notes.push(text);
+        }
+        fn take_notes(&mut self) -> Vec<String> {
+            std::mem::take(&mut self.notes)
         }
     }
 
@@ -424,6 +495,13 @@ pub(super) mod fake {
         let outcome = run_all(&mut fake, &[&case], 3).await.remove(0).outcome;
         let verbs = fake.verbs.borrow().clone();
         (outcome, verbs)
+    }
+
+    /// `run_fake`, with the notes the case recorded.
+    pub async fn run_noted(name: &str, mut fake: Fake) -> (Outcome, Vec<String>) {
+        let case = by_name(name);
+        let report = run_all(&mut fake, &[&case], 3).await.remove(0);
+        (report.outcome, report.notes)
     }
 
     pub async fn run_one(
@@ -471,6 +549,19 @@ mod tests {
         };
         let r = run_all(&mut fake, &[&three], 2).await.remove(0);
         assert!(matches!(r.outcome, Outcome::Skip { .. }), "{:?}", r.outcome);
+
+        let bowed_out = Case {
+            name: "Y",
+            requires: Topo { min_rust: 2 },
+            run: |_| Box::pin(async { Err(skip("no partition here")) }),
+        };
+        let r = run_all(&mut fake, &[&bowed_out], 3).await.remove(0);
+        assert_eq!(
+            r.outcome,
+            Outcome::Skip {
+                reason: "no partition here".into()
+            }
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ fn markdown(topology: &str, reports: &[CaseReport]) -> String {
     let mut md = format!("# soak manage ({topology})\n\n| case | outcome | ops | slowest ms | detail |\n|---|---|---|---|---|\n");
     for r in reports {
         let (outcome, detail) = match &r.outcome {
-            Outcome::Pass => ("pass", String::new()),
+            Outcome::Pass => ("pass", r.notes.join("; ")),
             Outcome::Fail { expected, got } => ("FAIL", format!("expected {expected}; got {got}")),
             Outcome::Skip { reason } => ("skip", reason.clone()),
             Outcome::Infra { error } => ("INFRA", error.clone()),

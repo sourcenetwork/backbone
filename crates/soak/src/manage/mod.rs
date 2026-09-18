@@ -6,6 +6,7 @@ pub mod actors;
 pub mod authz;
 pub mod cases;
 pub mod client;
+pub mod data;
 pub mod report;
 pub mod routing;
 pub mod state;
@@ -13,7 +14,7 @@ pub mod state;
 use std::path::Path;
 
 use eyre::{ensure, eyre, Result, WrapErr};
-use futures::future::LocalBoxFuture;
+use futures::future::{BoxFuture, LocalBoxFuture};
 use serde_json::{json, Value};
 
 use crate::auth::auth_token;
@@ -22,7 +23,8 @@ use crate::{flag, has_flag, start_nodes, RunArgs, Topology};
 use actors::{Actor, Actors};
 use cases::{Channel, OpRecord, Verb};
 
-const SCHEMA: &str = "type User { name: String age: Int }";
+/// `age` is immutable so a replication filter may use it (S3).
+const SCHEMA: &str = "type User { name: String age: Int @immutable }";
 
 pub async fn run(out: &Path, a: RunArgs) -> Result<()> {
     let topology = a
@@ -110,6 +112,7 @@ async fn drive(
         courier: owner,
         actors,
         records: Vec::new(),
+        notes: Vec::new(),
     };
     let reports = cases::run_all(&mut live, selected, topology.rust).await;
     report::write(out, &topology.label(), &reports)?;
@@ -158,6 +161,7 @@ struct Live<'n> {
     courier: String,
     actors: Actors,
     records: Vec<OpRecord>,
+    notes: Vec<String>,
 }
 
 fn family_list(kind: &str) -> Option<&'static str> {
@@ -172,6 +176,35 @@ fn family_list(kind: &str) -> Option<&'static str> {
 }
 
 impl Live<'_> {
+    fn pid(&self, node: usize) -> Result<u32> {
+        self.nodes
+            .pid(node)
+            .ok_or_else(|| eyre!("{}: no process to signal", self.nodes.name(node)))
+    }
+
+    /// POST to `node`'s own `/api/v0/{route}` as the owner.
+    async fn post_own(&self, node: usize, route: &str, body: Option<&Value>) -> Result<()> {
+        let url = &self.urls[node];
+        let mut req = self
+            .http
+            .post(format!("{url}/api/v0/{route}"))
+            .bearer_auth(auth_token(&self.courier, url)?);
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        let resp = req
+            .send()
+            .await
+            .wrap_err_with(|| format!("{route} at {url}"))?;
+        let status = resp.status();
+        ensure!(
+            status.is_success(),
+            "{route} at {url}: {status} {}",
+            resp.text().await.unwrap_or_default()
+        );
+        Ok(())
+    }
+
     async fn post(
         &mut self,
         relay: usize,
@@ -281,28 +314,63 @@ impl Channel for Live<'_> {
                     )
                     .map(drop),
                 Verb::Nac { node, on } => {
-                    let url = &self.urls[node];
                     let route = if on { "re-enable" } else { "disable" };
-                    let resp = self
-                        .http
-                        .post(format!("{url}/api/v0/acp/node/{route}"))
-                        .bearer_auth(auth_token(&self.courier, url)?)
-                        .send()
+                    self.post_own(node, &format!("acp/node/{route}"), None)
                         .await
-                        .wrap_err_with(|| format!("acp node {route} at {url}"))?;
-                    let status = resp.status();
-                    ensure!(
-                        status.is_success(),
-                        "acp node {route} at {url}: {status} {}",
-                        resp.text().await.unwrap_or_default()
-                    );
+                }
+                Verb::Partition(i) => self.nodes.partition(i).await,
+                Verb::Rejoin(i) => self.nodes.rejoin(i).await,
+                Verb::PauseAfter { node, delay_ms } => {
+                    let pid = self.pid(node)?;
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        if let Err(e) = crate::nodes::signal(pid, "-STOP") {
+                            eprintln!("pause of pid {pid}: {e:#}");
+                        }
+                    });
                     Ok(())
+                }
+                Verb::Resume(i) => crate::nodes::signal(self.pid(i)?, "-CONT"),
+                Verb::LocalReplicatorAdd {
+                    node,
+                    peer,
+                    filters,
+                } => {
+                    let body = json!({
+                        "Collections": [cases::COLLECTION],
+                        "Addresses": [self.addrs[peer]],
+                        "Filters": filters,
+                    });
+                    self.post_own(node, "p2p/replicators", Some(&body)).await
                 }
             }
         })
     }
 
+    fn gql(&self, node: usize, query: String) -> BoxFuture<'static, Result<Value>> {
+        let http = self.http.clone();
+        let url = self.urls[node].clone();
+        let token = auth_token(&self.courier, &url);
+        Box::pin(async move {
+            crate::executor::gql_as(&http, &url, &query, Some(&token?))
+                .await
+                .map_err(|e| eyre!("{e} at {url}"))
+        })
+    }
+
+    fn can_partition(&self) -> bool {
+        self.nodes.supports_partition()
+    }
+
+    fn note(&mut self, text: String) {
+        self.notes.push(text);
+    }
+
     fn take_records(&mut self) -> Vec<OpRecord> {
         std::mem::take(&mut self.records)
+    }
+
+    fn take_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes)
     }
 }
