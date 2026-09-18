@@ -444,10 +444,12 @@ pub(super) mod fake {
     /// A channel that answers from a rule and records every verb; `Err`
     /// from the rule is a transport fault. Share `verbs` with the rule
     /// when a reply depends on a verb (a stopped node, a revoked grant).
-    /// `gql` answers the data plane; the default is an empty node.
+    /// `gql` answers the data plane `gql_ms` later, in tokio time; the
+    /// default is an empty node answering at once.
     pub struct Fake {
         pub rule: RefCell<Box<Rule>>,
         pub gql: RefCell<Box<GqlRule>>,
+        pub gql_ms: u64,
         pub verbs: Rc<RefCell<Vec<Verb>>>,
         pub notes: Vec<String>,
         pub partition: bool,
@@ -461,6 +463,7 @@ pub(super) mod fake {
             Self {
                 rule: RefCell::new(Box::new(rule)),
                 gql: RefCell::new(Box::new(|_, _| Ok(json!({ "User": [] })))),
+                gql_ms: 0,
                 verbs: Rc::default(),
                 notes: Vec::new(),
                 partition: true,
@@ -499,7 +502,13 @@ pub(super) mod fake {
         }
         fn gql(&self, node: usize, query: String) -> BoxFuture<'static, Result<Value>> {
             let r = (self.gql.borrow_mut())(node, &query);
-            Box::pin(async move { r })
+            let delay = std::time::Duration::from_millis(self.gql_ms);
+            Box::pin(async move {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                r
+            })
         }
         fn can_partition(&self) -> bool {
             self.partition

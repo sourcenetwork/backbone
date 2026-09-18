@@ -3,6 +3,7 @@
 
 use eyre::Result;
 use serde_json::json;
+use tokio::time::Instant;
 
 use super::actors::Actor;
 use super::cases::{
@@ -66,25 +67,62 @@ pub(super) async fn p1(ch: &mut dyn Channel) -> Result<()> {
 }
 
 /// C1: a fixed op sequence on the source while a burst of documents is
-/// written there: every op lands, the source's managed state is back
-/// where it started, and the sink has as many documents as the source.
+/// written there: every op lands, at least one is answered before the
+/// burst's own reply comes back (the timestamps are noted), the source's
+/// managed state is back where it started, and the sink has as many
+/// documents as the source.
 pub(super) async fn c1(ch: &mut dyn Channel) -> Result<()> {
     let (relay, source) = (0, 1);
     let sink = relay;
     let before = managed_state(ch, relay, source).await?;
-    let burst = tokio::spawn(ch.gql(source, create_users(BURST, 1)));
+    let started = Instant::now();
+    let write = ch.gql(source, create_users(BURST, 1));
+    let burst = tokio::spawn(async move { (write.await, Instant::now()) });
     let ops = [
         collection_add(),
         document_add(SYNTH_DOC),
         collection_remove(),
         document_remove(SYNTH_DOC),
     ];
+    let mut spans = Vec::new();
     for op in ops {
         let kind = op["Kind"].as_str().unwrap_or_default().to_string();
+        let sent = started.elapsed();
         let r = ch.send(relay, source, Actor::Admin, op).await?;
+        spans.push((kind.clone(), sent, started.elapsed()));
         expect_status(&r, 200, &format!("{kind} during the burst"))?;
     }
-    let written = ids_in(&burst.await??, &format!("add_{COLLECTION}"));
+    let (data, ended) = burst.await?;
+    let ended = ended - started;
+    let written = ids_in(&data?, &format!("add_{COLLECTION}"));
+    let inside = spans
+        .iter()
+        .filter(|(_, _, replied)| *replied < ended)
+        .count();
+    ch.note(format!(
+        "burst 0..{} ms; {}; {inside} of {} ops inside",
+        ended.as_millis(),
+        spans
+            .iter()
+            .map(|(kind, sent, replied)| format!(
+                "{kind} {}..{} ms",
+                sent.as_millis(),
+                replied.as_millis()
+            ))
+            .collect::<Vec<_>>()
+            .join(", "),
+        spans.len()
+    ));
+    if inside == 0 {
+        return Err(fail(
+            "an op answered while the burst was in flight",
+            format!(
+                "sequential, not concurrent: the burst ended at {} ms, the first op was answered at {} ms",
+                ended.as_millis(),
+                spans[0].2.as_millis()
+            ),
+        ));
+    }
     if written.len() != BURST {
         return Err(fail(
             format!("{BURST} documents from the burst"),
@@ -203,17 +241,28 @@ mod tests {
         assert!(verbs.is_empty());
     }
 
-    #[tokio::test]
-    async fn c1_lands_every_op_beside_the_burst_and_wants_the_sink_to_catch_up() {
+    /// `fake` with a data plane whose sink sees `sink_sees`, answering
+    /// 100 ms later, so a burst is in flight while the ops go out.
+    fn bursting(mut fake: Fake, sink_sees: impl Fn(i64) -> bool + 'static) -> Fake {
+        fake.gql = RefCell::new(Box::new(store(sink_sees)));
+        fake.gql_ms = 100;
+        fake
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c1_lands_every_op_inside_the_burst_and_wants_the_sink_to_catch_up() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut fake = Fake::new(move |_, target, _, _, op| {
+        let fake = Fake::new(move |_, target, _, _, op| {
             tx.send((target, op["Kind"].as_str().unwrap().to_string()))
                 .unwrap();
             admin_view(op)
         });
-        fake.gql = RefCell::new(Box::new(store(|_| true)));
-        let (outcome, _) = run_fake("C1", fake).await;
+        let (outcome, notes) = run_noted("C1", bursting(fake, |_| true)).await;
         assert_eq!(outcome, Outcome::Pass);
+        assert_eq!(
+            notes,
+            ["burst 0..100 ms; CollectionAdd 0..0 ms, DocumentAdd 0..0 ms, CollectionRemove 0..0 ms, DocumentRemove 0..0 ms; 4 of 4 ops inside"]
+        );
         let kinds: Vec<String> = rx
             .try_iter()
             .filter(|(t, k)| *t == 1 && !k.ends_with("List"))
@@ -231,34 +280,48 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn c1_fails_when_the_count_diverges_after_settle() {
+    async fn c1_fails_when_no_op_is_answered_while_the_burst_is_in_flight() {
         let mut fake = Fake::new(|_, _, _, _, op| admin_view(op));
-        fake.gql = RefCell::new(Box::new(store(|_| false)));
-        let (outcome, _) = run_fake("C1", fake).await;
+        fake.gql = RefCell::new(Box::new(store(|_| true)));
+        // The burst answers at once, so it is over before the first op replies.
+        let (outcome, notes) = run_noted("C1", fake).await;
+        assert!(
+            matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("in flight") && got.starts_with("sequential, not concurrent")),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            notes,
+            ["burst 0..0 ms; CollectionAdd 0..0 ms, DocumentAdd 0..0 ms, CollectionRemove 0..0 ms, DocumentRemove 0..0 ms; 0 of 4 ops inside"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn c1_fails_when_the_count_diverges_after_settle() {
+        let fake = Fake::new(|_, _, _, _, op| admin_view(op));
+        let (outcome, _) = run_fake("C1", bursting(fake, |_| false)).await;
         assert!(
             matches!(&outcome, Outcome::Fail { expected, got } if expected.contains("50 documents") && got == "0"),
             "{outcome:?}"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn c1_fails_on_a_refused_op_or_drifted_state() {
-        let mut refused = Fake::new(|_, _, _, _, op| {
+        let refused = Fake::new(|_, _, _, _, op| {
             if op["Kind"] == "DocumentAdd" {
                 status(400)
             } else {
                 admin_view(op)
             }
         });
-        refused.gql = RefCell::new(Box::new(store(|_| true)));
-        let (outcome, _) = run_fake("C1", refused).await;
+        let (outcome, _) = run_fake("C1", bursting(refused, |_| true)).await;
         assert!(
             matches!(&outcome, Outcome::Fail { expected, .. } if expected.contains("DocumentAdd during the burst")),
             "{outcome:?}"
         );
 
         let lists = RefCell::new(0);
-        let mut drifted = Fake::new(move |_, _, _, _, op| {
+        let drifted = Fake::new(move |_, _, _, _, op| {
             if op["Kind"] == "CollectionList" {
                 *lists.borrow_mut() += 1;
                 if *lists.borrow() > 1 {
@@ -267,8 +330,7 @@ mod tests {
             }
             admin_view(op)
         });
-        drifted.gql = RefCell::new(Box::new(store(|_| true)));
-        let (outcome, _) = run_fake("C1", drifted).await;
+        let (outcome, _) = run_fake("C1", bursting(drifted, |_| true)).await;
         assert!(
             matches!(&outcome, Outcome::Fail { expected, .. } if expected.contains("back where it started")),
             "{outcome:?}"
