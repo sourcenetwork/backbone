@@ -40,9 +40,13 @@ fn filters_for(body: &Value, peer_id: &str) -> Value {
         .map_or(Value::Null, |r| r["filters"].clone())
 }
 
-/// Every replicator from `source`, dropped (`add` false) or restored.
+/// Every replicator from `source`, to Rust and Go peers alike, dropped
+/// (`add` false) or restored. A Go peer forwards what it receives to its
+/// own replicators, so one left in place would leak the source's writes
+/// around a filter.
 async fn mesh_from(ch: &mut dyn Channel, relay: usize, source: usize, add: bool) -> Result<()> {
-    for j in (0..ch.len()).filter(|j| *j != source) {
+    let peers = (0..ch.len()).chain(ch.go_nodes());
+    for j in peers.filter(|j| *j != source) {
         let addr = ch.addr(j);
         let (op, name) = if add {
             (replicator_add(&addr), "ReplicatorAdd")
@@ -440,6 +444,42 @@ mod tests {
             .filter(|(t, k)| *t == 1 && k == "ReplicatorAdd")
             .count();
         assert_eq!(adds, 3, "one filtered add, two restoring the mesh: {ops:?}");
+    }
+
+    #[tokio::test]
+    async fn s3_drops_and_restores_the_source_replicators_to_the_go_nodes_too() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut fake = source_lists(json!({"User": {"Field": "age", "Value": 1}}));
+        fake.go = vec![3];
+        let inner = fake.rule.replace(Box::new(|_, _, _, _, _| status(200)));
+        let inner = RefCell::new(inner);
+        fake.rule = RefCell::new(Box::new(move |r, t, a, actor, op| {
+            tx.send((
+                t,
+                op["Kind"].as_str().unwrap().to_string(),
+                op["addresses"][0].clone(),
+            ))
+            .unwrap();
+            (inner.borrow_mut())(r, t, a, actor, op)
+        }));
+        fake.gql = RefCell::new(Box::new(store(|age| age == 1)));
+        let (outcome, _) = run_fake("S3", fake).await;
+        assert_eq!(outcome, Outcome::Pass);
+        let ops: Vec<_> = rx.try_iter().collect();
+        let to_go = |kind: &str| {
+            ops.iter()
+                .filter(|(t, k, a)| *t == 1 && k == kind && a == &fake_addr(3))
+                .count()
+        };
+        assert_eq!(
+            (to_go("ReplicatorDelete"), to_go("ReplicatorAdd")),
+            (1, 1),
+            "{ops:?}"
+        );
+    }
+
+    fn fake_addr(node: usize) -> Value {
+        json!(format!("/ip4/127.0.0.1/tcp/{node}/p2p/peer{node}"))
     }
 
     #[tokio::test]

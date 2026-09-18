@@ -21,13 +21,16 @@ use futures::future::{BoxFuture, LocalBoxFuture};
 use serde_json::{json, Value};
 
 use crate::auth::auth_token;
-use crate::nodes::Nodes;
+use crate::nodes::{NodeKind, Nodes};
 use crate::{flag, has_flag, start_nodes, RunArgs, Topology, Transport};
 use actors::{Actor, Actors};
 use cases::{Channel, OpRecord, Verb};
 
-/// `age` is immutable so a replication filter may use it (S3).
+/// `age` is immutable so a replication filter may use it (S3). Go has no
+/// `@immutable`; the directive does not enter the collection id, so a Go
+/// node takes the plain form and shares the collection.
 const SCHEMA: &str = "type User { name: String age: Int @immutable }";
+const GO_SCHEMA: &str = "type User { name: String age: Int }";
 
 /// Past this many doc refs a mutate's after-state is not report material
 /// (the bounds cases send hundreds of thousands).
@@ -37,8 +40,7 @@ pub async fn run(out: &Path, a: RunArgs) -> Result<()> {
     let topology = a
         .topology
         .ok_or_else(|| eyre!("manage needs --topology <n>r<m>g"))?;
-    ensure!(topology.rust >= 2, "manage needs at least two Rust nodes");
-    ensure!(topology.go == 0, "manage: Go nodes in the mesh are step 3");
+    accept(topology, a.transport)?;
     ensure!(
         !a.docker && !has_flag("docker"),
         "manage --docker: unsupported yet"
@@ -53,6 +55,18 @@ pub async fn run(out: &Path, a: RunArgs) -> Result<()> {
     let shutdown = nodes.shutdown().await;
     result?;
     shutdown
+}
+
+/// Every manage target is Rust; Go nodes are replication peers only, and
+/// only over libp2p, the one transport Go speaks.
+fn accept(topology: Topology, transport: Transport) -> Result<()> {
+    ensure!(topology.rust >= 2, "manage needs at least two Rust nodes");
+    ensure!(
+        topology.go == 0 || transport == Transport::Libp2p,
+        "manage --transport iroh: Go nodes cannot speak iroh; use --topology {}r0g",
+        topology.rust
+    );
+    Ok(())
 }
 
 async fn drive(
@@ -86,7 +100,7 @@ async fn drive(
     }
     wire_mesh(nodes, &owner, &addrs)?;
     let actors = Actors::generate(&nodes.binaries()?[0])?;
-    for i in 0..n {
+    for i in 0..topology.rust {
         actors.grant_on(nodes, i, &owner)?;
     }
     println!(
@@ -101,7 +115,8 @@ async fn drive(
         "topology": topology.label(),
         "transport": transport.label(),
         "nodes": (0..n).map(|i| json!({
-            "name": nodes.name(i), "api_url": nodes.api_url(i), "p2p_addr": addrs[i], "peer_id": peer_ids[i],
+            "name": nodes.name(i), "runtime": nodes.kind(i), "api_url": nodes.api_url(i),
+            "p2p_addr": addrs[i], "peer_id": peer_ids[i],
         })).collect::<Vec<_>>(),
         "owner_key_hex": owner,
         "actors": actors,
@@ -116,6 +131,7 @@ async fn drive(
         http: crate::executor::http_client(std::time::Duration::from_secs(60)),
         urls: (0..n).map(|i| nodes.api_url(i)).collect(),
         nodes,
+        rust: topology.rust,
         transport,
         addrs,
         peer_ids,
@@ -136,16 +152,22 @@ fn peer_id_of(addr: &str) -> &str {
     addr.rsplit("/p2p/").next().unwrap_or(addr)
 }
 
-/// Schema, peer connections and a replicator per ordered pair, every verb
-/// as the NAC owner. No collection subscribe: replicators are the only
-/// delivery path, and `CollectionAdd` stays a clean toggle for the cases.
+/// Schema, peer connections and a replicator per ordered pair, Go nodes
+/// included, every verb as the NAC owner. No collection subscribe:
+/// replicators are the only delivery path, `CollectionAdd` stays a clean
+/// toggle for the cases, and a Go node forwards only what a replicator
+/// gave it.
 fn wire_mesh(nodes: &Nodes, owner: &str, addrs: &[String]) -> Result<()> {
     let n = nodes.len();
     for i in 0..n {
         let name = nodes.name(i);
         let client = nodes.client(i);
+        let schema = match nodes.kind(i) {
+            NodeKind::Rust => SCHEMA,
+            NodeKind::Go => GO_SCHEMA,
+        };
         client
-            .schema_add_with_identity(SCHEMA, owner)
+            .schema_add_with_identity(schema, owner)
             .wrap_err_with(|| format!("schema on {name}"))?;
         let others: Vec<&str> = (0..n)
             .filter(|j| *j != i)
@@ -170,6 +192,8 @@ fn wire_mesh(nodes: &Nodes, owner: &str, addrs: &[String]) -> Result<()> {
 /// `/acp/node/{disable,re-enable}` route as the owner.
 struct Live<'n> {
     nodes: &'n mut Nodes,
+    /// Nodes `0..rust` are Rust, the rest Go.
+    rust: usize,
     transport: Transport,
     http: reqwest::Client,
     urls: Vec<String>,
@@ -245,7 +269,11 @@ impl Live<'_> {
 
 impl Channel for Live<'_> {
     fn len(&self) -> usize {
-        self.urls.len()
+        self.rust
+    }
+
+    fn go_nodes(&self) -> Vec<usize> {
+        (self.rust..self.urls.len()).collect()
     }
 
     fn transport(&self) -> Transport {
@@ -408,6 +436,17 @@ impl Channel for Live<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn go_nodes_join_on_libp2p_only() {
+        let t = |rust, go| Topology { rust, go };
+        assert!(accept(t(2, 0), Transport::Libp2p).is_ok());
+        assert!(accept(t(2, 2), Transport::Libp2p).is_ok());
+        assert!(accept(t(3, 0), Transport::Iroh).is_ok());
+        let refused = accept(t(2, 2), Transport::Iroh).unwrap_err().to_string();
+        assert!(refused.contains("Go nodes cannot speak iroh"), "{refused}");
+        assert!(accept(t(1, 2), Transport::Libp2p).is_err());
+    }
 
     #[test]
     fn peer_id_of_reads_the_libp2p_and_iroh_address_forms() {

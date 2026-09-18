@@ -4,6 +4,7 @@
 //! Each case restores what it changed. The cases live by group in
 //! `routing.rs`, `authz.rs`, `state.rs`, `bounds.rs` and `partition.rs`.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use eyre::{eyre, Result};
@@ -76,7 +77,13 @@ pub enum Verb {
 /// Relay `op` through node `relay` to node `target` as `actor`. Sends
 /// borrow the channel shared, so a case can hold two in flight at once.
 pub trait Channel {
+    /// The Rust nodes, `0..len`: the only ones a manage op can target.
     fn len(&self) -> usize;
+    /// The Go nodes, replication peers only; their own HTTP still answers
+    /// `gql` and `replicators`.
+    fn go_nodes(&self) -> Vec<usize> {
+        Vec::new()
+    }
     fn transport(&self) -> Transport;
     fn addr(&self, node: usize) -> String;
     fn peer_id(&self, node: usize) -> String;
@@ -323,17 +330,19 @@ pub fn select<'a>(all: &'a [Case], filter: Option<&str>) -> Result<Vec<&'a Case>
 }
 
 /// Before a case, the cheapest admin query to every node it uses: node 0
-/// over its own HTTP as the owner, the rest through node 0 as relay. A
-/// node that does not answer is named with the last case that used it,
-/// so a wedge left behind reads as `Infra`, not as this case's `Fail`.
+/// and every Go node over their own HTTP as the owner, the other Rust
+/// nodes through node 0 as relay. A node that does not answer is named
+/// with the last case that used it, so a wedge left behind reads as
+/// `Infra`, not as this case's `Fail`.
 async fn unreachable(
     ch: &mut dyn Channel,
     case: &Case,
-    last_touch: &[Option<&str>],
+    last_touch: &HashMap<usize, &str>,
 ) -> Option<String> {
-    for (node, touched) in last_touch.iter().enumerate().take(case.requires.min_rust) {
-        let answered = if node == 0 {
-            ch.gql(0, list_users())
+    let go = ch.go_nodes();
+    for node in (0..case.requires.min_rust).chain(go.iter().copied()) {
+        let answered = if node == 0 || go.contains(&node) {
+            ch.gql(node, list_users())
                 .await
                 .map(drop)
                 .map_err(|e| format!("{e:#}"))
@@ -352,10 +361,11 @@ async fn unreachable(
         };
         if let Err(why) = answered {
             ch.take_records();
+            let runtime = if go.contains(&node) { "go " } else { "" };
             return Some(format!(
-                "node {node} unreachable before {}; last case to touch it: {} ({why})",
+                "{runtime}node {node} unreachable before {}; last case to touch it: {} ({why})",
                 case.name,
-                touched.unwrap_or("none")
+                last_touch.get(&node).unwrap_or(&"none")
             ));
         }
     }
@@ -365,7 +375,7 @@ async fn unreachable(
 
 pub async fn run_all(ch: &mut dyn Channel, cases: &[&Case], rust_nodes: usize) -> Vec<CaseReport> {
     let mut reports = Vec::new();
-    let mut last_touch: Vec<Option<&str>> = vec![None; ch.len()];
+    let mut last_touch: HashMap<usize, &str> = HashMap::new();
     for case in cases {
         let outcome = if rust_nodes < case.requires.min_rust {
             Outcome::Skip {
@@ -377,8 +387,8 @@ pub async fn run_all(ch: &mut dyn Channel, cases: &[&Case], rust_nodes: usize) -
         } else if let Some(error) = unreachable(ch, case, &last_touch).await {
             Outcome::Infra { error }
         } else {
-            for touched in &mut last_touch[..case.requires.min_rust] {
-                *touched = Some(case.name);
+            for node in (0..case.requires.min_rust).chain(ch.go_nodes()) {
+                last_touch.insert(node, case.name);
             }
             match (case.run)(ch).await {
                 Ok(()) => Outcome::Pass,
@@ -516,6 +526,7 @@ pub(super) mod fake {
         pub notes: Vec<String>,
         pub partition: bool,
         pub transport: Transport,
+        pub go: Vec<usize>,
     }
 
     impl Fake {
@@ -532,6 +543,7 @@ pub(super) mod fake {
                 notes: Vec::new(),
                 partition: true,
                 transport: Transport::Libp2p,
+                go: Vec::new(),
             }
         }
     }
@@ -539,6 +551,9 @@ pub(super) mod fake {
     impl Channel for Fake {
         fn len(&self) -> usize {
             3
+        }
+        fn go_nodes(&self) -> Vec<usize> {
+            self.go.clone()
         }
         fn transport(&self) -> Transport {
             self.transport
@@ -740,6 +755,37 @@ mod tests {
                         .into()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn runner_probes_the_go_nodes_over_their_own_http_and_names_one_that_is_down() {
+        let mut fake = Fake::new(|_, _, _, _, op| admin_view(op));
+        fake.go = vec![3, 4];
+        fake.gql = std::cell::RefCell::new(Box::new(|node, _| {
+            if node == 4 {
+                eyre::bail!("connection refused")
+            }
+            Ok(json!({ "User": [] }))
+        }));
+        let cases = [by_name("R2"), by_name("S1")];
+        let reports = run_all(&mut fake, &[&cases[0], &cases[1]], 3).await;
+        assert_eq!(
+            reports[0].outcome,
+            Outcome::Infra {
+                error: "go node 4 unreachable before R2; last case to touch it: none (connection refused)".into()
+            }
+        );
+        assert_eq!(
+            reports[1].outcome,
+            Outcome::Infra {
+                error: "go node 4 unreachable before S1; last case to touch it: none (connection refused)".into()
+            }
+        );
+
+        let mut fake = Fake::new(|_, _, _, _, op| admin_view(op));
+        fake.go = vec![3];
+        let (outcome, _) = run_fake("R2", fake).await;
+        assert_eq!(outcome, Outcome::Pass);
     }
 
     #[test]
