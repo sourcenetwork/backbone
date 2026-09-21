@@ -3,15 +3,15 @@ use std::time::Duration;
 use defra_harness::node::{DefraNode, RustNode};
 use defra_harness::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
 
-/// P2P replication preserving Source Hub ACP.
+/// P2P replication preserving Vera ACP.
 ///
-/// Two Rust DefraDB nodes connected to the same Source Hub.
+/// Two Rust DefraDB nodes connected to the same Vera.
 /// A document created on node 0 replicates to node 1.
 /// The owner can read on both nodes; anonymous cannot read on either.
 ///
-/// The cluster is started with Jack's identity so SourceHub transactions work.
+/// The cluster is started with Jack's identity so Vera transactions work.
 #[tokio::test]
-async fn rust_sourcehub_p2p_acp() {
+async fn rust_vera_p2p_acp() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
     let jack = generate_identity(&binary).expect("Jack identity");
@@ -19,17 +19,17 @@ async fn rust_sourcehub_p2p_acp() {
     let cluster = TestCluster::builder()
         .rust_nodes(2)
         .skip_build()
-        .with_source_hub()
+        .with_vera()
         .with_identity(&jack.private_key_hex)
         .with_p2p()
         .build()
         .await
-        .expect("failed to build source hub p2p cluster");
+        .expect("failed to build Vera p2p cluster");
 
     let node0 = cluster.client(0);
     let node1 = cluster.client(1);
 
-    // Add policy on Source Hub via node 0
+    // Add policy on Vera via node 0
     let policy_result = node0
         .acp_policy_add(USER_ACP_POLICY, &jack.private_key_hex)
         .expect("add policy");
@@ -86,7 +86,7 @@ async fn rust_sourcehub_p2p_acp() {
     // Wait for replication
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Jack can read on node 1 (same DID, same policy on Source Hub)
+    // Jack can read on node 1 (same DID, same policy on Vera)
     let jack_on_node1 = node1
         .query_with_identity("query { User { _docID name } }", &jack.private_key_hex)
         .expect("Jack query on node1");
@@ -94,7 +94,7 @@ async fn rust_sourcehub_p2p_acp() {
     assert_eq!(users.len(), 1, "Jack should see replicated doc on node 1");
     assert_eq!(users[0]["name"], "Jack");
 
-    // Anonymous cannot read on node 1 (Source Hub ACP enforced)
+    // Anonymous cannot read on node 1 (Vera ACP enforced)
     let anon_on_node1 = node1
         .query("query { User { _docID name } }")
         .expect("anon query on node1");

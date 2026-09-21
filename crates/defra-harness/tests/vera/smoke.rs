@@ -1,17 +1,17 @@
 use defra_harness::node::{DefraNode, RustNode};
 use defra_harness::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
 
-/// Smoke test proving DefraDB -> Source Hub ACP pipeline works end-to-end.
+/// Smoke test proving DefraDB -> Vera ACP pipeline works end-to-end.
 ///
-/// 1. Starts a Source Hub devnet + 1 Rust DefraDB node connected to it
+/// 1. Starts a Vera devnet + 1 Rust DefraDB node connected to it
 /// 2. Creates an ACP policy (on-chain via MsgCreatePolicy)
 /// 3. Creates a protected document as Jack (owner)
 /// 4. Jack sees the document, anonymous sees nothing
 ///
-/// The node must be started with Jack's identity so the SourceHub TxSigner
+/// The node must be started with Jack's identity so the Vera TxSigner
 /// can create bearer tokens for Jack's DID.
 #[tokio::test]
-async fn rust_sourcehub_smoke() {
+async fn rust_vera_smoke() {
     let binary = RustNode::from_workspace().binary_path().to_path_buf();
     RustNode::build().expect("build rust binary");
     let jack = generate_identity(&binary).expect("failed to generate Jack identity");
@@ -19,18 +19,18 @@ async fn rust_sourcehub_smoke() {
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .skip_build()
-        .with_source_hub()
+        .with_vera()
         .with_identity(&jack.private_key_hex)
         .build()
         .await
-        .expect("failed to build source hub cluster");
+        .expect("failed to build Vera cluster");
 
     let node = cluster.client(0);
 
-    // Add ACP policy — this submits MsgCreatePolicy on Source Hub
+    // Add ACP policy — this submits MsgCreatePolicy on Vera
     let policy_result = node
         .acp_policy_add(USER_ACP_POLICY, &jack.private_key_hex)
-        .expect("failed to add ACP policy via Source Hub");
+        .expect("failed to add ACP policy via Vera");
 
     let policy_id = policy_result["PolicyID"]
         .as_str()
@@ -65,7 +65,7 @@ async fn rust_sourcehub_smoke() {
     assert_eq!(jack_users.len(), 1, "Jack should see 1 document");
     assert_eq!(jack_users[0]["name"], "Jack");
 
-    // Anonymous query -> sees 0 documents (ACP enforced via Source Hub)
+    // Anonymous query -> sees 0 documents (ACP enforced via Vera)
     let anon_result = node
         .query("query { User { _docID name age } }")
         .expect("anonymous query failed");
@@ -76,6 +76,6 @@ async fn rust_sourcehub_smoke() {
     assert_eq!(
         anon_users.len(),
         0,
-        "anonymous should see 0 documents (Source Hub ACP)"
+        "anonymous should see 0 documents (Vera ACP)"
     );
 }
