@@ -14,7 +14,7 @@ pub mod sse;
 pub mod wasm_lens;
 
 pub use client::DefraClient;
-pub use cluster::{TestCluster, TestClusterBuilder};
+pub use cluster::{StoppedNode, TestCluster, TestClusterBuilder};
 pub use divergences::NodeKind;
 pub use fixtures::{
     documents_schema_with_policy, interaction_schema_with_policy, multi_resource_policy,
