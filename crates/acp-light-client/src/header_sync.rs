@@ -1,6 +1,6 @@
 //! WebSocket header subscription and tracking.
 //!
-//! Subscribes to `hub_subscribeHeaders` and maintains a view of the
+//! Subscribes to `vera_subscribeHeaders` and maintains a view of the
 //! latest finalized revision after checking its certificate against a configured key.
 
 use alloy_primitives::B256;
@@ -30,7 +30,7 @@ pub struct SyncState {
 
 /// Tracks the latest finalized header state from WebSocket subscription.
 ///
-/// Spawns a background task that subscribes to `hub_subscribeHeaders`,
+/// Spawns a background task that subscribes to `vera_subscribeHeaders`,
 /// authenticates the requested light blocks, and updates the latest finalized
 /// `(height, module_state_root)`.
 pub struct HeaderChain {
@@ -212,7 +212,7 @@ async fn run_header_loop(
     });
     ws.send(Message::Text(subscribe_msg.to_string().into()))
         .await
-        .wrap_err("sending hub_subscribeHeaders")?;
+        .wrap_err("sending vera_subscribeHeaders")?;
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut subscription = None;

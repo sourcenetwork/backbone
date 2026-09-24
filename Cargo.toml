@@ -10,10 +10,11 @@ publish = false
 resolver = "2"
 members = [
     "crates/test-infra",
-    "crates/sourcehub-harness",
+    "crates/vera-harness",
     "crates/defra-harness",
     "crates/orbis-harness",
     "crates/acp-light-client",
+    "crates/soak",
 ]
 
 [workspace.package]
@@ -59,7 +60,7 @@ path = "tests/hub_light_client.rs"
 orbis-harness = { path = "crates/orbis-harness" }
 defra-harness = { path = "crates/defra-harness" }
 acp-light-client = { path = "crates/acp-light-client" }
-vera-harness = { git = "https://github.com/sourcenetwork/hub.rs", rev = "cf5ae4751867b4b8f07f7b31bfc2ca68ff052ca4" }
+vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "25f796771363d7ca979b59c8bd747f6c863825e5" }
 commonware-codec.workspace = true
 test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }
@@ -76,3 +77,19 @@ alloy-eips.workspace = true
 alloy-signer.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types = "1"
+
+# Cargo applies dependency patches only from the consuming workspace root.
+[patch.crates-io]
+commonware-p2p = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-utils = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-codec = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-runtime = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-consensus = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-cryptography = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-parallel = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-storage = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-broadcast = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-resolver = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-macros = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-glue = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-stream = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }

@@ -35,7 +35,9 @@ backbone/
 ├── crates/
 │   ├── test-infra/       # Shared primitives (process mgmt, ports, log tracking)
 │   ├── defra-harness/    # DefraDB node manager + CLI client + fixtures
-│   ├── hub-harness/      # Hub.rs cluster builder + observability
+│   ├── vera-harness/     # Go Vera process harness
+│   ├── acp-light-client/ # Native Rust Vera proof verification
+│   ├── soak/             # Mixed-runtime DefraDB workload harness
 │   └── orbis-harness/    # Orbis ring builder + DKG fixtures
 └── tests/                # Full-stack integration tests
 ```
@@ -60,21 +62,23 @@ Everything needed to start, configure, and interact with DefraDB nodes:
 - Test macros — `for_each_runtime!`, `for_each_p2p_topology!`
 - Fixtures — ACP policies, schemas, identity generators
 
-### hub-harness
+### Vera harnesses
 
-Everything needed to start and observe Hub.rs validator clusters:
+The local `crates/vera-harness` manages Go Vera processes. Native Rust integration
+tests use the separately pinned `vera-harness` package from `sourcenetwork/vera.rs`.
+That package starts and observes Rust validator clusters:
 
 - `TestClusterBuilder` — BFT-aware cluster setup with key generation
 - `KeySet` — deterministic ed25519 + BLS threshold scheme generation
 - `ClusterState` — unified observability (log tracking + RPC polling)
-- `GenesisBuilder` — EVM-compatible genesis configuration
+- `GenesisBuilder` — validator genesis and native execution configuration
 
 ### orbis-harness
 
 Everything needed to orchestrate Orbis DKG rings:
 
 - `OrbisRingBuilder` — multi-node ring setup with threshold configuration
-- `DkgFixture` — complete SourceHub + Orbis ring with DKG ceremony
+- `DkgFixture` — complete Vera + Orbis ring with DKG ceremony
 - Event-based synchronization — WebSocket subscriptions for DKG completion
 
 ### acp-light-client

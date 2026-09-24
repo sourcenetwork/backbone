@@ -9,7 +9,7 @@ use crate::divergences::NodeKind;
 use crate::node::{start_node, DefraNode, NodeConfig, PortConflict, RunningNode, RustNode};
 use crate::observe::LogTracker;
 use crate::ports::{multiaddr_ports, reserve_ports, ReservedPorts};
-use sourcehub_harness::SourceHubNode;
+use vera_harness::VeraNode;
 
 use super::health::health_check;
 
@@ -94,11 +94,25 @@ async fn reserve_until_free(
 
 /// A cluster of running DefraDB nodes.
 ///
-/// Field order matters: `nodes` and `source_hub` are dropped before `run_dir`,
+/// Field order matters: `nodes` and `vera` are dropped before `run_dir`,
 /// ensuring processes are killed before their data directories are removed.
+/// A node stopped by [`TestCluster::stop_node`]: everything needed to start
+/// it again on the same ports, which stay reserved meanwhile.
+pub struct StoppedNode {
+    index: usize,
+    config: NodeConfig,
+    kind: NodeKind,
+    name: String,
+    api_url: String,
+    binary_path: PathBuf,
+    tcp_ports: Vec<u16>,
+    udp_ports: Vec<u16>,
+    reserved: ReservedPorts,
+}
+
 pub struct TestCluster {
     pub nodes: Vec<RunningNode>,
-    source_hub: Option<SourceHubNode>,
+    vera: Option<VeraNode>,
     #[allow(dead_code)]
     run_dir: test_infra::TestRunDir,
     startup_identity: Option<String>,
@@ -111,11 +125,11 @@ impl TestCluster {
         run_dir: test_infra::TestRunDir,
         startup_identity: Option<String>,
         node_identities: Vec<Option<String>>,
-        source_hub: Option<SourceHubNode>,
+        vera: Option<VeraNode>,
     ) -> Self {
         Self {
             nodes,
-            source_hub,
+            vera,
             run_dir,
             startup_identity,
             node_identities,
@@ -157,16 +171,16 @@ impl TestCluster {
         self.nodes.is_empty()
     }
 
-    pub fn source_hub(&self) -> Option<&SourceHubNode> {
-        self.source_hub.as_ref()
+    pub fn vera(&self) -> Option<&VeraNode> {
+        self.vera.as_ref()
     }
 
-    /// Stop the SourceHub process. Drops the node, sending SIGTERM.
-    pub fn stop_source_hub(&mut self) -> Result<()> {
-        if self.source_hub.take().is_some() {
+    /// Stop the Vera process. Drops the node, sending SIGTERM.
+    pub fn stop_vera(&mut self) -> Result<()> {
+        if self.vera.take().is_some() {
             Ok(())
         } else {
-            eyre::bail!("no SourceHub node to stop")
+            eyre::bail!("no Vera node to stop")
         }
     }
 
@@ -183,17 +197,10 @@ impl TestCluster {
             .await
     }
 
-    /// Restart the node at `index`, reusing its rootdir and ports.
-    ///
-    /// Drops the old process (sending SIGTERM), waits briefly, then respawns
-    /// the same binary with the same config on the same data directory.
-    ///
-    /// The node's ports are re-reserved the moment the old process releases
-    /// them and held until the replacement is spawned, so nothing can be handed
-    /// the address while the node is down; losing the remaining boot-time race
-    /// is retried on the same ports. Fresh ports are not an option — the
-    /// caller's clients and the node's peers both hold this address.
-    pub async fn restart_node(&mut self, index: usize, timeout: Duration) -> Result<()> {
+    /// Stop a node with the SIGTERM path and hold its ports so nothing can be
+    /// handed the address while it is down. Start it again on the same ports
+    /// with [`start_stopped_node`](Self::start_stopped_node).
+    pub async fn stop_node(&mut self, index: usize) -> Result<StoppedNode> {
         let old = &self.nodes[index];
         let config = old.config.clone();
         let kind = old.kind;
@@ -220,12 +227,40 @@ impl TestCluster {
         );
         drop(old_node);
 
-        // Take the ports back before anything else can be handed them, then
-        // let the node settle while they are still guarded.
-        let mut reserved =
+        // Take the ports back before anything else can be handed them.
+        let reserved =
             reserve_until_free(&name, &tcp_ports, &udp_ports, PORT_RECLAIM_TIMEOUT).await?;
-        tokio::time::sleep(RESTART_SETTLE).await;
+        Ok(StoppedNode {
+            index,
+            config,
+            kind,
+            name,
+            api_url,
+            binary_path,
+            tcp_ports,
+            udp_ports,
+            reserved,
+        })
+    }
 
+    /// Start a node stopped by [`stop_node`](Self::stop_node) on its own
+    /// ports; losing the boot-time bind race is retried on the same ports.
+    pub async fn start_stopped_node(
+        &mut self,
+        stopped: StoppedNode,
+        timeout: Duration,
+    ) -> Result<()> {
+        let StoppedNode {
+            index,
+            config,
+            kind,
+            name,
+            api_url,
+            binary_path,
+            tcp_ports,
+            udp_ports,
+            mut reserved,
+        } = stopped;
         let node: Box<dyn DefraNode> = match kind {
             // Respawn from the node's configured binary (e.g. a release artifact
             // or a downloaded version), not the default debug workspace path —
@@ -271,6 +306,20 @@ impl TestCluster {
         self.nodes[index] = running;
 
         Ok(())
+    }
+
+    /// Restart a node on the same ports: stop, settle while the ports are
+    /// still guarded, start.
+    ///
+    /// The node's ports are re-reserved the moment the old process releases
+    /// them and held until the replacement is spawned, so nothing can be handed
+    /// the address while the node is down; losing the remaining boot-time race
+    /// is retried on the same ports. Fresh ports are not an option — the
+    /// caller's clients and the node's peers both hold this address.
+    pub async fn restart_node(&mut self, index: usize, timeout: Duration) -> Result<()> {
+        let stopped = self.stop_node(index).await?;
+        tokio::time::sleep(RESTART_SETTLE).await;
+        self.start_stopped_node(stopped, timeout).await
     }
 }
 

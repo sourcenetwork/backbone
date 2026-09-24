@@ -767,9 +767,7 @@ async fn epoch_end_reproposal_preserves_requested_state_and_timestamp() {
     );
     let target_time = f.light.timestamp;
     let parent = Block::decode_cfg(
-        hex::decode(f.light.block.trim_start_matches("0x"))
-            .unwrap()
-            .as_slice(),
+        hex::decode(f.light.block.trim_start_matches("0x")).unwrap(),
         &vera_domain::BlockCfg {
             max_txs: 64,
             tx: vera_domain::TxCfg {

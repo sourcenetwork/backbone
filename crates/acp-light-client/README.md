@@ -1,9 +1,9 @@
 # ACP light client
 
 The client verifies native Vera records and permission evidence against a consensus
-key provisioned by the operator. It uses `hub_getCurrentRecordProof` for policy,
+key provisioned by the operator. It uses `vera_getCurrentRecordProof` for policy,
 relationship and persisted access-decision records, and
-`hub_getCurrentPermissionProof` for permission evaluation. Both responses pair the
+`vera_getCurrentPermissionProof` for permission evaluation. Both responses pair the
 evidence with its certified revision. HTTP responses and header messages are bounded
 before deserialization.
 
@@ -29,7 +29,19 @@ The default freshness policy permits revisions less than 30 seconds old and at m
 may configure stricter age and clock-skew bounds. Arbitrary historical native record
 reads are not provided.
 
-Header synchronization uses `hub_subscribeHeaders` and accepts `hub_header`
+Header synchronization uses `vera_subscribeHeaders` and accepts `vera_header`
 notifications only for the acknowledged subscription ID. The acknowledgement
 must arrive within ten seconds. Notifications still require independent finality
 verification before they can advance cached state.
+
+## Native dependency set
+
+This workspace pins Vera to `25f796771363d7ca979b59c8bd747f6c863825e5`
+and its Commonware fork to `9f398751e6816d7321eb2c9327cfcc5ec011c7ff`.
+The latter includes bounded retries after source-local pruning hints.
+
+Cargo does not inherit dependency patches from a dependency's workspace. A
+consumer of this crate must carry this workspace's Commonware `[patch.crates-io]`
+entries in its own root manifest. Keep all entries on the same revision, retain
+the lockfile, and use `--frozen` for validation. Otherwise the released Commonware
+API can be selected alongside Vera's fork-dependent code.

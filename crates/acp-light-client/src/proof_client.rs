@@ -22,8 +22,8 @@ impl ProofClient {
     /// `trusted_key_hex` must come from operator configuration, not the RPC endpoint.
     pub fn new(rpc_url: &str, trusted_key_hex: &str) -> eyre::Result<Self> {
         let bytes = decode_hex(trusted_key_hex).wrap_err("invalid trusted consensus key hex")?;
-        let trusted_key = ConsensusPublicKey::decode(bytes.as_slice())
-            .wrap_err("invalid trusted consensus key")?;
+        let trusted_key =
+            ConsensusPublicKey::decode(bytes).wrap_err("invalid trusted consensus key")?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()?;

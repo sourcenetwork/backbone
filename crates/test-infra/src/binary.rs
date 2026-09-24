@@ -1,6 +1,6 @@
 //! Version-aware binary resolution for integration test dependencies.
 //!
-//! Each component in the stack (defra, hubd, orbis-node, sourcehubd) needs to be
+//! Each component in the stack (defra, hubd, orbis-node, verad) needs to be
 //! resolved at test time. The resolution order supports both local development
 //! (dirty working tree) and CI (pinned versions):
 //!
