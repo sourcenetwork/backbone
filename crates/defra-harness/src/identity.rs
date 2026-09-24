@@ -11,7 +11,7 @@ pub struct TestIdentity {
     pub key_type: Option<String>,
 }
 
-/// Generate a new identity using the given DefraDB binary.
+/// Generate a new identity using the given DefraDB binary and an isolated root.
 ///
 /// Uses the default key type (secp256k1) for consistency between Go and Rust CLIs.
 /// Parses both Rust (text) and Go (JSON) output formats:
@@ -19,7 +19,13 @@ pub struct TestIdentity {
 /// - Rust JSON: `{"private_key":"<hex>","did":"<did>"}`
 /// - Go JSON:   `{"PrivateKey":"<hex>","DID":"<did>"}`
 pub fn generate_identity(binary_path: &Path) -> Result<TestIdentity> {
+    let root = test_infra::TestRunDir::new(
+        &std::env::temp_dir().join("defra-identity"),
+        "DEFRA_E2E_KEEP",
+    )?;
     let output = Command::new(binary_path)
+        .arg("--rootdir")
+        .arg(root.path())
         .args(["identity", "new"])
         .output()
         .wrap_err("failed to run identity new")?;
@@ -36,7 +42,13 @@ pub fn generate_identity(binary_path: &Path) -> Result<TestIdentity> {
 
 /// Generate a new secp256r1 (P-256) identity using the given DefraDB binary.
 pub fn generate_secp256r1_identity(binary_path: &Path) -> Result<TestIdentity> {
+    let root = test_infra::TestRunDir::new(
+        &std::env::temp_dir().join("defra-identity"),
+        "DEFRA_E2E_KEEP",
+    )?;
     let output = Command::new(binary_path)
+        .arg("--rootdir")
+        .arg(root.path())
         .args(["identity", "new", "--type", "secp256r1"])
         .output()
         .wrap_err("failed to run identity new --type secp256r1")?;
@@ -53,7 +65,13 @@ pub fn generate_secp256r1_identity(binary_path: &Path) -> Result<TestIdentity> {
 
 /// Generate a new ed25519 identity using the given DefraDB binary.
 pub fn generate_ed25519_identity(binary_path: &Path) -> Result<TestIdentity> {
+    let root = test_infra::TestRunDir::new(
+        &std::env::temp_dir().join("defra-identity"),
+        "DEFRA_E2E_KEEP",
+    )?;
     let output = Command::new(binary_path)
+        .arg("--rootdir")
+        .arg(root.path())
         .args(["identity", "new", "--type", "ed25519"])
         .output()
         .wrap_err("failed to run identity new --type ed25519")?;
