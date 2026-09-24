@@ -64,6 +64,7 @@ pub struct TestClusterBuilder {
     p2p_transport: Option<String>,
     keyring: KeyringBackend,
     shared_se_key: Option<[u8; 32]>,
+    file_keyring: bool,
     acp_cache_ttl: Option<u64>,
     acp_circuit_breaker_threshold: Option<u32>,
     acp_circuit_breaker_reset_timeout: Option<u64>,
@@ -71,6 +72,7 @@ pub struct TestClusterBuilder {
     acp_receipt_timeout: Option<u64>,
     signing_multiplier_opt_out: bool,
     extra_rust_args: Vec<String>,
+    extra_go_args: Vec<String>,
 }
 
 impl Default for TestClusterBuilder {
@@ -102,6 +104,7 @@ impl TestClusterBuilder {
             p2p_transport: None,
             keyring: KeyringBackend::None,
             shared_se_key: None,
+            file_keyring: false,
             acp_cache_ttl: None,
             acp_circuit_breaker_threshold: None,
             acp_circuit_breaker_reset_timeout: None,
@@ -109,6 +112,7 @@ impl TestClusterBuilder {
             acp_receipt_timeout: None,
             signing_multiplier_opt_out: false,
             extra_rust_args: Vec::new(),
+            extra_go_args: Vec::new(),
         }
     }
 
@@ -130,6 +134,17 @@ impl TestClusterBuilder {
     {
         self.extra_rust_args
             .extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// Extra flags appended to every Go node's `start` command, after the
+    /// managed flags (same contract as `with_extra_rust_args`).
+    pub fn with_extra_go_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.extra_go_args.extend(args.into_iter().map(Into::into));
         self
     }
 
@@ -291,6 +306,15 @@ impl TestClusterBuilder {
         self
     }
 
+    /// A per-node file keyring (`--keyring-backend file --keyring-path
+    /// <rootdir>/keys`) on both runtimes, so peer identities survive
+    /// restarts. With the `Env` keyring a Go node presents a new peer ID on
+    /// every start, and any replicator pointed at it never reconnects.
+    pub fn with_file_keyring(mut self) -> Self {
+        self.file_keyring = true;
+        self
+    }
+
     /// Seed the same 32-byte searchable-encryption key into every node's
     /// keyring (Go and Rust) before start, mirroring how operators provision
     /// the cluster-shared SE secret per node. Forces a `File` keyring backend
@@ -444,7 +468,7 @@ impl TestClusterBuilder {
 
             // A cluster-shared SE key needs a File keyring both runtimes can
             // share; override `--no-keyring`/Env with a per-node File backend.
-            let keyring = if self.shared_se_key.is_some() {
+            let keyring = if self.shared_se_key.is_some() || self.file_keyring {
                 KeyringBackend::File {
                     path: rootdir.join("keys"),
                     secret: "integration-test-secret".to_string(),
@@ -544,7 +568,7 @@ impl TestClusterBuilder {
 
             // A cluster-shared SE key needs a File keyring; otherwise Go runs
             // with its usual `--no-keyring`.
-            let keyring = if self.shared_se_key.is_some() {
+            let keyring = if self.shared_se_key.is_some() || self.file_keyring {
                 KeyringBackend::File {
                     path: rootdir.join("keys"),
                     secret: "integration-test-secret".to_string(),
@@ -587,7 +611,7 @@ impl TestClusterBuilder {
                 acp_circuit_breaker_reset_timeout: self.acp_circuit_breaker_reset_timeout,
                 acp_request_timeout: self.acp_request_timeout,
                 acp_receipt_timeout: self.acp_receipt_timeout,
-                extra_args: Vec::new(),
+                extra_args: self.extra_go_args.clone(),
             };
 
             let mut attempt = 1;

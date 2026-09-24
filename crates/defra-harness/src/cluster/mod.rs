@@ -3,4 +3,4 @@ pub mod health;
 pub mod runtime;
 
 pub use builder::TestClusterBuilder;
-pub use runtime::TestCluster;
+pub use runtime::{StoppedNode, TestCluster};

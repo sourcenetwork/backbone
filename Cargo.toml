@@ -15,6 +15,7 @@ members = [
     "crates/hub-harness",
     "crates/orbis-harness",
     "crates/acp-light-client",
+    "crates/soak",
 ]
 
 [workspace.package]
