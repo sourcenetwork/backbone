@@ -4,17 +4,17 @@
 //! and module state root it was verified against. Entries become stale when
 //! the finalized `module_state_root` changes.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use alloy_primitives::B256;
 use parking_lot::RwLock;
 
-use crate::types::AccessResult;
+use crate::types::VerifiedRecord;
 
 /// A single cached ACP state entry.
 #[derive(Debug, Clone)]
 struct CacheEntry {
-    value: Option<Vec<u8>>,
+    value: Option<Arc<[u8]>>,
     verified_height: u64,
     module_state_root: B256,
 }
@@ -43,19 +43,27 @@ impl AcpCache {
 
     /// Look up a cached entry by its hex-encoded ACP key.
     ///
-    /// Returns `Some(AccessResult)` if the entry exists and is fresh enough
-    /// relative to `current_height`. Returns `None` if the entry is missing
-    /// or stale.
-    pub fn get(&self, key_hex: &str, current_height: u64) -> Option<AccessResult> {
+    /// Returns `Some(VerifiedRecord)` if the entry exists and is fresh enough
+    /// relative to `current_height`, and matches `current_root`. Returns `None`
+    /// if the entry is missing or stale.
+    pub fn get(
+        &self,
+        key_hex: &str,
+        current_height: u64,
+        current_root: B256,
+    ) -> Option<VerifiedRecord> {
         let entries = self.entries.read();
         let entry = entries.get(key_hex)?;
 
-        if current_height.saturating_sub(entry.verified_height) > self.staleness_threshold {
+        if entry.module_state_root != current_root
+            || current_height.checked_sub(entry.verified_height)? > self.staleness_threshold
+        {
             return None;
         }
 
-        Some(AccessResult {
-            allowed: entry.value.is_some(),
+        Some(VerifiedRecord {
+            value: entry.value.clone(),
+            module_state_root: entry.module_state_root,
             verified_at_height: entry.verified_height,
             proof: None,
         })
@@ -65,7 +73,7 @@ impl AcpCache {
     pub fn insert(
         &self,
         key_hex: &str,
-        value: Option<Vec<u8>>,
+        value: Option<Arc<[u8]>>,
         verified_height: u64,
         module_state_root: B256,
     ) {

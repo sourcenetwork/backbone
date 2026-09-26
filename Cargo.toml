@@ -12,7 +12,6 @@ members = [
     "crates/test-infra",
     "crates/vera-harness",
     "crates/defra-harness",
-    "crates/hub-harness",
     "crates/orbis-harness",
     "crates/acp-light-client",
     "crates/soak",
@@ -42,10 +41,10 @@ alloy-consensus = { version = "1.0", features = ["k256"] }
 alloy-eips = "1.0"
 alloy-signer = "1"
 alloy-signer-local = { version = "1", default-features = false }
-commonware-codec = "2026.2.0"
-commonware-consensus = "2026.2.0"
-commonware-cryptography = "2026.2.0"
-commonware-utils = "2026.2.0"
+commonware-codec = "2026.9.0"
+commonware-consensus = "2026.9.0"
+commonware-cryptography = "2026.9.0"
+commonware-utils = "2026.9.0"
 
 # ── Full-stack integration tests ──────────────────────────────────────────────
 
@@ -60,8 +59,9 @@ path = "tests/hub_light_client.rs"
 [dev-dependencies]
 orbis-harness = { path = "crates/orbis-harness" }
 defra-harness = { path = "crates/defra-harness" }
-hub-harness = { path = "crates/hub-harness" }
 acp-light-client = { path = "crates/acp-light-client" }
+vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "cf6bbe9ad5c2a4f7ad6ffea5647bf81dd13f84d2" }
+commonware-codec.workspace = true
 test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }
 serde_json.workspace = true
@@ -77,3 +77,19 @@ alloy-eips.workspace = true
 alloy-signer.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types = "1"
+
+# Cargo applies dependency patches only from the consuming workspace root.
+[patch.crates-io]
+commonware-p2p = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-utils = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-codec = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-runtime = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-consensus = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-cryptography = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-parallel = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-storage = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-broadcast = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-resolver = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-macros = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-glue = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }
+commonware-stream = { git = "https://github.com/iverc/commonware.git", rev = "9f398751e6816d7321eb2c9327cfcc5ec011c7ff" }

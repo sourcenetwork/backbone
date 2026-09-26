@@ -19,12 +19,10 @@ use orbis_harness::cli::types::RingPayload;
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
 use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
-    generate_identity_keys, generate_run_id, start_node, HubRsNodeConfig, KeyringBackend,
-    NodeConfig, OrbisCliClient, OrbisSignerConfig,
+    generate_identity_keys, generate_run_id, start_node, KeyringBackend, NodeConfig,
+    OrbisCliClient, OrbisSignerConfig, VeraRsNodeConfig,
 };
 
-use hub_harness::cluster::{ConsensusPreset, GenesisBuilder, TestCluster};
-use hub_harness::observe::ClusterAssertions;
 use support::full_stack::{
     assert_doc_ids_match, bls_did_key_from_hex, configure_replication_link, extract_doc_ids,
     graphql_string_literal, is_acp_denied, is_write_acp_denied, poll_query_count,
@@ -36,6 +34,8 @@ use support::hubd::{
     evm_address_from_private_key, submit_acp_relationship_txs, AcpRelationshipTx,
     AcpRelationshipTxKind, HubdCli, HARDHAT_KEY_0,
 };
+use vera_harness::cluster::{ConsensusPreset, GenesisBuilder, TestCluster};
+use vera_harness::observe::ClusterAssertions;
 
 const ACME_POLICY_YAML: &str = r#"
 name: acme-training-policy
@@ -215,13 +215,13 @@ async fn secure_training_data_compartments() {
     // Step 1a. Start hub.rs single node (bulletin + ACP)
     let t = Instant::now();
     eprintln!("[backbone] Step 1a: Starting hub.rs node...");
-    let hubd_binary = hub_harness::resolve_binary().expect("resolve hubd binary");
+    let hubd_binary = vera_harness::resolve_binary().expect("resolve hubd binary");
     let hub_chain_id: u64 = 9003;
-    let hub_genesis = GenesisBuilder::devnet().funded_accounts(2, "1000000000000000000000000");
+    let vera_genesis = GenesisBuilder::devnet().funded_accounts(2, "1000000000000000000000000");
     let hub_cluster = TestCluster::builder()
         .nodes(1)
         .chain_id(hub_chain_id)
-        .genesis(hub_genesis)
+        .genesis(vera_genesis)
         .preset(ConsensusPreset::Normal)
         .build()
         .await
@@ -229,7 +229,7 @@ async fn secure_training_data_compartments() {
 
     let hub_rpc_url = hub_cluster.node(0).rpc_url();
     let hub_ws_url = hub_cluster.node(0).ws_url();
-    let hub_cli = HubdCli::new(hubd_binary, &hub_rpc_url, hub_chain_id, HARDHAT_KEY_0);
+    let vera_cli = HubdCli::new(hubd_binary, &hub_rpc_url, hub_chain_id, HARDHAT_KEY_0);
 
     // Step 2. Start Orbis ring (T=2, N=3) with hub.rs for bulletin + ACP
     let ring_spawn_start = Instant::now();
@@ -240,8 +240,8 @@ async fn secure_training_data_compartments() {
             .await
             .expect("hub.rs node should become healthy");
 
-        let hub_state = hub_cluster.observe(Duration::from_millis(200));
-        hub_state
+        let vera_state = hub_cluster.observe(Duration::from_millis(200));
+        vera_state
             .wait_for_height(3, Duration::from_secs(30))
             .await
             .expect("hub.rs should reach height 3");
@@ -254,7 +254,7 @@ async fn secure_training_data_compartments() {
             .log_level("info")
             .base_dir(run_dir.path())
             .identity_keys(orbis_operator_keys.clone())
-            .hub_rs_config(HubRsNodeConfig {
+            .hub_rs_config(VeraRsNodeConfig {
                 rpc_url: hub_rpc_url.clone(),
                 ws_url: hub_ws_url.clone(),
                 chain_id: hub_chain_id,
@@ -270,7 +270,7 @@ async fn secure_training_data_compartments() {
         "[backbone]   Orbis ring processes spawned in {:.2}s",
         ring_spawn_secs
     );
-    let hub_state = hub_cluster.observe(Duration::from_millis(200));
+    let vera_state = hub_cluster.observe(Duration::from_millis(200));
 
     let ring_health_task = tokio::spawn(wait_for_orbis_health(
         ring.grpc_addrs(),
@@ -290,7 +290,7 @@ async fn secure_training_data_compartments() {
             identity.address,
             &identity.signer_did[..40.min(identity.signer_did.len())]
         );
-        hub_cli
+        vera_cli
             .fund_evm_address(&identity.address, "1000000000000000000")
             .unwrap_or_else(|e| panic!("fund node{} on hub.rs: {}", i, e));
         evm_addresses.push(identity.address.clone());
@@ -315,7 +315,7 @@ async fn secure_training_data_compartments() {
     // Step 3. Register bulletin namespace + add collaborators
     let orbis_cli = OrbisCliClient::new().expect("resolve cli-tool binary");
     eprintln!("[backbone] Step 3: Registering bulletin namespace on hub.rs...");
-    hub_cli
+    vera_cli
         .register_namespace(BULLETIN_RING_NAMESPACE)
         .expect("register ring namespace on hub.rs");
 
@@ -325,7 +325,7 @@ async fn secure_training_data_compartments() {
             i,
             &did[..40.min(did.len())]
         );
-        hub_cli
+        vera_cli
             .add_collaborator(BULLETIN_RING_NAMESPACE, did)
             .unwrap_or_else(|e| panic!("add collaborator for node{}: {}", i, e));
     }
@@ -341,7 +341,7 @@ async fn secure_training_data_compartments() {
     // Step 3b. Poll for DKG post on hub.rs
     eprintln!("[backbone] Step 3b: Polling for DKG post on hub.rs...");
     let (ring_id, post_payload) =
-        wait_for_dkg_post(&hub_cli, BULLETIN_RING_NAMESPACE, Duration::from_secs(120))
+        wait_for_dkg_post(&vera_cli, BULLETIN_RING_NAMESPACE, Duration::from_secs(120))
             .await
             .expect("DKG post on hub.rs");
 
@@ -360,12 +360,12 @@ async fn secure_training_data_compartments() {
     // Step 4. Create ring signing policy + register ring object
     let t = Instant::now();
     eprintln!("[backbone] Step 4: Creating ring signing ACP policy...");
-    let ring_policy_id = hub_cli
+    let ring_policy_id = vera_cli
         .create_policy(RING_SIGNING_POLICY_YAML)
         .expect("create ring signing ACP policy");
     eprintln!("[backbone]   ring_policy_id = {}", ring_policy_id);
 
-    hub_cli
+    vera_cli
         .register_object(&ring_policy_id, "ring", &ring_id)
         .expect("register ring object");
 
@@ -439,7 +439,7 @@ async fn secure_training_data_compartments() {
 
     // Step 10. Authorize DefraDB service accounts as ring signers
     let acme_defra_signer_did = signer_did_for_pk(&acme_defra_svc.private_key_hex);
-    hub_cli
+    vera_cli
         .set_relationship(
             &ring_policy_id,
             "ring",
@@ -450,7 +450,7 @@ async fn secure_training_data_compartments() {
         .expect("grant acme_defra_svc signer on ring");
 
     let globex_defra_signer_did = signer_did_for_pk(&globex_defra_svc.private_key_hex);
-    hub_cli
+    vera_cli
         .set_relationship(
             &ring_policy_id,
             "ring",
@@ -461,7 +461,7 @@ async fn secure_training_data_compartments() {
         .expect("grant globex_defra_svc signer on ring");
 
     let platform_defra_signer_did = signer_did_for_pk(&platform_defra_svc.private_key_hex);
-    hub_cli
+    vera_cli
         .set_relationship(
             &ring_policy_id,
             "ring",
@@ -478,18 +478,18 @@ async fn secure_training_data_compartments() {
     // Step 11. Create acme ACP policy
     let t = Instant::now();
     eprintln!("[backbone] Step 11: Creating acme ACP policy...");
-    let acme_policy_id = hub_cli
+    let acme_policy_id = vera_cli
         .create_policy(ACME_POLICY_YAML)
         .expect("create acme ACP policy");
 
     let transcript_object = "transcript";
-    hub_cli
+    vera_cli
         .register_object(&acme_policy_id, "transcript", transcript_object)
         .expect("register transcript collection object");
     eprintln!("[backbone] Acme policy: {}", acme_policy_id);
 
     // Step 12. Grant TRAINING_SVC writer on transcript collection
-    hub_cli
+    vera_cli
         .set_relationship(
             &acme_policy_id,
             "transcript",
@@ -509,7 +509,7 @@ async fn secure_training_data_compartments() {
         ("globex-defra", &globex_defra_evm_addr),
         ("platform-defra", &platform_defra_evm_addr),
     ] {
-        hub_cli
+        vera_cli
             .fund_evm_address(addr, "1000000000000000000")
             .unwrap_or_else(|e| panic!("fund {} on hub.rs: {}", label, e));
         eprintln!("[backbone] Step 13: Funded {} on hub.rs: {}", label, addr);
@@ -763,7 +763,7 @@ async fn secure_training_data_compartments() {
         })
         .collect::<Vec<_>>();
     let submit_start = Instant::now();
-    let grant_tx_hash = submit_acp_relationship_txs(&hub_cli, &grant_txs)
+    let grant_tx_hash = submit_acp_relationship_txs(&vera_cli, &grant_txs)
         .unwrap_or_else(|e| panic!("submit Step 16c grant tx batch: {}", e));
     eprintln!(
         "[backbone]   Step 16c submitted {} grant ops in one tx in {:.2}s",
@@ -774,7 +774,7 @@ async fn secure_training_data_compartments() {
     for doc_id in &acme_doc_ids {
         eprintln!("[backbone]   grant reader on {}", doc_id);
     }
-    wait_for_tx_receipt(&hub_cli, &grant_tx_hash, "Step 16c")
+    wait_for_tx_receipt(&vera_cli, &grant_tx_hash, "Step 16c")
         .unwrap_or_else(|e| panic!("wait for Step 16c grant receipt: {}", e));
     eprintln!(
         "[backbone] Step 16c: INFERENCE_SVC granted reader on {} documents in {:.2}s",
@@ -827,16 +827,16 @@ async fn secure_training_data_compartments() {
 
     // Step 19. Create globex ACP policy + grant GLOBEX_SVC writer
     eprintln!("[backbone] Step 19: Creating globex ACP policy...");
-    let globex_policy_id = hub_cli
+    let globex_policy_id = vera_cli
         .create_policy(GLOBEX_POLICY_YAML)
         .expect("create globex ACP policy");
 
     let ticket_object = "ticket";
-    hub_cli
+    vera_cli
         .register_object(&globex_policy_id, "ticket", ticket_object)
         .expect("register ticket collection object");
 
-    hub_cli
+    vera_cli
         .set_relationship(
             &globex_policy_id,
             "ticket",
@@ -1098,7 +1098,7 @@ async fn secure_training_data_compartments() {
         actor: &audit_svc.did_key,
     }));
     let submit_start = Instant::now();
-    let audit_grant_hash = submit_acp_relationship_txs(&hub_cli, &audit_grant_txs)
+    let audit_grant_hash = submit_acp_relationship_txs(&vera_cli, &audit_grant_txs)
         .unwrap_or_else(|e| panic!("submit Step 25 audit grant tx batch: {}", e));
     eprintln!(
         "[backbone]   Step 25 submitted {} audit grant ops in one tx in {:.2}s",
@@ -1106,7 +1106,7 @@ async fn secure_training_data_compartments() {
         submit_start.elapsed().as_secs_f64()
     );
     eprintln!("[backbone]   Step 25 batch tx={}", audit_grant_hash);
-    wait_for_tx_receipt(&hub_cli, &audit_grant_hash, "Step 25")
+    wait_for_tx_receipt(&vera_cli, &audit_grant_hash, "Step 25")
         .unwrap_or_else(|e| panic!("wait for Step 25 audit grant receipt: {}", e));
     eprintln!(
         "[backbone] Step 25: AUDIT_SVC granted reader on {} acme docs + {} globex docs in {:.2}s",
@@ -1227,7 +1227,7 @@ async fn secure_training_data_compartments() {
         })
         .collect::<Vec<_>>();
     let submit_start = Instant::now();
-    let revoke_tx_hash = submit_acp_relationship_txs(&hub_cli, &revoke_txs)
+    let revoke_tx_hash = submit_acp_relationship_txs(&vera_cli, &revoke_txs)
         .unwrap_or_else(|e| panic!("submit Step 29 revoke tx batch: {}", e));
     eprintln!(
         "[backbone]   Step 29 submitted {} revoke ops in one tx in {:.2}s",
@@ -1235,7 +1235,7 @@ async fn secure_training_data_compartments() {
         submit_start.elapsed().as_secs_f64()
     );
     eprintln!("[backbone]   Step 29 batch tx={}", revoke_tx_hash);
-    wait_for_tx_receipt(&hub_cli, &revoke_tx_hash, "Step 29")
+    wait_for_tx_receipt(&vera_cli, &revoke_tx_hash, "Step 29")
         .unwrap_or_else(|e| panic!("wait for Step 29 revoke receipt: {}", e));
     eprintln!(
         "[backbone]   Step 29 revocation txs: {:.2}s",
@@ -1291,7 +1291,7 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Step 30: Rotating TRAINING_SVC key...");
     let new_training_svc = ServiceIdentity::new_file_keyring("training-svc-v2", run_dir.path());
 
-    hub_cli
+    vera_cli
         .set_relationship(
             &acme_policy_id,
             "transcript",
@@ -1302,7 +1302,7 @@ async fn secure_training_data_compartments() {
         .expect("grant new_training_svc writer on transcript collection");
 
     // Wait for block finality before writing (Orbis nodes check ACP directly)
-    wait_for_block_finality(&hub_state, "Step 30-grant").await;
+    wait_for_block_finality(&vera_state, "Step 30-grant").await;
 
     let new_key_write = r#"mutation {
         create_Transcript(input: {
@@ -1329,7 +1329,7 @@ async fn secure_training_data_compartments() {
         .await
         .map(|s| s.height)
         .unwrap_or(0);
-    hub_cli
+    vera_cli
         .delete_relationship(
             &acme_policy_id,
             "transcript",
@@ -1341,7 +1341,7 @@ async fn secure_training_data_compartments() {
 
     // DefraDB's query gate invalidation is not enough here: create authorization is
     // enforced on the Orbis signing path, which checks ACP against finalized hub state.
-    wait_for_block_finality(&hub_state, "Step 30-revoke").await;
+    wait_for_block_finality(&vera_state, "Step 30-revoke").await;
     wait_for_acp_invalidation(
         &acme_acp_events,
         acme_height_before_key_revoke,
@@ -1398,7 +1398,7 @@ async fn secure_training_data_compartments() {
     );
 
     // Final: hub.rs cluster health check
-    hub_state
+    vera_state
         .assert_no_errors()
         .expect("hub.rs cluster should have no unexpected errors");
     eprintln!("[backbone] Hub.rs cluster health: no unexpected errors");

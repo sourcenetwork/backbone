@@ -1,12 +1,128 @@
-//! Low-level JSON-RPC helpers for hub.rs endpoints.
+//! Bounded JSON-RPC transport for proof and finalized-revision responses.
+
+use std::time::Duration;
 
 use eyre::WrapErr;
+use serde::de::DeserializeOwned;
 
-use crate::types::{LightBlock, ModuleStateProof};
+use crate::types::{LightBlock, ModuleId};
 
-/// Check for JSON-RPC error in response.
-fn check_rpc_error(resp: &serde_json::Value, method: &str) -> eyre::Result<()> {
-    if let Some(error) = resp.get("error") {
+/// Maximum light-block response, including hex-encoded block and consensus material.
+pub use vera_domain::LIGHT_BLOCK_RESPONSE_BYTES;
+/// Maximum current permission response, including finalization and the RPC envelope.
+pub use vera_permission::PERMISSION_RESPONSE_BYTES;
+/// Maximum native record response, including finalization and the RPC envelope.
+pub use vera_permission::RECORD_RESPONSE_BYTES;
+
+/// Fetch current record evidence paired with its finalized revision.
+pub async fn get_current_record_proof(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    module: ModuleId,
+    key: &[u8],
+    minimum_height: u64,
+) -> eyre::Result<vera_permission::RecordResponse> {
+    request(
+        client,
+        rpc_url,
+        "vera_getCurrentRecordProof",
+        serde_json::json!([module, format!("0x{}", hex::encode(key)), minimum_height]),
+        RECORD_RESPONSE_BYTES,
+    )
+    .await
+}
+
+/// Fetch complete current prefix evidence paired with its finalized revision.
+pub async fn get_current_prefix_proof(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    module: ModuleId,
+    prefix: &[u8],
+    minimum_height: u64,
+) -> eyre::Result<vera_permission::PrefixResponse> {
+    request(
+        client,
+        rpc_url,
+        "vera_getCurrentPrefixProof",
+        serde_json::json!([module, format!("0x{}", hex::encode(prefix)), minimum_height]),
+        RECORD_RESPONSE_BYTES,
+    )
+    .await
+}
+
+/// Fetch a finalized block and its certificate.
+pub async fn get_light_block(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    height: u64,
+) -> eyre::Result<LightBlock> {
+    request(
+        client,
+        rpc_url,
+        "vera_getLightBlock",
+        serde_json::json!([height]),
+        LIGHT_BLOCK_RESPONSE_BYTES,
+    )
+    .await
+}
+
+/// Fetch current permission evidence paired with its finalized revision.
+pub async fn get_current_permission_proof(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    policy: &str,
+    access: &vera_permission::AccessRequest,
+    minimum_height: u64,
+) -> eyre::Result<vera_permission::PermissionResponse> {
+    request(
+        client,
+        rpc_url,
+        "vera_getCurrentPermissionProof",
+        serde_json::json!([policy, access, minimum_height]),
+        PERMISSION_RESPONSE_BYTES,
+    )
+    .await
+}
+
+async fn request<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    method: &str,
+    params: serde_json::Value,
+    maximum: usize,
+) -> eyre::Result<T> {
+    let mut response = client
+        .post(rpc_url)
+        .timeout(Duration::from_secs(10))
+        .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+        .send()
+        .await
+        .wrap_err_with(|| format!("{method} request"))?
+        .error_for_status()?;
+    eyre::ensure!(
+        response
+            .content_length()
+            .is_none_or(|n| n <= maximum as u64),
+        "{method} response exceeds byte limit"
+    );
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        eyre::ensure!(
+            chunk.len() <= maximum - bytes.len(),
+            "{method} response exceeds byte limit"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    eyre::ensure!(
+        value["id"] == 1 && value["jsonrpc"] == "2.0",
+        "{method} RPC response metadata mismatch"
+    );
+    eyre::ensure!(
+        !(value.get("result").is_some() && value.get("error").is_some()),
+        "{method} RPC response has both result and error"
+    );
+    if let Some(error) = value.get("error") {
         let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
         let message = error
             .get("message")
@@ -14,67 +130,9 @@ fn check_rpc_error(resp: &serde_json::Value, method: &str) -> eyre::Result<()> {
             .unwrap_or("unknown");
         return Err(eyre::eyre!("{method} RPC error ({code}): {message}"));
     }
-    Ok(())
-}
-
-/// Fetch a module state proof via `hub_getStateProof`.
-///
-/// `key_hex` should be `0x`-prefixed hex-encoded key bytes.
-pub async fn get_state_proof(
-    client: &reqwest::Client,
-    rpc_url: &str,
-    module: &str,
-    key_hex: &str,
-    height: u64,
-) -> eyre::Result<ModuleStateProof> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "hub_getStateProof",
-        "params": [module, key_hex, height],
-        "id": 1,
-    });
-
-    let resp: serde_json::Value = client
-        .post(rpc_url)
-        .json(&body)
-        .send()
-        .await
-        .wrap_err("hub_getStateProof request")?
-        .json()
-        .await
-        .wrap_err("hub_getStateProof response")?;
-
-    check_rpc_error(&resp, "hub_getStateProof")?;
-
-    serde_json::from_value(resp["result"].clone())
-        .wrap_err("deserializing hub_getStateProof result")
-}
-
-/// Fetch a light block via `hub_getLightBlock`.
-pub async fn get_light_block(
-    client: &reqwest::Client,
-    rpc_url: &str,
-    height: u64,
-) -> eyre::Result<LightBlock> {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "hub_getLightBlock",
-        "params": [height],
-        "id": 1,
-    });
-
-    let resp: serde_json::Value = client
-        .post(rpc_url)
-        .json(&body)
-        .send()
-        .await
-        .wrap_err("hub_getLightBlock request")?
-        .json()
-        .await
-        .wrap_err("hub_getLightBlock response")?;
-
-    check_rpc_error(&resp, "hub_getLightBlock")?;
-
-    serde_json::from_value(resp["result"].clone())
-        .wrap_err("deserializing hub_getLightBlock result")
+    let result = value
+        .get_mut("result")
+        .map(serde_json::Value::take)
+        .ok_or_else(|| eyre::eyre!("{method} RPC response has no result"))?;
+    serde_json::from_value(result).wrap_err_with(|| format!("deserializing {method} result"))
 }

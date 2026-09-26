@@ -35,7 +35,13 @@ impl DefraClient {
     }
 
     fn exec(&self, args: &[&str]) -> Result<String> {
+        let root = test_infra::TestRunDir::new(
+            &std::env::temp_dir().join("defra-client"),
+            "DEFRA_E2E_KEEP",
+        )?;
         let output = Command::new(&self.binary_path)
+            .arg("--rootdir")
+            .arg(root.path())
             .arg("--url")
             .arg(&self.url)
             .args(args)
