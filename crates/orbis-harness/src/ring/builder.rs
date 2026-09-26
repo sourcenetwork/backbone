@@ -7,7 +7,7 @@ use super::node::OrbisNode;
 use sourcehub_harness::SourceHubConfig;
 
 /// Configuration for connecting orbis nodes to a hub.rs cluster.
-pub struct HubRsNodeConfig {
+pub struct VeraRsNodeConfig {
     pub rpc_url: String,
     pub ws_url: String,
     pub chain_id: u64,
@@ -77,7 +77,7 @@ pub struct OrbisRingBuilder {
     base_dir: Option<PathBuf>,
     identity_keys: Option<Vec<String>>,
     sourcehub_config: Option<SourceHubConfig>,
-    hub_rs_config: Option<HubRsNodeConfig>,
+    hub_rs_config: Option<VeraRsNodeConfig>,
 }
 
 impl fmt::Debug for OrbisRingBuilder {
@@ -146,7 +146,7 @@ impl OrbisRingBuilder {
     }
 
     #[must_use]
-    pub fn hub_rs_config(mut self, config: HubRsNodeConfig) -> Self {
+    pub fn hub_rs_config(mut self, config: VeraRsNodeConfig) -> Self {
         self.hub_rs_config = Some(config);
         self
     }

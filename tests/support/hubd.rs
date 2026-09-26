@@ -303,7 +303,7 @@ impl HubdCli {
 }
 
 pub fn submit_acp_relationship_txs(
-    hub_cli: &HubdCli,
+    vera_cli: &HubdCli,
     txs: &[AcpRelationshipTx<'_>],
 ) -> eyre::Result<String> {
     let calls = txs
@@ -327,7 +327,7 @@ pub fn submit_acp_relationship_txs(
             .abi_encode()),
         })
         .collect::<eyre::Result<Vec<_>>>()?;
-    hub_cli.submit_batch_acp_calls_raw(calls)
+    vera_cli.submit_batch_acp_calls_raw(calls)
 }
 
 pub fn evm_address_from_private_key(key_hex: &str) -> String {
