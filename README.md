@@ -147,3 +147,18 @@ checks parent hashes and contiguous heights, and returns the requested revision'
 roots and timestamp. It accepts at most 64 descendants and 8 MiB of decoded
 artifacts. A newer certified descendant does not renew the requested revision's
 freshness. Direct-certificate responses retain their existing shape.
+
+### Native stack CI
+
+The Full Stack job builds pinned Vera and Orbis sources and runs Orbis's native
+startup, Defra signing/replication, and distributed threshold scenarios. It tests
+this checkout's ACP light client through a local Cargo source override. Defra is
+linked into the signing fixture at the revision in `backbone.toml`. No external
+release artifacts or floating component branches are used.
+
+Run `bash .github/scripts/test-native-stack.sh` with Rust 1.98.0 and protoc
+installed. The script uses a temporary source checkout and retains build artifacts
+under `target/native-stack`. The older `tests/full_stack.rs` fixture uses EVM
+administration and is not the native CI entry point. Native coverage checks
+Orbis authorization and signed document replication; it does not yet cover
+Defra collection-level strict ACP enforcement on replicated updates.
