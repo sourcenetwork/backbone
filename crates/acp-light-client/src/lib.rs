@@ -1,22 +1,11 @@
-//! ACP Light Client — proof-validated ACP cache for the Source Network stack.
+//! Authenticated ACP records and full permission evaluation at verified revisions.
 //!
-//! Subscribes to hub.rs finalized block headers, fetches and verifies Merkle
-//! inclusion proofs, and maintains a local ACP cache. Consumed by both
-//! DefraDB (query gate) and Orbis (signing gate) for local ACP enforcement
-//! without per-query RPC round-trips.
-//!
-//! # Architecture
-//!
-//! ```text
-//! eth_subscribe("headers")  ──→  HeaderChain  ──→  height + module_state_root
-//!                                                         │
-//!                           hub_getStateProof  ──→  ProofClient  ──→  verify
-//!                           hub_getLightBlock  ──→       │
-//!                                                       ▼
-//!                                                   AcpCache  ──→  check_access()
-//! ```
+//! Header synchronization verifies finalization against configured consensus trust.
+//! Record reads may use a root-bound cache; permission requests fetch complete
+//! evidence and run the shared evaluator before returning a result.
 
 pub mod cache;
+mod freshness;
 pub mod header_sync;
 pub mod proof_client;
 pub mod rpc;
@@ -24,20 +13,27 @@ pub mod types;
 pub mod verify;
 
 pub use cache::AcpCache;
+pub use freshness::FreshnessPolicy;
 pub use header_sync::{HeaderChain, SyncState};
 pub use proof_client::ProofClient;
-pub use types::{AccessResult, GossipHeader, LightBlock, ModuleId, ModuleStateProof};
+pub use types::{
+    ConsensusPublicKey, GossipHeader, LightBlock, ModuleId, ModuleStateProof, VerifiedRecord,
+};
+pub use vera_permission::{
+    AccessDecision, AccessRequest, Actor, DecisionRequest, Object, Operation, PermissionProof,
+    RecordProof, RecordResponse, Timestamp, PERMISSION_LIMITS,
+};
 pub use verify::{verify_light_block, verify_module_state_proof, LightBlockError, ProofError};
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::B256;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Top-level ACP light client.
 ///
-/// Wires together header sync, proof fetching, and caching. Provides
-/// `check_access()` as the primary entry point for ACP enforcement.
+/// Wires together header sync, proof fetching, and caching.
+/// `verify_access()` evaluates permission requests; record reads return data only.
 pub struct AcpLightClient {
     header_chain: HeaderChain,
     proof_client: ProofClient,
@@ -50,10 +46,38 @@ impl AcpLightClient {
     ///
     /// `rpc_url` — HTTP JSON-RPC endpoint (e.g., `http://127.0.0.1:9944`)
     /// `ws_url` — WebSocket endpoint (e.g., `ws://127.0.0.1:9944`)
+    /// `trusted_key_hex` — consensus public key from operator configuration
     /// `staleness_threshold` — max blocks behind before a cached entry is stale
-    pub async fn new(rpc_url: &str, ws_url: &str, staleness_threshold: u64) -> eyre::Result<Self> {
-        let header_chain = HeaderChain::connect(ws_url).await?;
-        let proof_client = ProofClient::new(rpc_url);
+    ///
+    /// Revision freshness defaults to 30 seconds with up to 15 seconds of future clock skew.
+    /// Disconnection or withheld headers do not extend this lifetime.
+    pub async fn new(
+        rpc_url: &str,
+        ws_url: &str,
+        trusted_key_hex: &str,
+        staleness_threshold: u64,
+    ) -> eyre::Result<Self> {
+        Self::new_with_freshness(
+            rpc_url,
+            ws_url,
+            trusted_key_hex,
+            staleness_threshold,
+            FreshnessPolicy::default(),
+        )
+        .await
+    }
+
+    /// Create a client with explicit local revision age and clock-skew bounds.
+    pub async fn new_with_freshness(
+        rpc_url: &str,
+        ws_url: &str,
+        trusted_key_hex: &str,
+        staleness_threshold: u64,
+        freshness: FreshnessPolicy,
+    ) -> eyre::Result<Self> {
+        let proof_client = ProofClient::new(rpc_url, trusted_key_hex)?;
+        let header_chain =
+            HeaderChain::connect_with_freshness(ws_url, proof_client.clone(), freshness).await?;
         let cache = AcpCache::new(staleness_threshold);
 
         Ok(Self {
@@ -79,190 +103,106 @@ impl AcpLightClient {
         &self.cache
     }
 
-    /// Check ACP access for a relationship key.
-    ///
-    /// 1. Build the ACP key from the relationship components
-    /// 2. Check the cache — if fresh, return immediately
-    /// 3. If stale/missing, fetch + verify a proof from hub.rs
-    /// 4. Cache the result and return
-    ///
-    /// The `storage_key` is the relationship storage key within the policy
-    /// (e.g., `"rel/document/doc1/reader/{subject_hash}"`).
-    pub async fn check_access(
+    /// Evaluate current certified evidence at or beyond the latest verified revision.
+    pub async fn verify_access(&self, policy: &str, request: &AccessRequest) -> eyre::Result<bool> {
+        let minimum = self.header_chain.fresh_state()?.height;
+        let (revision, allowed) = self
+            .proof_client
+            .verify_current_permission(policy, request, minimum)
+            .await?;
+        self.header_chain.accept_response(revision)?;
+        Ok(allowed)
+    }
+
+    /// Read the live owner or proven absence from fresh complete ownership evidence.
+    pub async fn read_object_owner(
+        &self,
+        policy: &str,
+        object: &Object,
+    ) -> eyre::Result<Option<Actor>> {
+        let minimum = self.header_chain.fresh_state()?.height;
+        let (revision, owner) = self
+            .proof_client
+            .read_current_object_owner(policy, object, minimum)
+            .await?;
+        self.header_chain.accept_response(revision)?;
+        Ok(owner)
+    }
+
+    /// Read a relationship record at the verified revision.
+    pub async fn read_relationship(
         &self,
         policy_id: &str,
         storage_key: &str,
-    ) -> eyre::Result<AccessResult> {
-        let key_bytes = cache::keys::relationship_key(policy_id, storage_key);
-        let key_hex = cache::keys::hex_encode_key(&key_bytes);
-
-        self.invalidate_if_root_changed();
-
-        let current_height = self.header_chain.latest_height();
-        if let Some(cached) = self.cache.get(&key_hex, current_height) {
-            debug!(
-                policy_id,
-                storage_key,
-                cached_height = cached.verified_at_height,
-                "cache hit"
-            );
-            return Ok(cached);
-        }
-
-        let height = current_height.max(1);
-        let sync = self.header_chain.state();
-
-        let (proof, module_state_root) = if let Some(ref sync) = sync {
-            let proof = self
-                .proof_client
-                .fetch_and_verify_proof_with_root(
-                    "acp",
-                    &key_hex,
-                    sync.height,
-                    sync.module_state_root,
-                )
-                .await?;
-            (proof, sync.module_state_root)
-        } else {
-            self.proof_client
-                .fetch_and_verify_proof("acp", &key_hex, height)
-                .await?
-        };
-
-        let allowed = proof.value.is_some();
-        let verified_height = proof.height;
-
-        let value_bytes = proof.value.as_ref().map(|v| {
-            let v = v.strip_prefix("0x").unwrap_or(v);
-            hex::decode(v).unwrap_or_default()
-        });
-
-        self.cache
-            .insert(&key_hex, value_bytes, verified_height, module_state_root);
-
-        info!(
-            policy_id,
-            storage_key, allowed, verified_height, "proof verified and cached"
-        );
-
-        Ok(AccessResult {
-            allowed,
-            verified_at_height: verified_height,
-            proof: Some(proof),
-        })
+    ) -> eyre::Result<VerifiedRecord> {
+        self.read_key(cache::keys::relationship_key(policy_id, storage_key))
+            .await
     }
 
-    /// Check whether an access decision exists on hub.rs.
-    ///
-    /// Used by Orbis nodes to verify that a `checkAccess` transaction was
-    /// committed on-chain. The caller (DefraDB) pre-submits the tx and passes
-    /// the resulting `decision_id` to Orbis; each ring node then calls this
-    /// method to verify the decision via the light client's proof-verified cache.
-    pub async fn check_access_decision(&self, decision_id: &str) -> eyre::Result<AccessResult> {
-        let key_bytes = cache::keys::access_decision_key(decision_id);
-        let key_hex = cache::keys::hex_encode_key(&key_bytes);
-
-        self.invalidate_if_root_changed();
-
-        let current_height = self.header_chain.latest_height();
-        if let Some(cached) = self.cache.get(&key_hex, current_height) {
-            debug!(
-                decision_id,
-                cached_height = cached.verified_at_height,
-                "access decision cache hit"
-            );
-            return Ok(cached);
-        }
-
-        let height = current_height.max(1);
-        let sync = self.header_chain.state();
-
-        let (proof, module_state_root) = if let Some(ref sync) = sync {
-            let proof = self
-                .proof_client
-                .fetch_and_verify_proof_with_root(
-                    "acp",
-                    &key_hex,
-                    sync.height,
-                    sync.module_state_root,
-                )
-                .await?;
-            (proof, sync.module_state_root)
-        } else {
-            self.proof_client
-                .fetch_and_verify_proof("acp", &key_hex, height)
-                .await?
-        };
-
-        let allowed = proof.value.is_some();
-        let verified_height = proof.height;
-
-        let value_bytes = proof.value.as_ref().map(|v| {
-            let v = v.strip_prefix("0x").unwrap_or(v);
-            hex::decode(v).unwrap_or_default()
-        });
-
-        self.cache
-            .insert(&key_hex, value_bytes, verified_height, module_state_root);
-
-        info!(
-            decision_id,
-            allowed, verified_height, "access decision proof verified and cached"
-        );
-
-        Ok(AccessResult {
-            allowed,
-            verified_at_height: verified_height,
-            proof: Some(proof),
-        })
+    /// Read an access decision record at the verified revision.
+    pub async fn read_access_decision(&self, decision_id: &str) -> eyre::Result<VerifiedRecord> {
+        self.read_key(cache::keys::access_decision_key(decision_id))
+            .await
     }
 
-    /// Check whether a policy exists on hub.rs.
-    pub async fn check_policy(&self, policy_id: &str) -> eyre::Result<AccessResult> {
-        let key_bytes = cache::keys::policy_key(policy_id);
-        let key_hex = cache::keys::hex_encode_key(&key_bytes);
+    /// Verify a persisted successful decision for an exact submission at fresh authenticated state.
+    /// This checks issuance and expiry, not permission changes after issuance or payload authorization.
+    pub async fn verify_access_decision(
+        &self,
+        request: &DecisionRequest,
+    ) -> eyre::Result<AccessDecision> {
+        let record = self.read_access_decision(&request.id()?).await?;
+        let state = self.header_chain.fresh_state()?;
+        eyre::ensure!(
+            record.module_state_root == state.module_state_root,
+            "ACP state changed during decision verification; retry the request"
+        );
+        let bytes = record
+            .value
+            .as_deref()
+            .ok_or_else(|| eyre::eyre!("access decision is absent at the verified revision"))?;
+        Ok(request.verify_record(
+            bytes,
+            &Timestamp {
+                seconds: state.timestamp,
+                block_height: state.height,
+            },
+        )?)
+    }
 
+    /// Read a policy record at the verified revision.
+    pub async fn read_policy(&self, policy_id: &str) -> eyre::Result<VerifiedRecord> {
+        self.read_key(cache::keys::policy_key(policy_id)).await
+    }
+
+    async fn read_key(&self, key: Vec<u8>) -> eyre::Result<VerifiedRecord> {
+        let key_hex = cache::keys::hex_encode_key(&key);
         self.invalidate_if_root_changed();
-
-        let current_height = self.header_chain.latest_height();
-        if let Some(cached) = self.cache.get(&key_hex, current_height) {
+        let sync = self.header_chain.fresh_state()?;
+        if let Some(cached) = self
+            .cache
+            .get(&key_hex, sync.height, sync.module_state_root)
+        {
             return Ok(cached);
         }
-
-        let height = current_height.max(1);
-        let sync = self.header_chain.state();
-
-        let (proof, module_state_root) = if let Some(ref sync) = sync {
-            let proof = self
-                .proof_client
-                .fetch_and_verify_proof_with_root(
-                    "acp",
-                    &key_hex,
-                    sync.height,
-                    sync.module_state_root,
-                )
-                .await?;
-            (proof, sync.module_state_root)
-        } else {
-            self.proof_client
-                .fetch_and_verify_proof("acp", &key_hex, height)
-                .await?
-        };
-
-        let allowed = proof.value.is_some();
-        let verified_height = proof.height;
-
-        let value_bytes = proof.value.as_ref().map(|v| {
-            let v = v.strip_prefix("0x").unwrap_or(v);
-            hex::decode(v).unwrap_or_default()
-        });
-
-        self.cache
-            .insert(&key_hex, value_bytes, verified_height, module_state_root);
-
-        Ok(AccessResult {
-            allowed,
-            verified_at_height: verified_height,
+        let response = self
+            .proof_client
+            .fetch_and_verify_record(ModuleId::Acp, &key, sync.height)
+            .await?;
+        let revision = proof_client::revision_state(&response.revision)?;
+        self.header_chain.accept_response(revision.clone())?;
+        let proof = response.record;
+        let value = proof.value.as_ref().map(|v| Arc::<[u8]>::from(v.as_ref()));
+        self.cache.insert(
+            &key_hex,
+            value.clone(),
+            revision.height,
+            revision.module_state_root,
+        );
+        Ok(VerifiedRecord {
+            value,
+            module_state_root: revision.module_state_root,
+            verified_at_height: revision.height,
             proof: Some(proof),
         })
     }

@@ -10,8 +10,9 @@ use std::time::Duration;
 mod support;
 
 use acp_light_client::AcpLightClient;
-use hub_harness::cluster::{ConsensusPreset, GenesisBuilder, TestCluster};
+use commonware_codec::Encode as _;
 use support::hubd::{HubdCli, HARDHAT_KEY_0};
+use vera_harness::cluster::{ConsensusPreset, GenesisBuilder, KeySet, TestCluster};
 
 const POLICY_YAML: &str = "\
 name: light-client-test-policy
@@ -42,16 +43,17 @@ async fn hub_acp_light_client() {
         .with_test_writer()
         .try_init();
 
-    let hubd_binary = hub_harness::resolve_binary().expect("resolve hubd binary");
+    let hubd_binary = vera_harness::resolve_binary().expect("resolve hubd binary");
 
     // Step 1. Start hub.rs cluster
     eprintln!("[hub-lc] Step 1: Starting hub.rs cluster (4 validators)...");
     let hub_chain_id = 9003;
-    let hub_genesis = GenesisBuilder::devnet().funded_accounts(1, "1000000000000000000000000");
+    let vera_genesis = GenesisBuilder::devnet().funded_accounts(1, "1000000000000000000000000");
     let hub_cluster = TestCluster::builder()
         .nodes(4)
+        .seed(42)
         .chain_id(hub_chain_id)
-        .genesis(hub_genesis)
+        .genesis(vera_genesis)
         .preset(ConsensusPreset::Fast)
         .build()
         .await
@@ -62,8 +64,8 @@ async fn hub_acp_light_client() {
         .await
         .expect("hub.rs cluster should become healthy");
 
-    let hub_state = hub_cluster.observe(Duration::from_millis(200));
-    hub_state
+    let vera_state = hub_cluster.observe(Duration::from_millis(200));
+    vera_state
         .wait_for_height(3, Duration::from_secs(30))
         .await
         .expect("hub.rs should reach height 3");
@@ -126,7 +128,13 @@ async fn hub_acp_light_client() {
     eprintln!("[hub-lc] Step 4: Starting ACP light client...");
     let hub_rpc = hub_cluster.node(0).rpc_url();
     let hub_ws = hub_cluster.node(0).ws_url();
-    let light_client = AcpLightClient::new(&hub_rpc, &hub_ws, 10)
+    let keys = KeySet::builder()
+        .nodes(4)
+        .seed(42)
+        .build()
+        .expect("bootstrap keys");
+    let trusted_key = hex::encode(keys.epoch_info().output.public().public().encode());
+    let light_client = AcpLightClient::new(&hub_rpc, &hub_ws, &trusted_key, 10)
         .await
         .expect("ACP light client should connect");
 
@@ -141,13 +149,16 @@ async fn hub_acp_light_client() {
         sync.height, sync.module_state_root
     );
 
-    // Step 6. check_policy → allowed (existence proof)
+    // Step 6. read_policy → allowed (existence proof)
     eprintln!("[hub-lc] Step 6: Checking policy existence...");
     let policy_check = light_client
-        .check_policy(policy_id_str)
+        .read_policy(policy_id_str)
         .await
-        .expect("check_policy should succeed");
-    assert!(policy_check.allowed, "policy should exist on hub.rs");
+        .expect("read_policy should succeed");
+    assert!(
+        policy_check.value.is_some(),
+        "policy should exist on hub.rs"
+    );
     assert!(policy_check.proof.is_some(), "proof should be returned");
     eprintln!(
         "[hub-lc] PASSED: Policy exists, verified at height {}",
@@ -157,10 +168,13 @@ async fn hub_acp_light_client() {
     // Step 7. Verify non-existence proof for absent policy
     eprintln!("[hub-lc] Step 7: Checking non-existent policy...");
     let absent_check = light_client
-        .check_policy("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        .read_policy("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
         .await
         .expect("check absent policy should succeed");
-    assert!(!absent_check.allowed, "absent policy should not exist");
+    assert!(
+        absent_check.value.is_none(),
+        "absent policy should not exist"
+    );
     assert!(
         absent_check.proof.is_some(),
         "non-existence proof should be returned"
@@ -204,10 +218,10 @@ async fn hub_acp_light_client() {
     // Step 10. Re-check policy (cache invalidated, re-verified with new root)
     eprintln!("[hub-lc] Step 10: Re-checking policy after state change...");
     let recheck = light_client
-        .check_policy(policy_id_str)
+        .read_policy(policy_id_str)
         .await
         .expect("re-check policy should succeed");
-    assert!(recheck.allowed, "policy should still exist");
+    assert!(recheck.value.is_some(), "policy should still exist");
     assert!(
         recheck.proof.is_some(),
         "new proof should be returned (cache was invalidated)"
@@ -215,13 +229,6 @@ async fn hub_acp_light_client() {
     eprintln!(
         "[hub-lc] PASSED: Policy re-verified at height {} after cache invalidation",
         recheck.verified_at_height
-    );
-
-    // Step 11. Measure revocation SLA
-    let revocation_blocks = new_sync.height.saturating_sub(sync.height);
-    eprintln!(
-        "[hub-lc] Step 11: Revocation SLA: {} blocks from tx to cache invalidation",
-        revocation_blocks
     );
 
     drop(hub_cluster);
