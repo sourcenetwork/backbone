@@ -36,7 +36,7 @@ verification before they can advance cached state.
 
 ## Native dependency set
 
-This workspace pins Vera to `cf6bbe9ad5c2a4f7ad6ffea5647bf81dd13f84d2`
+This workspace pins Vera to `a4d3fe4ba9ff7d07ed5cb01dc2fdbb57b1551a58`
 and its Commonware fork to `9f398751e6816d7321eb2c9327cfcc5ec011c7ff`.
 The latter includes bounded retries after source-local pruning hints.
 
