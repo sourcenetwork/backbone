@@ -65,12 +65,14 @@ jobs:
         run: rustup toolchain install 1.98.0 --profile minimal
       - name: Run pinned native stack
         run: bash .github/scripts/test-native-stack.sh
-      - name: Retain native failure logs
-        if: failure()
+      - name: Retain native qualification evidence
+        if: ${{ always() && env.NATIVE_STACK_EVIDENCE != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: native-stack-logs
-          path: target/native-stack-runs/**/*.log
+          path: |
+            ${{ env.NATIVE_STACK_EVIDENCE }}/**/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/*-Cargo.lock
           if-no-files-found: ignore
       - name: Cleanup
         if: always()
