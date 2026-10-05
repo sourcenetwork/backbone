@@ -44,6 +44,8 @@ jobs:
           persist-credentials: false
       - name: Configure git auth
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+      - name: Check native scenario retry rules
+        run: bash .github/scripts/test-native-scenario.sh
       - run: cargo test --workspace --exclude defra-harness
       - name: Cleanup
         if: always()
@@ -72,7 +74,9 @@ jobs:
           name: native-stack-logs
           path: |
             ${{ env.NATIVE_STACK_EVIDENCE }}/*.log
-            ${{ env.NATIVE_STACK_EVIDENCE }}/clusters/*/node*/logs/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/**/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/**/exit-code
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/**/tee-exit-code
             ${{ env.NATIVE_STACK_EVIDENCE }}/*-Cargo.lock
           if-no-files-found: ignore
       - name: Cleanup
