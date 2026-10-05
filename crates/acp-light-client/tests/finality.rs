@@ -37,6 +37,7 @@ struct Fixture {
     key: String,
     root: B256,
     points: std::collections::BTreeMap<Vec<u8>, RecordProof>,
+    policy_prefixes: std::collections::BTreeMap<Vec<u8>, vera_permission::PolicyPrefixProof>,
     permission: Option<vera_permission::PermissionProof>,
     delay: Duration,
 }
@@ -69,7 +70,7 @@ fn fixture_records_with_operations(
     height: u64,
     operations: usize,
 ) -> Fixture {
-    let (root, points, proof) = std::thread::spawn(move || {
+    let (root, points, proof, policy_prefixes) = std::thread::spawn(move || {
         use commonware_glue::stateful::db::DatabaseSet;
         use commonware_runtime::{buffer::paged::CacheRef, tokio, Runner as _, Supervisor as _};
         use commonware_utils::{NZUsize, NZU16};
@@ -82,6 +83,7 @@ fn fixture_records_with_operations(
                 let set = NativeStateSet::init(
                     context.child("proof"),
                     native::state_config("proof", cache),
+                    None,
                 )
                 .await;
                 let mut changes: Vec<_> = records
@@ -100,7 +102,32 @@ fn fixture_records_with_operations(
                 let roots = [a.root().0, b.root().0, h.root().0, n.root().0];
                 let root = vera_modules::module_state::combine_module_roots(&roots);
                 let mut points = std::collections::BTreeMap::new();
-                for (key, _) in records {
+                let mut policy_prefixes = std::collections::BTreeMap::new();
+                for (key, value) in records {
+                    if key.starts_with(vera_modules::acp::keys::RELATIONSHIP_PREFIX) {
+                        let record: vera_modules::acp::types::RelationshipRecord =
+                            serde_json::from_slice(&value).unwrap();
+                        let object = vera_permission::Object {
+                            resource: record.relationship.resource,
+                            id: record.relationship.object_id,
+                        };
+                        for prefix in [
+                            key.clone(),
+                            vera_permission::object_owner_prefix(&record.policy_id, &object)
+                                .unwrap(),
+                            vera_modules::acp::keys::relationship_policy_prefix(&record.policy_id),
+                        ] {
+                            let proof = native::policy_prefix_proof_at(
+                                [&a, &b, &h, &n],
+                                root,
+                                &record.policy_id,
+                                &prefix,
+                            )
+                            .await
+                            .unwrap();
+                            policy_prefixes.insert(prefix, proof);
+                        }
+                    }
                     let proof =
                         native::record_proof_at([&a, &b, &h, &n], root, ModuleId::Acp, &key)
                             .await
@@ -110,7 +137,7 @@ fn fixture_records_with_operations(
                 let proof = native::record_proof_at([&a, &b, &h, &n], root, ModuleId::Acp, KEY)
                     .await
                     .unwrap();
-                (root, points, proof)
+                (root, points, proof, policy_prefixes)
             },
         )
     })
@@ -165,6 +192,7 @@ fn fixture_records_with_operations(
         key,
         root,
         points,
+        policy_prefixes,
         permission: None,
         delay: Duration::ZERO,
     }
@@ -200,6 +228,16 @@ impl Server {
                                     serde_json::to_value(vera_permission::RecordResponse {
                                         revision: f.light.clone(),
                                         record: proof.clone(),
+                                    })
+                                    .unwrap()
+                                }
+                                "vera_getCurrentPolicyPrefixProof" => {
+                                    let prefix = request["params"][1].as_str().unwrap();
+                                    let prefix =
+                                        hex::decode(prefix.trim_start_matches("0x")).unwrap();
+                                    serde_json::to_value(vera_permission::PolicyPrefixResponse {
+                                        revision: f.light.clone(),
+                                        proof: f.policy_prefixes[&prefix].clone(),
                                     })
                                     .unwrap()
                                 }
@@ -856,3 +894,6 @@ async fn current_protocol_revision_count_is_verified_and_bounded() {
         }
     }
 }
+
+#[path = "support/policy_liveness.rs"]
+mod policy_liveness;

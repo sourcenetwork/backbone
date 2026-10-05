@@ -1,11 +1,14 @@
 # ACP light client
 
 The client verifies native Vera records and permission evidence against a consensus
-key provisioned by the operator. It uses `vera_getCurrentRecordProof` for policy,
-relationship and persisted access-decision records, and
-`vera_getCurrentPermissionProof` for permission evaluation. Both responses pair the
-evidence with its certified revision. HTTP responses and header messages are bounded
-before deserialization.
+key provisioned by the operator. It uses `vera_getCurrentRecordProof` for policy
+and persisted access-decision records, `vera_getCurrentPolicyPrefixProof` for
+ownership and relationship reads, and `vera_getCurrentPermissionProof` for
+permission evaluation. Each response pairs the evidence with its certified revision.
+Ownership and relationships require policy liveness at that same revision; retained
+cleanup records under `relationship/v3/` do not establish current ownership or a
+current relationship after policy deletion. HTTP responses and header messages are
+bounded before deserialization.
 
 The pinned verifier accepts up to 256 operations per revision while retaining
 the shared encoded-byte limits. Applications pinned to the older 64-operation
@@ -16,7 +19,8 @@ can advance the client's tracked revision ahead of its header subscription. Dela
 headers cannot move that state backward; repeated certificates cannot renew its
 monotonic freshness lifetime. A delayed response at a superseded root is rejected.
 Cached records are usable only at the same module root and within the configured
-height and revision-age bounds. Permission results are evaluated from fetched evidence.
+height and revision-age bounds. Ownership, relationships and permission results are
+evaluated from fetched evidence; physical record cache entries do not establish policy liveness.
 
 `read_policy`, `read_relationship` and `read_access_decision` return authenticated
 record data, not an authorization decision. `verify_access` evaluates the full
@@ -36,9 +40,9 @@ verification before they can advance cached state.
 
 ## Native dependency set
 
-This workspace pins Vera to `a4d3fe4ba9ff7d07ed5cb01dc2fdbb57b1551a58`
-and its Commonware fork to `9f398751e6816d7321eb2c9327cfcc5ec011c7ff`.
-The latter includes bounded retries after source-local pruning hints.
+This workspace pins Vera to `2536670fa4a900f211295cd14ce1ad12c2758f13`
+and its Commonware fork to `d0cef38586581911ddbeb3060ea6b0d7e33d2a98`.
+Both revisions must match the node and proof-verifier deployment.
 
 Cargo does not inherit dependency patches from a dependency's workspace. A
 consumer of this crate must carry this workspace's Commonware `[patch.crates-io]`

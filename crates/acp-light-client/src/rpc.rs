@@ -50,6 +50,25 @@ pub async fn get_current_prefix_proof(
     .await
 }
 
+/// Fetch policy liveness and complete relationship evidence at the same finalized revision.
+pub async fn get_current_policy_prefix_proof(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    policy: &str,
+    prefix: &[u8],
+    minimum_height: u64,
+) -> eyre::Result<vera_permission::PolicyPrefixResponse> {
+    vera_permission::validate_policy_prefix(policy, prefix)?;
+    request(
+        client,
+        rpc_url,
+        "vera_getCurrentPolicyPrefixProof",
+        serde_json::json!([policy, format!("0x{}", hex::encode(prefix)), minimum_height]),
+        RECORD_RESPONSE_BYTES,
+    )
+    .await
+}
+
 /// Fetch a finalized block and its certificate.
 pub async fn get_light_block(
     client: &reqwest::Client,

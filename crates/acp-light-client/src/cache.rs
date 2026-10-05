@@ -126,9 +126,9 @@ pub mod keys {
         key
     }
 
-    /// Build a relationship key: `"relationship/" + policy_id + "/" + storage_key`.
+    /// Build a relationship key: `"relationship/v3/" + policy_id + "/" + storage_key`.
     pub fn relationship_key(policy_id: &str, storage_key: &str) -> Vec<u8> {
-        let mut key = Vec::from(b"relationship/" as &[u8]);
+        let mut key = Vec::from(b"relationship/v3/" as &[u8]);
         key.extend_from_slice(policy_id.as_bytes());
         key.push(b'/');
         key.extend_from_slice(storage_key.as_bytes());

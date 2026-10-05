@@ -129,14 +129,20 @@ impl AcpLightClient {
         Ok(owner)
     }
 
-    /// Read a relationship record at the verified revision.
+    /// Read a relationship with policy liveness authenticated at the same revision.
     pub async fn read_relationship(
         &self,
         policy_id: &str,
         storage_key: &str,
     ) -> eyre::Result<VerifiedRecord> {
-        self.read_key(cache::keys::relationship_key(policy_id, storage_key))
-            .await
+        let key = cache::keys::relationship_key(policy_id, storage_key);
+        let minimum = self.header_chain.fresh_state()?.height;
+        let (revision, record) = self
+            .proof_client
+            .read_current_relationship(policy_id, &key, minimum)
+            .await?;
+        self.header_chain.accept_response(revision)?;
+        Ok(record)
     }
 
     /// Read an access decision record at the verified revision.

@@ -1,13 +1,13 @@
 //! Fetch state proofs against finality authenticated by a configured consensus key.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use commonware_codec::DecodeExt as _;
 use eyre::{ensure, WrapErr};
 
 use crate::header_sync::SyncState;
 use crate::rpc;
-use crate::types::{ConsensusPublicKey, LightBlock, ModuleId};
+use crate::types::{ConsensusPublicKey, LightBlock, ModuleId, VerifiedRecord};
 use crate::verify;
 
 /// HTTP JSON-RPC client with an independently configured consensus trust anchor.
@@ -84,7 +84,7 @@ impl ProofClient {
         Ok((revision_state(&response.revision)?, allowed))
     }
 
-    /// Verify complete ownership evidence for the requested object.
+    /// Verify complete ownership evidence and policy liveness at one certified revision.
     pub async fn read_current_object_owner(
         &self,
         policy: &str,
@@ -92,10 +92,10 @@ impl ProofClient {
         minimum_height: u64,
     ) -> eyre::Result<(SyncState, Option<vera_permission::Actor>)> {
         let prefix = vera_permission::object_owner_prefix(policy, object)?;
-        let response = rpc::get_current_prefix_proof(
+        let response = rpc::get_current_policy_prefix_proof(
             &self.client,
             &self.rpc_url,
-            ModuleId::Acp,
+            policy,
             &prefix,
             minimum_height,
         )
@@ -103,6 +103,56 @@ impl ProofClient {
         let owner =
             response.verify_object_owner(policy, object, minimum_height, &self.trusted_key)?;
         Ok((revision_state(&response.revision)?, owner))
+    }
+
+    /// Read one exact relationship key only while its policy exists at the same revision.
+    pub async fn read_current_relationship(
+        &self,
+        policy: &str,
+        key: &[u8],
+        minimum_height: u64,
+    ) -> eyre::Result<(SyncState, VerifiedRecord)> {
+        let response = rpc::get_current_policy_prefix_proof(
+            &self.client,
+            &self.rpc_url,
+            policy,
+            key,
+            minimum_height,
+        )
+        .await?;
+        let evidence = response.verify(
+            policy,
+            key,
+            minimum_height,
+            &self.trusted_key,
+            vera_permission::RECORD_PROOF_BYTES,
+        )?;
+        let value = match evidence {
+            None => None,
+            Some(evidence) => {
+                ensure!(
+                    evidence.entries.len() <= 1,
+                    "relationship selection is not an exact key"
+                );
+                evidence
+                    .entries
+                    .first()
+                    .map(|entry| {
+                        ensure!(entry.key == key, "relationship differs from requested key");
+                        Ok::<_, eyre::Report>(Arc::<[u8]>::from(entry.value.as_ref()))
+                    })
+                    .transpose()?
+            }
+        };
+        let revision = revision_state(&response.revision)?;
+        let record = VerifiedRecord {
+            value,
+            module_state_root: revision.module_state_root,
+            verified_at_height: revision.height,
+            // A raw point proof does not represent the verified policy-liveness condition.
+            proof: None,
+        };
+        Ok((revision, record))
     }
 
     /// Fetch and verify a native record and its finalized revision in one response.
