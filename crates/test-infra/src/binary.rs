@@ -20,6 +20,8 @@ use eyre::{ContextCompat, Result, WrapErr};
 
 use crate::manifest::Manifest;
 
+mod source;
+
 /// How a binary was resolved.
 #[derive(Debug, Clone)]
 pub enum BinarySource {
@@ -306,61 +308,16 @@ impl BinaryResolver {
         git_ref: &str,
         cargo_package: Option<&str>,
     ) -> Result<ResolvedBinary> {
-        let build_dir = std::env::temp_dir()
-            .join("backbone-builds")
-            .join(&self.binary_name)
-            .join(git_ref.replace('/', "_"));
+        tracing::info!(repo, git_ref, "Preparing source checkout");
+        let build_dir = source::checkout(
+            &std::env::temp_dir().join("backbone-builds"),
+            &self.binary_name,
+            repo,
+            git_ref,
+        )?;
 
-        if !build_dir.exists() {
-            tracing::info!(
-                repo = repo,
-                git_ref = git_ref,
-                "Cloning and building from source"
-            );
-
-            let status = Command::new("git")
-                .args(["clone", "--depth", "1", "--branch", git_ref, repo])
-                .arg(&build_dir)
-                .status()
-                .wrap_err("git clone failed")?;
-
-            eyre::ensure!(
-                status.success(),
-                "git clone failed for {} @ {}",
-                repo,
-                git_ref
-            );
-        } else {
-            // Pull latest changes for the branch
-            let _ = Command::new("git")
-                .args(["fetch", "--depth", "1", "origin", git_ref])
-                .current_dir(&build_dir)
-                .status();
-            let _ = Command::new("git")
-                .args(["reset", "--hard", "FETCH_HEAD"])
-                .current_dir(&build_dir)
-                .status();
-        }
-
-        // Create sibling symlinks (e.g. ../backbone → /path/to/backbone)
-        if let Some(parent) = build_dir.parent() {
-            for (name, target) in &self.sibling_symlinks {
-                let link_path = parent.join(name);
-                if !link_path.exists() {
-                    tracing::info!(
-                        link = %link_path.display(),
-                        target = %target.display(),
-                        "Creating sibling symlink for path dependency"
-                    );
-                    std::os::unix::fs::symlink(target, &link_path).wrap_err_with(|| {
-                        format!(
-                            "failed to symlink {} -> {}",
-                            link_path.display(),
-                            target.display()
-                        )
-                    })?;
-                }
-            }
+        for (name, target) in &self.sibling_symlinks {
+            source::sibling_symlink(&build_dir, name, target)?;
         }
 
         let pkg = cargo_package
