@@ -33,13 +33,15 @@ async fn retained_relationships_do_not_restore_retired_policy_ownership() {
         .unwrap()
         .1
         .unwrap();
-    let storage_key = keys::relationship_storage_key(&record.relationship);
+    let storage_key = keys::relationship_storage_key(&record.relationship, record.incarnation);
     let key =
         acp_light_client::cache::keys::relationship_key(&policy, record.generations, &storage_key);
     assert_eq!(key, keys::relationship_key(&policy, &storage_key));
-    assert!(key.starts_with(b"relationship/v4/"));
+    assert!(key.starts_with(b"relationship/v5/"));
+    assert_eq!(record.incarnation, 0);
     let prefix = vera_permission::object_owner_prefix(&policy, &object).unwrap();
     let live = fixture_records(42, module.store().prefix_scan(b""));
+    assert!(live.policy_prefixes[&prefix].objects.is_empty());
     let live_policy = live.policy_prefixes[&prefix].policy.clone();
     let timestamp = live.light.timestamp;
     let server = Server::start(live).await;
@@ -203,7 +205,7 @@ resources:
             .unwrap();
         let old_pair = policy.relations.pair(&relationship).unwrap();
         assert!(old_pair.target > 0 && old_pair.subject > 0);
-        let suffix = keys::relationship_storage_key(&relationship);
+        let suffix = keys::relationship_storage_key(&relationship, 0);
         let old_key = acp_light_client::cache::keys::relationship_key(id, old_pair, &suffix);
         assert_eq!(
             old_key,
@@ -211,6 +213,10 @@ resources:
         );
         let live = fixture_records(42, module.store().prefix_scan(b""));
         let original_policy = live.policy_prefixes[&old_key].policy.clone();
+        let original_objects = live.policy_prefixes[&old_key].objects.clone();
+        assert_eq!(original_objects.len(), 1);
+        assert!(original_objects[0].value.is_none());
+        assert_eq!(original_objects[0].roots, original_policy.roots);
         let timestamp = live.light.timestamp;
         let server = Server::start(live).await;
         let client = server.client();
@@ -221,11 +227,32 @@ resources:
             .1
             .value
             .is_some());
-        let old_namespace = format!("relationship/v3/{id}/{suffix}");
+        for namespace in ["relationship/v3/", "relationship/v4/"] {
+            let old_namespace = format!("{namespace}{id}/{suffix}");
+            assert!(client
+                .read_current_relationship(id, old_namespace.as_bytes(), HEIGHT)
+                .await
+                .is_err());
+        }
+        server
+            .fixture
+            .write()
+            .policy_prefixes
+            .get_mut(&old_key)
+            .unwrap()
+            .objects
+            .clear();
         assert!(client
-            .read_current_relationship(id, old_namespace.as_bytes(), HEIGHT)
+            .read_current_relationship(id, &old_key, HEIGHT)
             .await
             .is_err());
+        server
+            .fixture
+            .write()
+            .policy_prefixes
+            .get_mut(&old_key)
+            .unwrap()
+            .objects = original_objects.clone();
 
         let stripped = SCHEMA.replace(&format!("    relations:\n      - name: {removed}\n"), "");
         assert_eq!(
@@ -354,7 +381,35 @@ resources:
             serde_json::from_slice(fresh.value.as_deref().unwrap()).unwrap();
         assert_eq!(record.relationship, relationship);
         assert_eq!(record.generations, fresh_pair);
+        assert_eq!(record.incarnation, 0);
         assert!(fresh.proof.is_none());
+        let current_objects = server.fixture.read().policy_prefixes[&fresh_key]
+            .objects
+            .clone();
+        server
+            .fixture
+            .write()
+            .policy_prefixes
+            .get_mut(&fresh_key)
+            .unwrap()
+            .objects = original_objects;
+        assert!(connected
+            .read_relationship(id, fresh_pair, &suffix)
+            .await
+            .is_err());
+        server
+            .fixture
+            .write()
+            .policy_prefixes
+            .get_mut(&fresh_key)
+            .unwrap()
+            .objects = current_objects;
+        assert!(connected
+            .read_relationship(id, fresh_pair, &suffix)
+            .await
+            .unwrap()
+            .value
+            .is_some());
         assert!(connected
             .read_relationship(id, old_pair, &suffix)
             .await

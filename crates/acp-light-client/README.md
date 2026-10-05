@@ -5,12 +5,16 @@ key provisioned by the operator. It uses `vera_getCurrentRecordProof` for policy
 and persisted access-decision records, `vera_getCurrentPolicyPrefixProof` for
 ownership and relationship reads, and `vera_getCurrentPermissionProof` for
 permission evaluation. Each response pairs the evidence with its certified revision.
-Ownership and relationships require a live policy and matching relation generations
-at that same revision. Keys use `relationship/v4/{policy}/{target:016x}/{subject:016x}/`
-followed by the canonical relationship suffix. Retained cleanup records cannot restore
-a grant after a target or userset relation is removed and recreated. Older relationship
-namespaces are rejected; this is a fresh deployment cutover without backfill. HTTP
-responses and header messages are bounded before deserialization.
+Ownership and relationships require a live policy, matching relation generations and
+current target-object incarnation at that same revision. Keys use
+`relationship/v5/{policy}/{target:016x}/{subject:016x}/` followed by the canonical
+`v3` suffix containing the incarnation. Specialized proofs require an `objects`
+array of same-root object-state witnesses for non-owner rows; authenticated absence
+means initial incarnation zero, while a missing witness is an error. Owner rows use
+incarnation zero and need no object witness. Retained cleanup records cannot restore
+a grant after relation recreation or object unarchiving. Older namespaces and proof
+shapes are rejected; this fresh-state cutover has no backfill. HTTP responses and
+header messages are bounded before deserialization.
 
 The pinned verifier accepts up to 256 operations per revision while retaining
 the shared encoded-byte limits. Applications pinned to the older 64-operation
@@ -23,12 +27,13 @@ monotonic freshness lifetime. A delayed response at a superseded root is rejecte
 Cached records are usable only at the same module root and within the configured
 height and revision-age bounds. Ownership, relationships and permission results are
 evaluated from fetched evidence; physical record cache entries do not establish
-policy or generation liveness.
+policy, generation or incarnation liveness.
 
 `read_relationship` and `cache::keys::relationship_key` require an explicit shared
 `RelationPair`. Derive its identities from the current authenticated policy catalogue;
 do not use `(0, 0)` for arbitrary relations. The owner helper selects the permanent
-owner pair. A retained inactive exact key is an error, while certified absence is
+owner pair and incarnation zero. Non-owner suffixes require the authenticated current
+object incarnation. A retained inactive exact key is an error, while certified absence is
 returned as `None`; neither authorizes access.
 
 `read_policy`, `read_relationship` and `read_access_decision` return authenticated
@@ -49,9 +54,10 @@ verification before they can advance cached state.
 
 ## Native dependency set
 
-This workspace pins Vera to `382b36356de56ea17efdbda6b3ecf44da524fddc`
+This workspace pins Vera to `d50ab9e5f94b81cccd1c70c36190dea7e7cd74c2`
 and its Commonware fork to `d0cef38586581911ddbeb3060ea6b0d7e33d2a98`.
-Both revisions must match the node and proof-verifier deployment. The Defra and
+The selected Vera and Commonware
+revisions must match the node and proof-verifier deployment. The Defra and
 Orbis integration fixture revisions are recorded separately in `backbone.toml`.
 
 Cargo does not inherit dependency patches from a dependency's workspace. A

@@ -129,30 +129,89 @@ fn fixture_records_with_operations(
                             let current: vera_modules::acp::types::PolicyRecord =
                                 serde_json::from_slice(value).unwrap();
                             if let Ok(pair) = current.relations.pair(&record.relationship) {
+                                let incarnation = if record.relationship.relation == "owner" {
+                                    0
+                                } else {
+                                    let point = native::record_proof_at(
+                                        [&a, &b, &h, &n],
+                                        root,
+                                        ModuleId::Acp,
+                                        &vera_modules::acp::object_state::key(
+                                            &record.policy_id,
+                                            &object.resource,
+                                            &object.id,
+                                        ),
+                                    )
+                                    .await
+                                    .unwrap();
+                                    point
+                                        .value
+                                        .as_deref()
+                                        .map(|value| vera_modules::acp::object_state::decode(value))
+                                        .transpose()
+                                        .unwrap()
+                                        .unwrap_or(0)
+                                };
                                 prefixes.push(
                                     vera_modules::acp::keys::relationship_generation_key(
                                         &record.policy_id,
                                         pair,
                                         &vera_modules::acp::keys::relationship_storage_key(
                                             &record.relationship,
+                                            incarnation,
                                         ),
                                     ),
                                 );
                             }
                         }
                         for prefix in prefixes {
-                            // Assemble physical evidence even for retained rows. The client
-                            // must reject inactive generations independently of the server.
-                            let proof = vera_permission::PolicyPrefixProof {
-                                policy: policy.clone(),
-                                prefix: native::prefix_proof_at(
-                                    [&a, &b, &h, &n],
+                            // Keep stale physical rows so client verification, not this fixture,
+                            // must reject retired generations or incarnations.
+                            let physical = native::prefix_proof_at(
+                                [&a, &b, &h, &n],
+                                root,
+                                ModuleId::Acp,
+                                &prefix,
+                            )
+                            .await
+                            .unwrap();
+                            let evidence = physical
+                                .verify(
                                     root,
                                     ModuleId::Acp,
                                     &prefix,
+                                    vera_permission::RECORD_PROOF_BYTES,
                                 )
-                                .await
-                                .unwrap(),
+                                .unwrap();
+                            let mut object_keys = std::collections::BTreeSet::new();
+                            for entry in evidence.entries {
+                                if let Some(key) = vera_permission::relationship_object_key(
+                                    &record.policy_id,
+                                    &entry.key,
+                                    &entry.value,
+                                )
+                                .unwrap()
+                                {
+                                    object_keys.insert(key);
+                                }
+                            }
+                            let mut objects = Vec::new();
+                            for key in object_keys {
+                                objects.push(
+                                    native::record_proof_at(
+                                        [&a, &b, &h, &n],
+                                        root,
+                                        ModuleId::Acp,
+                                        &key,
+                                    )
+                                    .await
+                                    .unwrap(),
+                                );
+                            }
+                            let proof = vera_permission::PolicyPrefixProof {
+                                policy: policy.clone(),
+                                objects,
+                                prefix: physical,
                             };
                             policy_prefixes.insert(prefix, proof);
                         }

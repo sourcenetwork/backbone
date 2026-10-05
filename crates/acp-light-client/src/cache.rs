@@ -126,7 +126,7 @@ pub mod keys {
         key
     }
 
-    /// Build a v4 relationship key with explicit target and userset generations.
+    /// Build a v5 relationship key from explicit generations and an incarnation-qualified suffix.
     /// Zero is reserved for permanent ownership or an absent userset dependency.
     pub fn relationship_key(
         policy_id: &str,

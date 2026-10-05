@@ -72,8 +72,8 @@ impl Endpoint {
             .map(|_| ()),
             Self::PolicyPrefix => {
                 let policy = "ab".repeat(32);
-                let prefix = format!("relationship/v4/{policy}/");
-                rpc::get_current_policy_prefix_proof(&client, url, &policy, prefix.as_bytes(), 1)
+                let prefix = vera_modules::acp::keys::relationship_policy_prefix(&policy);
+                rpc::get_current_policy_prefix_proof(&client, url, &policy, &prefix, 1)
                     .await
                     .map(|_| ())
             }
