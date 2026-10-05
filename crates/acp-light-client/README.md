@@ -5,10 +5,12 @@ key provisioned by the operator. It uses `vera_getCurrentRecordProof` for policy
 and persisted access-decision records, `vera_getCurrentPolicyPrefixProof` for
 ownership and relationship reads, and `vera_getCurrentPermissionProof` for
 permission evaluation. Each response pairs the evidence with its certified revision.
-Ownership and relationships require policy liveness at that same revision; retained
-cleanup records under `relationship/v3/` do not establish current ownership or a
-current relationship after policy deletion. HTTP responses and header messages are
-bounded before deserialization.
+Ownership and relationships require a live policy and matching relation generations
+at that same revision. Keys use `relationship/v4/{policy}/{target:016x}/{subject:016x}/`
+followed by the canonical relationship suffix. Retained cleanup records cannot restore
+a grant after a target or userset relation is removed and recreated. Older relationship
+namespaces are rejected; this is a fresh deployment cutover without backfill. HTTP
+responses and header messages are bounded before deserialization.
 
 The pinned verifier accepts up to 256 operations per revision while retaining
 the shared encoded-byte limits. Applications pinned to the older 64-operation
@@ -20,7 +22,14 @@ headers cannot move that state backward; repeated certificates cannot renew its
 monotonic freshness lifetime. A delayed response at a superseded root is rejected.
 Cached records are usable only at the same module root and within the configured
 height and revision-age bounds. Ownership, relationships and permission results are
-evaluated from fetched evidence; physical record cache entries do not establish policy liveness.
+evaluated from fetched evidence; physical record cache entries do not establish
+policy or generation liveness.
+
+`read_relationship` and `cache::keys::relationship_key` require an explicit shared
+`RelationPair`. Derive its identities from the current authenticated policy catalogue;
+do not use `(0, 0)` for arbitrary relations. The owner helper selects the permanent
+owner pair. A retained inactive exact key is an error, while certified absence is
+returned as `None`; neither authorizes access.
 
 `read_policy`, `read_relationship` and `read_access_decision` return authenticated
 record data, not an authorization decision. `verify_access` evaluates the full
@@ -40,7 +49,7 @@ verification before they can advance cached state.
 
 ## Native dependency set
 
-This workspace pins Vera to `2536670fa4a900f211295cd14ce1ad12c2758f13`
+This workspace pins Vera to `9d5afda06a12cc77ecfcd846db362eb492063a9d`
 and its Commonware fork to `d0cef38586581911ddbeb3060ea6b0d7e33d2a98`.
 Both revisions must match the node and proof-verifier deployment.
 
@@ -49,3 +58,6 @@ consumer of this crate must carry this workspace's Commonware `[patch.crates-io]
 entries in its own root manifest. Keep all entries on the same revision, retain
 the lockfile, and use `--frozen` for validation. Otherwise the released Commonware
 API can be selected alongside Vera's fork-dependent code.
+
+The Defra and Orbis fixture revisions in `backbone.toml` still await aligned consumer
+branches. This crate update alone does not qualify the full native stack.

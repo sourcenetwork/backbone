@@ -107,24 +107,53 @@ fn fixture_records_with_operations(
                     if key.starts_with(vera_modules::acp::keys::RELATIONSHIP_PREFIX) {
                         let record: vera_modules::acp::types::RelationshipRecord =
                             serde_json::from_slice(&value).unwrap();
+                        let policy = native::record_proof_at(
+                            [&a, &b, &h, &n],
+                            root,
+                            ModuleId::Acp,
+                            &vera_modules::acp::keys::policy_key(&record.policy_id),
+                        )
+                        .await
+                        .unwrap();
                         let object = vera_permission::Object {
-                            resource: record.relationship.resource,
-                            id: record.relationship.object_id,
+                            resource: record.relationship.resource.clone(),
+                            id: record.relationship.object_id.clone(),
                         };
-                        for prefix in [
+                        let mut prefixes = vec![
                             key.clone(),
                             vera_permission::object_owner_prefix(&record.policy_id, &object)
                                 .unwrap(),
                             vera_modules::acp::keys::relationship_policy_prefix(&record.policy_id),
-                        ] {
-                            let proof = native::policy_prefix_proof_at(
-                                [&a, &b, &h, &n],
-                                root,
-                                &record.policy_id,
-                                &prefix,
-                            )
-                            .await
-                            .unwrap();
+                        ];
+                        if let Some(value) = &policy.value {
+                            let current: vera_modules::acp::types::PolicyRecord =
+                                serde_json::from_slice(value).unwrap();
+                            if let Ok(pair) = current.relations.pair(&record.relationship) {
+                                prefixes.push(
+                                    vera_modules::acp::keys::relationship_generation_key(
+                                        &record.policy_id,
+                                        pair,
+                                        &vera_modules::acp::keys::relationship_storage_key(
+                                            &record.relationship,
+                                        ),
+                                    ),
+                                );
+                            }
+                        }
+                        for prefix in prefixes {
+                            // Assemble physical evidence even for retained rows. The client
+                            // must reject inactive generations independently of the server.
+                            let proof = vera_permission::PolicyPrefixProof {
+                                policy: policy.clone(),
+                                prefix: native::prefix_proof_at(
+                                    [&a, &b, &h, &n],
+                                    root,
+                                    ModuleId::Acp,
+                                    &prefix,
+                                )
+                                .await
+                                .unwrap(),
+                            };
                             policy_prefixes.insert(prefix, proof);
                         }
                     }

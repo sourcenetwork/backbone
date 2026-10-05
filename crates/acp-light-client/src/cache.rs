@@ -126,13 +126,14 @@ pub mod keys {
         key
     }
 
-    /// Build a relationship key: `"relationship/v3/" + policy_id + "/" + storage_key`.
-    pub fn relationship_key(policy_id: &str, storage_key: &str) -> Vec<u8> {
-        let mut key = Vec::from(b"relationship/v3/" as &[u8]);
-        key.extend_from_slice(policy_id.as_bytes());
-        key.push(b'/');
-        key.extend_from_slice(storage_key.as_bytes());
-        key
+    /// Build a v4 relationship key with explicit target and userset generations.
+    /// Zero is reserved for permanent ownership or an absent userset dependency.
+    pub fn relationship_key(
+        policy_id: &str,
+        generations: crate::RelationPair,
+        storage_key: &str,
+    ) -> Vec<u8> {
+        vera_modules::acp::keys::relationship_generation_key(policy_id, generations, storage_key)
     }
 
     /// Build an access decision key: `"access_decision/" + decision_id`.

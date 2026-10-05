@@ -72,7 +72,7 @@ impl Endpoint {
             .map(|_| ()),
             Self::PolicyPrefix => {
                 let policy = "ab".repeat(32);
-                let prefix = format!("relationship/v3/{policy}/");
+                let prefix = format!("relationship/v4/{policy}/");
                 rpc::get_current_policy_prefix_proof(&client, url, &policy, prefix.as_bytes(), 1)
                     .await
                     .map(|_| ())

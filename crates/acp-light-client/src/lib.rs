@@ -19,6 +19,7 @@ pub use proof_client::ProofClient;
 pub use types::{
     ConsensusPublicKey, GossipHeader, LightBlock, ModuleId, ModuleStateProof, VerifiedRecord,
 };
+pub use vera_modules::acp::types::RelationPair;
 pub use vera_permission::{
     AccessDecision, AccessRequest, Actor, DecisionRequest, Object, Operation, PermissionProof,
     RecordProof, RecordResponse, Timestamp, PERMISSION_LIMITS,
@@ -129,13 +130,15 @@ impl AcpLightClient {
         Ok(owner)
     }
 
-    /// Read a relationship with policy liveness authenticated at the same revision.
+    /// Read an exact generation-qualified relationship at a fresh certified revision.
+    /// The same-root policy must authenticate both generation identities.
     pub async fn read_relationship(
         &self,
         policy_id: &str,
+        generations: RelationPair,
         storage_key: &str,
     ) -> eyre::Result<VerifiedRecord> {
-        let key = cache::keys::relationship_key(policy_id, storage_key);
+        let key = cache::keys::relationship_key(policy_id, generations, storage_key);
         let minimum = self.header_chain.fresh_state()?.height;
         let (revision, record) = self
             .proof_client

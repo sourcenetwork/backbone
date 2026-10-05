@@ -105,7 +105,8 @@ impl ProofClient {
         Ok((revision_state(&response.revision)?, owner))
     }
 
-    /// Read one exact relationship key only while its policy exists at the same revision.
+    /// Read an exact v4 relationship key only while its policy and both relation
+    /// generations are current at the same certified revision.
     pub async fn read_current_relationship(
         &self,
         policy: &str,
@@ -149,7 +150,7 @@ impl ProofClient {
             value,
             module_state_root: revision.module_state_root,
             verified_at_height: revision.height,
-            // A raw point proof does not represent the verified policy-liveness condition.
+            // A raw point proof does not authenticate policy or generation liveness.
             proof: None,
         };
         Ok((revision, record))

@@ -25,5 +25,5 @@ cargo_package = "cli-tool"
 [components.verad]
 prefix = "VERAD"
 repo = "https://github.com/sourcenetwork/vera.rs"
-ref = "2536670fa4a900f211295cd14ce1ad12c2758f13"
+ref = "9d5afda06a12cc77ecfcd846db362eb492063a9d"
 cargo_package = "verad"
