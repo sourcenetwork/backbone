@@ -49,7 +49,7 @@ verification before they can advance cached state.
 
 ## Native dependency set
 
-This workspace pins Vera to `b5f394271b4b7c54c6bd6ec044747729b815ef29`
+This workspace pins Vera to `382b36356de56ea17efdbda6b3ecf44da524fddc`
 and its Commonware fork to `d0cef38586581911ddbeb3060ea6b0d7e33d2a98`.
 Both revisions must match the node and proof-verifier deployment. The Defra and
 Orbis integration fixture revisions are recorded separately in `backbone.toml`.
