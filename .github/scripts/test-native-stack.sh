@@ -74,7 +74,6 @@ check_fixture_pin defradb.rs "$defra_ref"
 
 export RUST_LOG=info
 export RUST_BACKTRACE=1
-export VERA_E2E_DIR="$RUN/clusters"
 export VERA_E2E_KEEP=1
 # Qualify production Argon2id defaults, even on a runner used for cheaper unit tests.
 unset ORBIS_LOCAL_STORAGE_KDF_M_COST_KIB ORBIS_LOCAL_STORAGE_KDF_T_COST
@@ -115,7 +114,7 @@ cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
     -- --ignored --list | tee "$RUN/scenarios.log"
 for scenario in native_startup_registers_and_preserves_identity_on_restart native_defra_signing native_distributed_threshold_workflows; do
     grep -Fx "$scenario: test" "$RUN/scenarios.log" >/dev/null
-    cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
-        "$scenario" -- --ignored --exact --test-threads=1 --nocapture \
-        2>&1 | tee "$RUN/$scenario.log"
+    bash "$ROOT/.github/scripts/run-native-scenario.sh" "$RUN" "$scenario" \
+        cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
+        "$scenario" -- --ignored --exact --test-threads=1 --nocapture
 done
