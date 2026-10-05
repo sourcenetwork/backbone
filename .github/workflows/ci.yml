@@ -71,7 +71,8 @@ jobs:
         with:
           name: native-stack-logs
           path: |
-            ${{ env.NATIVE_STACK_EVIDENCE }}/**/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/clusters/*/node*/logs/*.log
             ${{ env.NATIVE_STACK_EVIDENCE }}/*-Cargo.lock
           if-no-files-found: ignore
       - name: Cleanup
