@@ -72,7 +72,7 @@ check_fixture_pin() {
 check_fixture_pin vera.rs "$vera_ref"
 check_fixture_pin defradb.rs "$defra_ref"
 
-export RUST_LOG=info
+export RUST_LOG=info,vera_node::tx_gossip=trace
 export RUST_BACKTRACE=1
 export VERA_E2E_KEEP=1
 # Qualify production Argon2id defaults, even on a runner used for cheaper unit tests.
