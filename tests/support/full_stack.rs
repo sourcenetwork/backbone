@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use defra_harness::DefraClient;
-use hub_harness::observe::ClusterState;
 use orbis_harness::cli::types::NodeInfoResult;
 use orbis_harness::defradb::identity::DefraHttpClient;
 use orbis_harness::{OrbisCliClient, OrbisRing};
+use vera_harness::observe::ClusterState;
 
 use super::hubd::HubdCli;
 
@@ -18,13 +18,13 @@ pub struct OrbisNodeIdentity {
 }
 
 pub async fn wait_for_dkg_post(
-    hub_cli: &HubdCli,
+    vera_cli: &HubdCli,
     namespace: &str,
     timeout: Duration,
 ) -> eyre::Result<(String, Vec<u8>)> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if let Ok(output) = hub_cli.list_posts(namespace) {
+        if let Ok(output) = vera_cli.list_posts(namespace) {
             if let Ok(posts) = serde_json::from_str::<serde_json::Value>(&output) {
                 if let Some(arr) = posts.as_array() {
                     for post in arr {
@@ -57,7 +57,7 @@ pub async fn wait_for_dkg_post(
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            if let Ok(output) = hub_cli.list_posts(namespace) {
+            if let Ok(output) = vera_cli.list_posts(namespace) {
                 eprintln!("[backbone]   FINAL list-posts output: {}", output);
             }
             return Err(eyre::eyre!(
@@ -75,11 +75,11 @@ pub fn bls_did_key_from_hex(public_key_hex: &str) -> String {
     bls_did_key(&bytes)
 }
 
-pub async fn wait_for_block_finality(hub_state: &ClusterState, label: &str) {
-    let current = hub_state.node(0).effective_height();
+pub async fn wait_for_block_finality(vera_state: &ClusterState, label: &str) {
+    let current = vera_state.node(0).effective_height();
     let target = current + 2;
     let t = Instant::now();
-    hub_state
+    vera_state
         .wait_for_height(target, Duration::from_secs(30))
         .await
         .unwrap_or_else(|e| {
@@ -358,9 +358,9 @@ pub async fn poll_replicated_doc_ids(
     }
 }
 
-pub fn wait_for_tx_receipt(hub_cli: &HubdCli, tx_hash: &str, label: &str) -> eyre::Result<()> {
+pub fn wait_for_tx_receipt(vera_cli: &HubdCli, tx_hash: &str, label: &str) -> eyre::Result<()> {
     let t = Instant::now();
-    hub_cli.wait_for_tx_receipt(tx_hash)?;
+    vera_cli.wait_for_tx_receipt(tx_hash)?;
     eprintln!(
         "[backbone]   {} receipt confirmed in {:.2}s",
         label,

@@ -1,29 +1,29 @@
 # Component version manifest.
 #
 # Single source of truth for binary dependency versions. The CI script
-# ensure-binaries.sh reads refs from this file. To use a different
-# version, edit the ref here — branches, tags, and commit SHAs all work.
+# test-native-stack.sh reads refs from this file. To use a different
+# version, edit the full commit SHA here.
 
 [components.defra]
 prefix = "DEFRA"
 repo = "https://github.com/sourcenetwork/defradb.rs"
-ref = "main"
+ref = "e278a34a9d2d9075941abff0a386566eb90b4149"
 cargo_package = "cli"
 
 [components.orbis-node]
 prefix = "ORBIS"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "jack/integration-testing"
+ref = "19864af8f0fb211bc0cd525fadc348802412df31"
 cargo_package = "orbis-node"
 
 [components.cli-tool]
 prefix = "ORBIS_CLI"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "jack/integration-testing"
+ref = "19864af8f0fb211bc0cd525fadc348802412df31"
 cargo_package = "cli-tool"
 
-[components.hubd]
-prefix = "HUBD"
-repo = "https://github.com/sourcenetwork/hub.rs"
-ref = "main"
-cargo_package = "hubd"
+[components.verad]
+prefix = "VERAD"
+repo = "https://github.com/sourcenetwork/vera.rs"
+ref = "a1cbace66f2f88afaa0ee87148cdbfb7158db9a6"
+cargo_package = "verad"

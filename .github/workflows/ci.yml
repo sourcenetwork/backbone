@@ -4,108 +4,112 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, "iverc/**"]
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.98.0
   PROTOC: /opt/homebrew/bin/protoc
 
 jobs:
   fmt:
     name: Format
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          component: rustfmt
+          build-dependencies: "false"
       - run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PROTOC: /usr/bin/protoc
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Configure git auth
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
+      - uses: ./.github/actions/setup-rust
+        with:
+          component: clippy
+          private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: backbone-clippy-ubuntu-24.04
       - run: cargo clippy --all -- -D warnings
       - name: Cleanup
         if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git checkout -- . && git clean -fd
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: bash .github/scripts/ci-cleanup.sh
 
   unit-test:
     name: Unit Tests
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PROTOC: /usr/bin/protoc
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Configure git auth
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-      - run: cargo test --workspace --exclude defra-harness
-      - name: Build integration test binaries
-        run: |
-          cargo test --test full_stack --no-run
-      - name: Stage integration test binaries
-        run: |
-          mkdir -p ci-artifacts
-          find_test_bin() {
-            local prefix="$1"
-            local candidate
-            for candidate in $(ls -t target/debug/deps/${prefix}-* 2>/dev/null); do
-              if [ -f "$candidate" ] && [ -x "$candidate" ]; then
-                echo "$candidate"
-                return 0
-              fi
-            done
-            echo "missing executable for ${prefix}" >&2
-            return 1
-          }
-
-          cp "$(find_test_bin full_stack)" ci-artifacts/full_stack
-          chmod +x ci-artifacts/full_stack
-      - name: Upload integration test binaries
-        uses: actions/upload-artifact@v4
+      - uses: ./.github/actions/setup-rust
         with:
-          name: integration-test-binaries
-          path: ci-artifacts/
-          if-no-files-found: error
+          private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: backbone-unit-ubuntu-24.04
+      - name: Check native scenario retry rules
+        run: bash .github/scripts/test-native-scenario.sh
+      - run: cargo test --workspace --exclude defra-harness
       - name: Cleanup
         if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git checkout -- . && git clean -fd
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: bash .github/scripts/ci-cleanup.sh
 
   full-stack:
     name: Full Stack
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: ubuntu-24.04
+    # Vera, both Orbis curves and the linked Defra fixture build from source.
+    timeout-minutes: 240
     needs: [fmt, clippy, unit-test]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PROTOC: /usr/bin/protoc
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Configure git auth
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-      - name: Download integration test binaries
-        uses: actions/download-artifact@v4
+      - uses: ./.github/actions/setup-rust
         with:
-          name: integration-test-binaries
-          path: ci-artifacts
-      - name: Ensure binaries
-        run: bash .github/scripts/ensure-binaries.sh
-        env:
-          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
-      - name: Run full stack tests
-        run: |
-          export PATH="$HOME/.sourcenetwork/bin:$PATH"
-          chmod +x ci-artifacts/full_stack
-          ./ci-artifacts/full_stack --ignored --nocapture
+          free-build-space: "true"
+          private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
+      - name: Run pinned native stack
+        run: bash .github/scripts/test-native-stack.sh
+      - name: Retain native qualification evidence
+        if: ${{ always() && env.NATIVE_STACK_EVIDENCE != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-stack-logs
+          path: |
+            ${{ env.NATIVE_STACK_EVIDENCE }}/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/command.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/retry.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/clusters/*/node*/logs/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/exit-code
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/tee-exit-code
+            ${{ env.NATIVE_STACK_EVIDENCE }}/*-Cargo.lock
+          if-no-files-found: ignore
       - name: Cleanup
         if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git checkout -- . && git clean -fd
-          pkill -f "target/.*(defra|hubd|orbis)" || true
-          rm -rf target/e2e/
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: bash .github/scripts/ci-cleanup.sh
