@@ -4,6 +4,7 @@ scripts=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/native-scenario-tests.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 scenario=native_defra_signing
+unset NATIVE_STACK_CURVE
 cat > "$work/command" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -115,3 +116,27 @@ PATH="$work/tools:$PATH" MODE=collision COUNT="$work/logging-failure/count" \
 [[ $(cat "$work/logging-failure/scenarios/$scenario/attempt-1/exit-code") == 101 ]]
 [[ $(cat "$work/logging-failure/scenarios/$scenario/attempt-1/tee-exit-code") == 73 ]]
 printf 'PASS logging-failure\n'
+
+# A curve labels evidence only; the command and retry classifier still see the
+# original scenario name. Both curves can safely share one evidence root.
+mkdir "$work/curves"
+for curve in bls12-381 jubjub; do
+    NATIVE_STACK_CURVE="$curve" MODE=collision COUNT="$work/curves/$curve-count" \
+        bash "$scripts/run-native-scenario.sh" "$work/curves" "$scenario" \
+        "$work/command" "$scenario" --exact > "$work/curves/$curve.log" 2>&1
+    dir="$work/curves/scenarios/$curve-$scenario"
+    [[ $(cat "$work/curves/$curve-count") == 2 ]]
+    [[ $(cat "$dir/attempt-1/exit-code") == 101 ]]
+    [[ $(cat "$dir/attempt-2/exit-code") == 0 && -s $dir/retry.log ]]
+    [[ ! -e $work/curves/scenarios/$scenario ]]
+    printf 'PASS curve-%s\n' "$curve"
+done
+result=0
+NATIVE_STACK_CURVE=unsupported MODE=success COUNT="$work/invalid-curve-count" \
+    bash "$scripts/run-native-scenario.sh" "$work/invalid-curve" "$scenario" \
+    "$work/command" "$scenario" --exact > "$work/invalid-curve.log" 2>&1 || result=$?
+[[ $result == 2 && ! -e $work/invalid-curve-count && ! -e $work/invalid-curve ]]
+printf 'PASS invalid-curve\n'
+
+# The existing CI shell check also exercises curve selection and binary staging.
+bash "$scripts/test-native-stack-driver.sh"

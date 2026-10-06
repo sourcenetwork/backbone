@@ -13,7 +13,11 @@ case "$scenario" in
     *) echo "Unknown native scenario: $scenario" >&2; exit 2 ;;
 esac
 scripts=$(cd "$(dirname "$0")" && pwd)
-scenario_dir="$root/scenarios/$scenario"
+case "${NATIVE_STACK_CURVE:-}" in
+    ""|bls12-381|jubjub) ;;
+    *) echo "Unknown native curve: $NATIVE_STACK_CURVE" >&2; exit 2 ;;
+esac
+scenario_dir="$root/scenarios/${NATIVE_STACK_CURVE:+$NATIVE_STACK_CURVE-}$scenario"
 mkdir -p "$scenario_dir"
 
 for attempt in 1 2; do

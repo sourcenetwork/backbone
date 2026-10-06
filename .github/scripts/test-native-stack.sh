@@ -80,7 +80,7 @@ unset ORBIS_LOCAL_STORAGE_KDF_M_COST_KIB ORBIS_LOCAL_STORAGE_KDF_T_COST
 {
     echo "backbone=$(git -C "$ROOT" rev-parse HEAD)"
     echo "vera=$vera_ref orbis=$orbis_ref defra=$defra_ref"
-    echo "profile=release orbis_features=native,redb,iroh,bls12-381 default_features=false"
+    echo "profile=release curves=bls12-381,jubjub default_features=false"
     echo "kdf=production-defaults (262144 KiB, 3 iterations)"
     rustc +1.98.0 --version --verbose
 } | tee "$RUN/provenance.log"
@@ -91,30 +91,40 @@ cp "$CARGO_TARGET_DIR/release/verad" "$WORK/bin/verad"
 export VERAD_BINARY="$WORK/bin/verad"
 # Exercise this PR's proof client, including through Defra and Orbis consumers.
 patch="patch.'https://github.com/sourcenetwork/backbone.git'.acp-light-client.path='$ROOT/crates/acp-light-client'"
-native=(--manifest-path "$WORK/orbis/Cargo.toml" --config "$patch" -p orbis-node
-    --no-default-features --features native,redb,iroh,bls12-381)
-# The local override changes the disposable lockfile. Stage the production binary
-# before test dev-dependencies can enable additional features in Cargo's output.
-cargo +1.98.0 build --release "${native[@]}" --bin orbis-node \
-    2>&1 | tee "$RUN/build-orbis.log"
-cp "$CARGO_TARGET_DIR/release/orbis-node" "$WORK/bin/orbis-node"
-export ORBIS_NODE_BINARY="$WORK/bin/orbis-node"
-cargo +1.98.0 tree --locked "${native[@]}" --color never --edges normal,build \
-    --prefix none > "$RUN/native-dependencies.log"
-if grep -E '^(cosmrs|tendermint(-rpc|-config|-proto)?|cosmos-sdk-proto) v' "$RUN/native-dependencies.log"; then
-    echo "Native node includes Cosmos transport dependencies" >&2
-    exit 1
-fi
-shasum -a 256 "$VERAD_BINARY" "$ORBIS_NODE_BINARY" "$WORK/vera/Cargo.lock" \
-    "$WORK/orbis/Cargo.lock" | tee -a "$RUN/provenance.log"
+for curve in bls12-381 jubjub; do
+    native=(--manifest-path "$WORK/orbis/Cargo.toml" --config "$patch" -p orbis-node
+        --no-default-features --features "native,redb,iroh,$curve")
+    echo "curve=$curve profile=release orbis_features=native,redb,iroh,$curve default_features=false" \
+        | tee "$RUN/provenance-$curve.log"
+    # The local override changes the disposable lockfile. Stage each curve's
+    # production binary before test dev-dependencies can enable extra features.
+    cargo +1.98.0 build --release "${native[@]}" --bin orbis-node \
+        2>&1 | tee "$RUN/build-orbis-$curve.log"
+    mkdir -p "$WORK/bin/$curve"
+    cp "$CARGO_TARGET_DIR/release/orbis-node" "$WORK/bin/$curve/orbis-node"
+    export ORBIS_NODE_BINARY="$WORK/bin/$curve/orbis-node"
+    cargo +1.98.0 tree --locked "${native[@]}" --color never --edges normal,build \
+        --prefix none > "$RUN/native-dependencies-$curve.log"
+    if grep -E '^(cosmrs|tendermint(-rpc|-config|-proto)?|cosmos-sdk-proto) v' "$RUN/native-dependencies-$curve.log"; then
+        echo "Native $curve node includes Cosmos transport dependencies" >&2
+        exit 1
+    fi
+    shasum -a 256 "$VERAD_BINARY" "$ORBIS_NODE_BINARY" "$WORK/vera/Cargo.lock" \
+        "$WORK/orbis/Cargo.lock" | tee -a "$RUN/provenance-$curve.log"
 
-cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup --no-run \
-    2>&1 | tee "$RUN/build-tests.log"
-cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
-    -- --ignored --list | tee "$RUN/scenarios.log"
-for scenario in native_startup_registers_and_preserves_identity_on_restart native_defra_signing native_distributed_threshold_workflows; do
-    grep -Fx "$scenario: test" "$RUN/scenarios.log" >/dev/null
-    bash "$ROOT/.github/scripts/run-native-scenario.sh" "$RUN" "$scenario" \
-        cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
-        "$scenario" -- --ignored --exact --test-threads=1 --nocapture
+    cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup --no-run \
+        2>&1 | tee "$RUN/build-tests-$curve.log"
+    cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
+        -- --ignored --list | tee "$RUN/scenarios-$curve.log"
+    scenarios=(native_startup_registers_and_preserves_identity_on_restart)
+    if [[ $curve == bls12-381 ]]; then
+        scenarios+=(native_defra_signing)
+    fi
+    scenarios+=(native_distributed_threshold_workflows)
+    for scenario in "${scenarios[@]}"; do
+        grep -Fx "$scenario: test" "$RUN/scenarios-$curve.log" >/dev/null
+        NATIVE_STACK_CURVE="$curve" bash "$ROOT/.github/scripts/run-native-scenario.sh" "$RUN" "$scenario" \
+            cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
+            "$scenario" -- --ignored --exact --test-threads=1 --nocapture
+    done
 done
