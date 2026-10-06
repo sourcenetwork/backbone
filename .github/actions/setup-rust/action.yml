@@ -1,0 +1,25 @@
+name: Set up Backbone Rust CI
+description: Install native build dependencies, private Git access and the pinned toolchain.
+inputs:
+  component:
+    description: Optional Rust toolchain component (rustfmt or clippy).
+    default: ""
+  build-dependencies:
+    description: Install the Linux native build dependencies.
+    default: "true"
+  free-build-space:
+    description: Remove unused hosted SDKs for the full native stack build.
+    default: "false"
+  private-repo-token:
+    description: Token for private Source Network dependencies.
+    default: ""
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        CI_RUST_COMPONENT: ${{ inputs.component }}
+        CI_BUILD_DEPENDENCIES: ${{ inputs.build-dependencies }}
+        CI_FREE_BUILD_SPACE: ${{ inputs.free-build-space }}
+        PRIVATE_REPO_PAT: ${{ inputs.private-repo-token }}
+      run: bash "$GITHUB_ACTION_PATH/setup.sh"

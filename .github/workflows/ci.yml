@@ -18,8 +18,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust formatter
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt
+      - uses: ./.github/actions/setup-rust
+        with:
+          component: rustfmt
+          build-dependencies: "false"
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -33,23 +35,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev protobuf-compiler libdigest-sha-perl
-      - name: Configure git auth
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-      - name: Install Rust linter
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
+      - uses: ./.github/actions/setup-rust
+        with:
+          component: clippy
+          private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: backbone-clippy-ubuntu-24.04
       - run: cargo clippy --all -- -D warnings
       - name: Cleanup
         if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git checkout -- . && git clean -fd
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: bash .github/scripts/ci-cleanup.sh
 
   unit-test:
     name: Unit Tests
@@ -62,14 +60,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev protobuf-compiler libdigest-sha-perl
-      - name: Configure git auth
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-      - name: Install Rust toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - uses: ./.github/actions/setup-rust
+        with:
+          private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: backbone-unit-ubuntu-24.04
@@ -78,9 +71,9 @@ jobs:
       - run: cargo test --workspace --exclude defra-harness
       - name: Cleanup
         if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git checkout -- . && git clean -fd
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: bash .github/scripts/ci-cleanup.sh
 
   full-stack:
     name: Full Stack
@@ -95,17 +88,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Prepare hosted build space and dependencies
-        run: |
-          # These preinstalled SDKs are unused by the native Rust stack.
-          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet
-          sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev protobuf-compiler libdigest-sha-perl
-          df -h "$GITHUB_WORKSPACE"
-      - name: Configure git auth
-        run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
-      - name: Install native stack toolchain
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - uses: ./.github/actions/setup-rust
+        with:
+          free-build-space: "true"
+          private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
       - name: Run pinned native stack
         run: bash .github/scripts/test-native-stack.sh
       - name: Retain native qualification evidence
@@ -124,6 +110,6 @@ jobs:
           if-no-files-found: ignore
       - name: Cleanup
         if: always()
-        run: |
-          git config --global --remove-section "url.https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/" 2>/dev/null || true
-          git checkout -- . && git clean -fd
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: bash .github/scripts/ci-cleanup.sh
