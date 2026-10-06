@@ -24,15 +24,26 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PROTOC: /usr/bin/protoc
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev protobuf-compiler libdigest-sha-perl
       - name: Configure git auth
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - name: Install Rust linter
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: backbone-clippy-ubuntu-24.04
       - run: cargo clippy --all -- -D warnings
       - name: Cleanup
         if: always()
@@ -73,12 +84,24 @@ jobs:
 
   full-stack:
     name: Full Stack
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: ubuntu-24.04
+    # Vera, both Orbis curves and the linked Defra fixture build from source.
+    timeout-minutes: 240
     needs: [fmt, clippy, unit-test]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PROTOC: /usr/bin/protoc
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Prepare hosted build space and dependencies
+        run: |
+          # These preinstalled SDKs are unused by the native Rust stack.
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev protobuf-compiler libdigest-sha-perl
+          df -h "$GITHUB_WORKSPACE"
       - name: Configure git auth
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - name: Install native stack toolchain
