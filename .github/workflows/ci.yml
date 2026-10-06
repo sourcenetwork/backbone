@@ -81,9 +81,11 @@ jobs:
           name: native-stack-logs
           path: |
             ${{ env.NATIVE_STACK_EVIDENCE }}/*.log
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/**/*.log
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/**/exit-code
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/**/tee-exit-code
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/command.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/retry.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/clusters/*/node*/logs/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/exit-code
+            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/tee-exit-code
             ${{ env.NATIVE_STACK_EVIDENCE }}/*-Cargo.lock
           if-no-files-found: ignore
       - name: Cleanup
