@@ -9,7 +9,7 @@ root=$1
 scenario=$2
 shift 2
 case "$scenario" in
-    native_startup_registers_and_preserves_identity_on_restart|native_defra_signing|native_distributed_threshold_workflows) ;;
+    native_startup_registers_and_preserves_identity_on_restart|native_defra_signing|native_distributed_threshold_workflows|native_pet_threshold_workflows) ;;
     *) echo "Unknown native scenario: $scenario" >&2; exit 2 ;;
 esac
 scripts=$(cd "$(dirname "$0")" && pwd)
@@ -23,10 +23,11 @@ mkdir -p "$scenario_dir"
 for attempt in 1 2; do
     attempt_dir="$scenario_dir/attempt-$attempt"
     mkdir "$attempt_dir"
-    mkdir "$attempt_dir/clusters"
+    mkdir "$attempt_dir/clusters" "$attempt_dir/orbis-clusters"
     # Preserve both statuses: a failed evidence writer must never allow a retry.
     set +e
-    VERA_E2E_DIR="$attempt_dir/clusters" "$@" 2>&1 | tee "$attempt_dir/command.log"
+    VERA_E2E_DIR="$attempt_dir/clusters" ORBIS_NATIVE_E2E_DIR="$attempt_dir/orbis-clusters" \
+        "$@" 2>&1 | tee "$attempt_dir/command.log"
     statuses=("${PIPESTATUS[@]}")
     set -e
     printf '%s\n' "${statuses[0]}" > "$attempt_dir/exit-code"

@@ -152,16 +152,22 @@ freshness. Direct-certificate responses retain their existing shape.
 
 The Full Stack job builds pinned Vera once, then runs BLS12-381 and Jubjub Orbis
 builds sequentially. Both curves exercise native startup, signing, PRE, revocation,
-restart, resharing, and certified fault reports. The BLS build also exercises Defra
+restart, resharing, and certified fault reports. A separate PET scenario on each
+curve checks paired DKG, stored and inline decryption, document and audit
+permissions, revocation and regrant, both polynomials after resharing, and restart.
+It does not qualify time-scheduled refresh. The BLS build also exercises Defra
 signing and replication. It tests this checkout's ACP light client through a local
 Cargo source override. Defra is linked into the signing fixture at the revision
 in `backbone.toml`. No external release artifacts or floating component branches
-are used.
+are used. These Vera and Orbis pins require fresh native state and matching
+deployment roots.
 
 Run `bash .github/scripts/test-native-stack.sh` with Rust 1.98.0 and protoc
 installed. The script uses a temporary source checkout and retains build artifacts
 under `target/native-stack` and per-curve logs and scenario evidence under
-`target/native-stack-runs`. The older `tests/full_stack.rs` fixture uses EVM
+`target/native-stack-runs`. Orbis state and logs remain in each attempt's private
+`orbis-clusters` directory and are not included in CI artifacts. The older
+`tests/full_stack.rs` fixture uses EVM
 administration and is not the native CI entry point. Native coverage checks
 Orbis authorization and signed document replication; it does not yet cover
 Defra collection-level strict ACP enforcement on replicated updates.

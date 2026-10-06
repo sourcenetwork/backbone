@@ -101,12 +101,16 @@ else:
             if curve == "bls12-381":
                 print("native_defra_signing: test")
             print("native_distributed_threshold_workflows: test")
+            print("native_pet_threshold_workflows: test")
         else:
             scenario = args[args.index("--test") + 2]
             assert "--ignored" in args and "--exact" in args and "--test-threads=1" in args
             assert "--nocapture" in args and os.environ["NATIVE_STACK_CURVE"] == curve
             expected = curve + "-" + scenario
             assert Path(os.environ["VERA_E2E_DIR"]).parts[-3:] == (expected, "attempt-1", "clusters")
+            retained = Path(os.environ["ORBIS_NATIVE_E2E_DIR"])
+            assert retained.parts[-3:] == (expected, "attempt-1", "orbis-clusters")
+            assert retained.is_dir()
             event = "run " + curve + " " + scenario
             print("test " + scenario + " ... ok")
 with open(os.environ["MOCK_TRACE"], "a") as trace:
@@ -146,7 +150,7 @@ for curve in ("bls12-381", "jubjub"):
     scenarios = ["native_startup_registers_and_preserves_identity_on_restart"]
     if curve == "bls12-381":
         scenarios += ["native_defra_signing"]
-    scenarios += ["native_distributed_threshold_workflows"]
+    scenarios += ["native_distributed_threshold_workflows", "native_pet_threshold_workflows"]
     for scenario in scenarios:
         expected += ["run " + curve + " " + scenario]
         attempt = run / "scenarios" / (curve + "-" + scenario) / "attempt-1"

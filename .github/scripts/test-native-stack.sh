@@ -120,7 +120,7 @@ for curve in bls12-381 jubjub; do
     if [[ $curve == bls12-381 ]]; then
         scenarios+=(native_defra_signing)
     fi
-    scenarios+=(native_distributed_threshold_workflows)
+    scenarios+=(native_distributed_threshold_workflows native_pet_threshold_workflows)
     for scenario in "${scenarios[@]}"; do
         grep -Fx "$scenario: test" "$RUN/scenarios-$curve.log" >/dev/null
         NATIVE_STACK_CURVE="$curve" bash "$ROOT/.github/scripts/run-native-scenario.sh" "$RUN" "$scenario" \
