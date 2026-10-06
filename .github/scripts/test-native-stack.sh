@@ -23,14 +23,31 @@ checkout() {
     [[ $(git -C "$destination" rev-parse HEAD) == "$ref" ]]
 }
 
-checkout vera.rs "$(ref_for verad)" "$WORK/vera"
-checkout orbis-rs "$(ref_for orbis-node)" "$WORK/orbis"
-# Defra is linked into the native signing fixture; require the declared release pin.
-grep -F "rev = \"$(ref_for defra)\"" "$WORK/orbis/bin/orbis-node/Cargo.toml" >/dev/null
+vera_ref=$(ref_for verad)
+orbis_ref=$(ref_for orbis-node)
+defra_ref=$(ref_for defra)
+checkout vera.rs "$vera_ref" "$WORK/vera"
+checkout orbis-rs "$orbis_ref" "$WORK/orbis"
+# Check every existing inline git declaration, not just the presence of one pin.
+check_fixture_pin() {
+    local repo=$1 revision=$2
+    [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || { echo "Expected immutable revision for $repo" >&2; return 1; }
+    if ! awk -v dependency="git = \"https://github.com/sourcenetwork/$repo\"" \
+        -v revision="rev = \"$revision\"" '
+        index($0, dependency) { found=1; if (!index($0, revision)) mismatch=1 }
+        END { exit !found || mismatch }
+    ' "$WORK/orbis/bin/orbis-node/Cargo.toml"; then
+        echo "Orbis fixture dependencies do not match the $repo release pin" >&2
+        return 1
+    fi
+}
+check_fixture_pin vera.rs "$vera_ref"
+check_fixture_pin defradb.rs "$defra_ref"
+
 
 cargo +1.98.0 build --locked --manifest-path "$WORK/vera/Cargo.toml" -p verad
 export VERAD_BINARY="$CARGO_TARGET_DIR/debug/verad"
-export RUST_LOG=info
+export RUST_LOG=info,vera_node::tx_gossip=trace
 export RUST_BACKTRACE=1
 export VERA_E2E_DIR="$ROOT/target/native-stack-runs"
 export VERA_E2E_KEEP=1
