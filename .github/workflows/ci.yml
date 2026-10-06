@@ -15,7 +15,7 @@ env:
 jobs:
   fmt:
     name: Format
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust formatter
@@ -42,15 +42,26 @@ jobs:
 
   unit-test:
     name: Unit Tests
-    runs-on: [self-hosted, macOS, ARM64, studio]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: "2"
+      PROTOC: /usr/bin/protoc
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libssl-dev protobuf-compiler libdigest-sha-perl
       - name: Configure git auth
         run: git config --global url."https://${{ secrets.PRIVATE_REPO_PAT }}@github.com/sourcenetwork/".insteadOf "https://github.com/sourcenetwork/"
       - name: Install Rust toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: backbone-unit-ubuntu-24.04
       - name: Check native scenario retry rules
         run: bash .github/scripts/test-native-scenario.sh
       - run: cargo test --workspace --exclude defra-harness
