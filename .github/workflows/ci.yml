@@ -92,22 +92,9 @@ jobs:
         with:
           free-build-space: "true"
           private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
+      - uses: taiki-e/install-action@nextest
       - name: Run pinned native stack
         run: bash .github/scripts/test-native-stack.sh
-      - name: Retain native qualification evidence
-        if: ${{ always() && env.NATIVE_STACK_EVIDENCE != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-stack-logs
-          path: |
-            ${{ env.NATIVE_STACK_EVIDENCE }}/*.log
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/command.log
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/retry.log
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/clusters/*/node*/logs/*.log
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/exit-code
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/tee-exit-code
-            ${{ env.NATIVE_STACK_EVIDENCE }}/*-Cargo.lock
-          if-no-files-found: ignore
       - name: Cleanup
         if: always()
         env:

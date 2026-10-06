@@ -150,23 +150,35 @@ freshness. Direct-certificate responses retain their existing shape.
 
 ### Native stack CI
 
-The Full Stack job builds pinned Vera once, then runs BLS12-381 and Jubjub Orbis
-builds sequentially. Both curves exercise native startup, signing, PRE, revocation,
-restart, resharing, and certified fault reports. A separate PET scenario on each
-curve checks paired DKG, stored and inline decryption, document and audit
-permissions, revocation and regrant, both polynomials after resharing, and restart.
-It does not qualify time-scheduled refresh. The BLS build also exercises Defra
-signing and replication. It tests this checkout's ACP light client through a local
-Cargo source override. Defra is linked into the signing fixture at the revision
-in `backbone.toml`. No external release artifacts or floating component branches
-are used. These Vera and Orbis pins require fresh native state and matching
-deployment roots.
+The Full Stack job builds pinned Vera once, then builds normal native Orbis and
+separate diagnostic executables for BLS12-381 and Jubjub sequentially. Each
+release executable is staged before test features are enabled, checked for
+Cosmos transport dependencies, and packaged into a local Docker image. Fixtures
+receive immutable image IDs; private evidence binds them to source and binary
+hashes. The diagnostic image alone enables `unsafe-testing`.
 
-Run `bash .github/scripts/test-native-stack.sh` with Rust 1.98.0 and protoc
-installed. The script uses a temporary source checkout and retains build artifacts
-under `target/native-stack` and per-curve logs and scenario evidence under
-`target/native-stack-runs`. Orbis state and logs remain in each attempt's private
-`orbis-clusters` directory and are not included in CI artifacts. The older
+Orbis's shared nextest entrypoint owns the exact three normal scenarios: PET,
+ordinary distributed workflows, and fresh-member replacement. A separate exact
+fault-report selector uses the diagnostic image. The earlier startup/identity
+selector still runs on both curves using the normal images; the BLS
+Defra selector retains its distinct graceful-restart path. BLS ordinary workflows
+also check Defra signing and replication. Production KDF parameters and existing
+fixture deadlines remain unchanged. Scheduled refresh
+is not part of this job.
+
+The runtime and host fixtures both consume this Backbone commit's ACP light
+client through a source override in a disposable Orbis checkout. Component refs
+in `backbone.toml` must agree with Orbis's Vera SDK and Defra fixture pins; the
+Orbis revision must provide `scripts/test-native-integration.sh`. These pins
+require fresh native state and matching deployment roots.
+
+Run `bash .github/scripts/test-native-stack.sh` on Ubuntu 24.04 with Rust 1.98.0,
+protoc, cargo-nextest, Docker and Compose installed. The Ubuntu runtime images
+match the host compiler ABI and must pass a binary hash and `--help` check before
+fixtures start. Build artifacts use a fresh run directory under `target/native-stack`; logs, source
+and image provenance, and fixture state remain private under
+`target/native-stack-runs`. CI prints fixed summaries and does not upload raw
+logs or state. The older
 `tests/full_stack.rs` fixture uses EVM
 administration and is not the native CI entry point. Native coverage checks
 Orbis authorization and signed document replication; it does not yet cover
