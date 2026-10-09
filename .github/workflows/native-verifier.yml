@@ -34,6 +34,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
+          component: clippy
           build-dependencies: ${{ (github.event_name == 'push' || inputs.resolve_lockfile) && 'false' || 'true' }}
           private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
       - name: Resolve or qualify the native verifier
