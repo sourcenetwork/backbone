@@ -30,4 +30,4 @@ cargo_package = "verad"
 
 # Test fixtures may advance without rebuilding unchanged production runtimes.
 [qualification.orbis-fixture]
-ref = "611544a4f8bccc8ffe74b8170e7bae29e3b1a752"
+ref = "e492f2d5b5cf974c03c5b5f8b7d7e30343d374b5"
