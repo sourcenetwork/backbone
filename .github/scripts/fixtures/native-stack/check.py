@@ -3,19 +3,20 @@ import sys
 
 trace, forbidden, result, run = sys.argv[1:]
 run = Path(run)
-expected = ["build vera"]
+expected = ["pull vera"]
 for curve in ("bls12-381", "jubjub"):
-    expected += ["build " + curve, "tree " + curve]
-    assert (run / ("build-orbis-" + curve + ".log")).exists()
+    expected += ["pull " + curve, "tree " + curve]
+    assert not (run / ("build-orbis-" + curve + ".log")).exists()
     assert (run / ("native-dependencies-" + curve + ".log")).exists()
     assert (run / ("provenance-" + curve + ".log")).exists()
     if forbidden == curve:
         break
-    expected += ["compile " + curve, "list " + curve]
+    expected += ["compile " + curve, "list " + curve, "list-ignored " + curve]
     scenarios = ["native_startup_registers_and_preserves_identity_on_restart"]
     if curve == "bls12-381":
         scenarios += ["native_defra_signing"]
-    scenarios += ["native_distributed_threshold_workflows", "native_pet_threshold_workflows"]
+    scenarios += ["native_distributed_threshold_workflows", "native_pet_threshold_workflows",
+                  "native_pet_member_replacement", "native_pet_scheduled_refresh_after_restart"]
     for scenario in scenarios:
         expected += ["run " + curve + " " + scenario]
         attempt = run / "scenarios" / (curve + "-" + scenario) / "attempt-1"

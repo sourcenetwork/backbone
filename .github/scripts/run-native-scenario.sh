@@ -9,7 +9,9 @@ root=$1
 scenario=$2
 shift 2
 case "$scenario" in
-    native_startup_registers_and_preserves_identity_on_restart|native_defra_signing|native_distributed_threshold_workflows|native_pet_threshold_workflows) ;;
+    native_startup_registers_and_preserves_identity_on_restart|native_defra_signing|\
+    native_distributed_threshold_workflows|native_pet_threshold_workflows|\
+    native_pet_member_replacement|native_pet_scheduled_refresh_after_restart) ;;
     *) echo "Unknown native scenario: $scenario" >&2; exit 2 ;;
 esac
 scripts=$(cd "$(dirname "$0")" && pwd)
