@@ -1,0 +1,56 @@
+name: Native verifier qualification
+
+on:
+  push:
+    branches: ['iverc/native-release-*']
+    paths:
+      - Cargo.toml
+      - crates/acp-light-client/Cargo.toml
+      - .github/workflows/native-verifier.yml
+      - .github/scripts/qualify-native-verifier.sh
+  workflow_dispatch:
+    inputs:
+      resolve_lockfile:
+        description: Resolve a changed immutable release pin without compiling
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.98.0
+  CARGO_BUILD_JOBS: "2"
+  PROTOC: /usr/bin/protoc
+
+jobs:
+  verifier:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          component: clippy
+          build-dependencies: ${{ (github.event_name == 'push' || inputs.resolve_lockfile) && 'false' || 'true' }}
+          private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
+      - name: Resolve or qualify the native verifier
+        env:
+          RESOLVE_LOCKFILE: ${{ github.event_name == 'push' || inputs.resolve_lockfile }}
+        run: bash .github/scripts/qualify-native-verifier.sh
+      - name: Retain the resolved lockfile
+        if: ${{ success() && (github.event_name == 'push' || inputs.resolve_lockfile) }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-verifier-lockfile-${{ github.sha }}
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
+      - name: Cleanup
+        if: always()
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: bash .github/scripts/ci-cleanup.sh

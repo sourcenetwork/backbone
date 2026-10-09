@@ -7,23 +7,27 @@
 [components.defra]
 prefix = "DEFRA"
 repo = "https://github.com/sourcenetwork/defradb.rs"
-ref = "e278a34a9d2d9075941abff0a386566eb90b4149"
+ref = "810418b9c8f00b1024a90a7e696b7286154c625a"
 cargo_package = "cli"
 
 [components.orbis-node]
 prefix = "ORBIS"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "19864af8f0fb211bc0cd525fadc348802412df31"
+ref = "9c76e741f73bdbac37fab71e79192c1289b052f2"
 cargo_package = "orbis-node"
 
 [components.cli-tool]
 prefix = "ORBIS_CLI"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "19864af8f0fb211bc0cd525fadc348802412df31"
+ref = "9c76e741f73bdbac37fab71e79192c1289b052f2"
 cargo_package = "cli-tool"
 
 [components.verad]
 prefix = "VERAD"
 repo = "https://github.com/sourcenetwork/vera.rs"
-ref = "a1cbace66f2f88afaa0ee87148cdbfb7158db9a6"
+ref = "892cf0582e9d9395574cd5e8900988cb4a6ebd21"
 cargo_package = "verad"
+
+# Test fixtures may advance without rebuilding unchanged production runtimes.
+[qualification.orbis-fixture]
+ref = "c7b0b5a8f87649c9eaaded35bbbdf3278026177f"

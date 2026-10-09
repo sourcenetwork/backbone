@@ -24,6 +24,16 @@ if tool == "git":
                     'vera = { git = "https://github.com/sourcenetwork/vera.rs", rev = "' + "1" * 40 + '" }\n'
                     'defra = { git = "https://github.com/sourcenetwork/defradb.rs", rev = "' + "3" * 40 + '" }\n'
                 )
+                with manifest.open("a") as output:
+                    output.write('acp-light-client = { git = "https://github.com/sourcenetwork/backbone.git", rev = "' + "4" * 40 + '" }\n')
+                (repo / "docker").mkdir()
+                (repo / "docker/NATIVE_VERA_REF").write_text("1" * 40 + "\n")
+        elif command in ("cat-file", "diff"):
+            if os.environ.get("MOCK_SDK_MISMATCH") and command == "diff" and "--name-only" not in args:
+                sys.exit(1)
+            if command == "diff" and "--name-only" in args:
+                print("bin/orbis-node/src/runtime/mod.rs" if os.environ.get("MOCK_RUNTIME_CHANGE")
+                      else "docker/docker-compose-native-integration-test.yml")
         elif command == "rev-parse":
             print((repo / "ref").read_text() if (repo / "ref").exists() else "4" * 40)
         else:
@@ -31,6 +41,29 @@ if tool == "git":
     sys.exit(0)
 if tool == "rustc":
     print("rustc fixture")
+    sys.exit(0)
+if tool == "docker":
+    image = args[-1]
+    curve = "jubjub" if image.endswith("jubjub") else "bls12-381"
+    if args[0] == "pull":
+        event = "pull vera" if "/vera-native:" in image else "pull " + curve
+        with open(os.environ["MOCK_TRACE"], "a") as trace:
+            trace.write(event + "\n")
+    else:
+        assert args[:2] == ["image", "inspect"], args
+        field = args[args.index("--format") + 1]
+        if field == "{{.Id}}":
+            print("sha256:" + ("1" * 64 if "/vera-native:" in image else ("2" if curve == "bls12-381" else "3") * 64))
+        elif "org.opencontainers.image.revision" in field:
+            print(("1" if "/vera-native:" in image else "2") * 40)
+        elif "orbis.backend" in field:
+            print("native")
+        elif "orbis.curve" in field:
+            print(curve)
+        elif "orbis.integration-features" in field:
+            print("true" if os.environ.get("MOCK_UNSAFE_IMAGE") else "false")
+        else:
+            raise AssertionError(args)
     sys.exit(0)
 assert tool == "cargo" and args.pop(0) == "+1.98.0", (tool, args)
 command = args.pop(0)
@@ -55,8 +88,7 @@ else:
     features = args[args.index("--features") + 1]
     curve = features.removeprefix("native,redb,iroh,")
     assert curve in ("bls12-381", "jubjub"), features
-    assert "--no-default-features" in args and "--config" in args
-    assert "acp-light-client.path=" in args[args.index("--config") + 1]
+    assert "--no-default-features" in args and "--config" not in args
     event = command + " " + curve
     if command == "build":
         assert args[args.index("--bin") + 1] == "orbis-node"
@@ -68,23 +100,26 @@ else:
     else:
         assert command == "test" and "--locked" in args
         assert args[args.index("--test") + 1] == "native_startup"
-        staged = Path(os.environ["ORBIS_NODE_BINARY"])
-        assert staged.parts[-3:] == ("bin", curve, "orbis-node"), staged
-        assert staged.read_text() == curve + " production\n", staged
-        assert Path(os.environ["VERAD_BINARY"]).read_text() == "vera production\n"
-        (release / "orbis-node").write_text("test feature unification\n")
+        assert "ORBIS_NODE_BINARY" not in os.environ and "VERAD_BINARY" not in os.environ
+        assert os.environ["ORBIS_NATIVE_VERA_IMAGE"] == "sha256:" + "1" * 64
+        assert os.environ["ORBIS_NATIVE_IMAGE"] == "sha256:" + ("2" if curve == "bls12-381" else "3") * 64
         if "--no-run" in args:
             event = "compile " + curve
         elif "--list" in args:
-            event = "list " + curve
-            print("native_startup_registers_and_preserves_identity_on_restart: test")
-            if curve == "bls12-381":
-                print("native_defra_signing: test")
-            print("native_distributed_threshold_workflows: test")
-            print("native_pet_threshold_workflows: test")
+            event = ("list-ignored " if "--ignored" in args else "list ") + curve
+            if "--ignored" not in args:
+                print("native_startup_registers_and_preserves_identity_on_restart: test")
+                if curve == "bls12-381":
+                    print("native_defra_signing: test")
+                print("native_distributed_threshold_workflows: test")
+                print("native_pet_threshold_workflows: test")
+                print("native_pet_member_replacement: test")
+                print("native_pet_scheduled_refresh_after_restart: test")
+            elif os.environ.get("MOCK_IGNORED_SCENARIO"):
+                print("native_startup_registers_and_preserves_identity_on_restart: test")
         else:
             scenario = args[args.index("--test") + 2]
-            assert "--ignored" in args and "--exact" in args and "--test-threads=1" in args
+            assert "--ignored" not in args and "--exact" in args and "--test-threads=1" in args
             assert "--nocapture" in args and os.environ["NATIVE_STACK_CURVE"] == curve
             expected = curve + "-" + scenario
             assert Path(os.environ["VERA_E2E_DIR"]).parts[-3:] == (expected, "attempt-1", "clusters")
