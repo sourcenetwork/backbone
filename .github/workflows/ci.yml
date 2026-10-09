@@ -78,8 +78,11 @@ jobs:
   full-stack:
     name: Full Stack
     runs-on: ubuntu-24.04
-    # Vera, both Orbis curves and the linked Defra fixture build from source.
+    # Compile consumer fixtures against the pinned normal runtime images.
     timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: read
     needs: [fmt, clippy, unit-test]
     env:
       CARGO_BUILD_JOBS: "2"
@@ -92,18 +95,20 @@ jobs:
         with:
           free-build-space: "true"
           private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Run pinned native stack
         run: bash .github/scripts/test-native-stack.sh
       - name: Retain native qualification evidence
         if: ${{ always() && env.NATIVE_STACK_EVIDENCE != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: native-stack-logs
+          name: native-stack-provenance
           path: |
-            ${{ env.NATIVE_STACK_EVIDENCE }}/*.log
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/command.log
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/retry.log
-            ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/clusters/*/node*/logs/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/provenance*.log
             ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/exit-code
             ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/tee-exit-code
             ${{ env.NATIVE_STACK_EVIDENCE }}/*-Cargo.lock
