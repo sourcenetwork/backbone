@@ -1,0 +1,41 @@
+name: Native deployment qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  RUSTUP_TOOLCHAIN: 1.98.0
+  CARGO_BUILD_JOBS: "2"
+  CARGO_TERM_COLOR: always
+  PROTOC: /usr/bin/protoc
+
+jobs:
+  native-stack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          free-build-space: "true"
+          private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check runtime selection guards
+        run: bash .github/scripts/test-native-stack-driver.sh
+      - name: Qualify the pinned deployment
+        run: bash .github/scripts/test-native-stack.sh
+      - name: Cleanup
+        if: always()
+        env:
+          PRIVATE_REPO_PAT: ${{ secrets.PRIVATE_REPO_PAT }}
+        run: bash .github/scripts/ci-cleanup.sh
