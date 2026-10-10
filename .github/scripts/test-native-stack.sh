@@ -61,7 +61,7 @@ checkout vera.rs "$vera_ref" "$WORK/vera"
 checkout orbis-rs "$fixture_ref" "$WORK/orbis"
 # Fixture changes must not change the runtime selected by the release manifest.
 git -C "$WORK/orbis" fetch -q --depth 1 https://github.com/sourcenetwork/orbis-rs.git "$orbis_ref"
-git -C "$WORK/orbis" diff --name-only "$orbis_ref" HEAD > "$RUN/fixture-changes.log"
+git -C "$WORK/orbis" diff --name-only --no-ext-diff --no-textconv --no-renames "$orbis_ref" HEAD > "$RUN/fixture-changes.log"
 while IFS= read -r path; do
     case "$path" in
         .github/workflows/rust.yml|scripts/qualify-native-restart.py|\
@@ -130,13 +130,13 @@ client_ref=$(awk '/acp-light-client = / && /github.com\/sourcenetwork\/backbone.
 if ! git -C "$ROOT" cat-file -e "$client_ref^{commit}" 2>/dev/null; then
     git -C "$ROOT" fetch --depth 1 origin "$client_ref"
 fi
-git -C "$ROOT" diff --exit-code --quiet HEAD -- Cargo.toml crates/acp-light-client
+git -C "$ROOT" diff --no-ext-diff --no-textconv --no-renames --exit-code --quiet HEAD -- Cargo.toml crates/acp-light-client
 if [[ $(git -C "$ROOT" rev-parse "$client_ref:crates/acp-light-client") != \
       $(git -C "$ROOT" rev-parse 'HEAD:crates/acp-light-client') ]]; then
     echo "Pinned proof client differs from the qualification source" >&2
     exit 1
 fi
-git -C "$ROOT" diff --exit-code "$client_ref" HEAD -- Cargo.toml
+git -C "$ROOT" diff --no-ext-diff --no-textconv --no-renames --exit-code "$client_ref" HEAD -- Cargo.toml
 
 for curve in bls12-381 jubjub; do
     native=(--manifest-path "$WORK/orbis/Cargo.toml" -p orbis-node

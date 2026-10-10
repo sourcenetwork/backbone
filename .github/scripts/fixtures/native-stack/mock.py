@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import os
+import subprocess
+import tempfile
 from pathlib import Path
 import sys
 
@@ -32,8 +34,32 @@ if tool == "git":
             if os.environ.get("MOCK_SDK_MISMATCH") and command == "diff" and "--name-only" not in args:
                 sys.exit(1)
             if command == "diff" and "--name-only" in args:
-                print("bin/orbis-node/src/runtime/mod.rs" if os.environ.get("MOCK_RUNTIME_CHANGE")
-                      else "docker/docker-compose-native-integration-test.yml")
+                if os.environ.get("MOCK_RUNTIME_RENAME"):
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        def real_git(*arguments):
+                            return subprocess.check_output(
+                                [os.environ["MOCK_REAL_GIT"], "-c", "user.name=iverc",
+                                 "-c", "user.email=ivanverch@gmail.com", "-c", "commit.gpgsign=false",
+                                 "-c", "core.hooksPath=/dev/null", *arguments],
+                                cwd=root, text=True,
+                            ).strip()
+                        real_git("init", "--quiet", "--template=")
+                        original = root / "bin/orbis-node/src/runtime/mod.rs"
+                        original.parent.mkdir(parents=True)
+                        original.write_text("pub fn runtime() {}\n")
+                        real_git("add", ".")
+                        real_git("commit", "--quiet", "-m", "Create runtime fixture")
+                        base = real_git("rev-parse", "HEAD")
+                        renamed = root / "bin/orbis-node/tests/native_startup.rs"
+                        renamed.parent.mkdir(parents=True)
+                        original.rename(renamed)
+                        real_git("add", "-A")
+                        real_git("commit", "--quiet", "-m", "Move runtime fixture")
+                        print(real_git(*args[2:-2], base, "HEAD"))
+                else:
+                    print("bin/orbis-node/src/runtime/mod.rs" if os.environ.get("MOCK_RUNTIME_CHANGE")
+                          else "docker/docker-compose-native-integration-test.yml")
         elif command == "rev-parse":
             if os.environ.get("MOCK_CLIENT_TREE_MISMATCH") and args[-1] == "HEAD:crates/acp-light-client":
                 print("5" * 40)
