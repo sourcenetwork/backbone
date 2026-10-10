@@ -131,8 +131,11 @@ if ! git -C "$ROOT" cat-file -e "$client_ref^{commit}" 2>/dev/null; then
     git -C "$ROOT" fetch --depth 1 origin "$client_ref"
 fi
 git -C "$ROOT" diff --exit-code --quiet HEAD -- Cargo.toml crates/acp-light-client
-[[ $(git -C "$ROOT" rev-parse "$client_ref:crates/acp-light-client") == \
-   $(git -C "$ROOT" rev-parse 'HEAD:crates/acp-light-client') ]]
+if [[ $(git -C "$ROOT" rev-parse "$client_ref:crates/acp-light-client") != \
+      $(git -C "$ROOT" rev-parse 'HEAD:crates/acp-light-client') ]]; then
+    echo "Pinned proof client differs from the qualification source" >&2
+    exit 1
+fi
 git -C "$ROOT" diff --exit-code "$client_ref" HEAD -- Cargo.toml
 
 for curve in bls12-381 jubjub; do

@@ -30,9 +30,10 @@ for forbidden in none bls12-381 jubjub; do
     printf 'PASS native-stack-driver forbidden=%s\n' "$forbidden"
 done
 
-for failure in sdk unsafe runtime ignored; do
+for failure in sdk client_tree unsafe runtime ignored; do
     case "$failure" in
         sdk) variable=MOCK_SDK_MISMATCH ;;
+        client_tree) variable=MOCK_CLIENT_TREE_MISMATCH ;;
         unsafe) variable=MOCK_UNSAFE_IMAGE ;;
         runtime) variable=MOCK_RUNTIME_CHANGE ;;
         ignored) variable=MOCK_IGNORED_SCENARIO ;;
@@ -46,5 +47,10 @@ for failure in sdk unsafe runtime ignored; do
         bash "$work/repo/.github/scripts/test-native-stack.sh" > "$work/$failure.log" 2>&1 || result=$?
     [[ $result -ne 0 ]]
     [[ $failure == ignored ]] || ! grep -q '^compile ' "$work/$failure.trace"
+    if [[ $failure == client_tree ]]; then
+        [[ $result -eq 1 ]]
+        grep -q '^Pinned proof client differs from the qualification source$' "$work/$failure.log"
+        ! grep -Eq '^pull (bls12-381|jubjub)$' "$work/$failure.trace"
+    fi
     printf 'PASS native-stack-driver rejects=%s\n' "$failure"
 done

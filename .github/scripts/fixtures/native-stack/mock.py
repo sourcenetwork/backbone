@@ -35,7 +35,10 @@ if tool == "git":
                 print("bin/orbis-node/src/runtime/mod.rs" if os.environ.get("MOCK_RUNTIME_CHANGE")
                       else "docker/docker-compose-native-integration-test.yml")
         elif command == "rev-parse":
-            print((repo / "ref").read_text() if (repo / "ref").exists() else "4" * 40)
+            if os.environ.get("MOCK_CLIENT_TREE_MISMATCH") and args[-1] == "HEAD:crates/acp-light-client":
+                print("5" * 40)
+            else:
+                print((repo / "ref").read_text() if (repo / "ref").exists() else "4" * 40)
         else:
             raise AssertionError(args)
     sys.exit(0)
