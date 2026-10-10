@@ -58,6 +58,7 @@ The nodes' data and logs are kept under the run directory (the driver points
 | `soak replay --manifest <run>/manifest.json [--until-op N] [--hold]` | Rebuilds a run from its manifest: same seed, profile, executed op count and churn schedule, no disk budget. `--until-op` stops the workload early; `--hold` keeps the mesh up until Enter, printing each node's GraphQL URL. |
 | `soak summarize <run dir>` | Rewrites `profile.json` / `profile.md` from the artifact and prints the markdown. |
 | `soak compare <run A> <run B>` | Checks two runs against the replay contract; exits non-zero if they differ. |
+| `soak manage --topology <n>r<m>g --out <dir> [--cases R2,A2,S1]` | Pass/fail cases on the P2P management channel, see "Management channel". |
 
 `run` flags (all optional):
 
@@ -304,6 +305,59 @@ its HTTP cost is linear in nodes. `profile.md`, though, prints one row per
 *directed* pair: 12 rows at four nodes, 30 at six, 380 at twenty, which stops
 being readable well before that. Node memory is the real ceiling. Size the run
 to the host.
+
+## Management channel
+
+`soak manage` is a minutes-long evaluation of `POST /api/v0/p2p/manage`: the
+caller hits one Rust node's HTTP API (the relay) with a JWT whose `aud` is
+the target's peer id, and the relay carries the op over P2P to the target,
+which authorizes the actor against NAC before applying it.
+
+```sh
+DEFRA_RUST_BINARY=<defradb.rs>/target/debug/defra \
+  soak manage --topology 2r0g --cases R2,A2,S1 --out runs/manage-1
+```
+
+The cluster is the `run` mesh with NAC enabled (`--node-acp-enable` and a
+startup identity, which is the NAC owner and the HTTP courier at every
+relay). Every node gets the `User` schema, peer connections and a replicator
+to every other node, all as the owner. Three actors are generated and granted
+on every node through `acp node relationship add`: `admin` (the `admin`
+relation), `operator` (`add-p2p-collection` and `list-p2p-replicator` only),
+`outsider` (nothing).
+
+`--transport iroh` runs the same table on the iroh transport; the binary
+`DEFRA_RUST_BINARY` names must then be built with `--features iroh`. The
+transport is recorded in `manifest.json`, `summary.json` and the `cases.md`
+heading, and the bounds cases size against the transport's request bound
+(`bounds.rs`).
+
+A topology with Go nodes (`--topology 2r2g`, libp2p only: Go does not speak
+iroh) puts them in the same mesh as replication peers, under the same NAC
+setup and owner, with the schema minus `@immutable` (Go lacks the directive;
+it does not enter the collection id). Go has no manage protocol, so a Go
+node is never a relay or a target; the cases still address nodes `0..rust`.
+`H1` runs the cases two Rust nodes can host (R2, A1, A2, S1, S3, S4), each
+its own row, and its own row says whether every Go node converged on the
+source's documents after S3 and S4 and kept the replicator set the mesh gave
+it. Without Go nodes H1 skips. `manifest.json` records each node's runtime.
+
+Cases live by group in
+`src/manage/{routing,authz,state,bounds,partition,hybrid}.rs`, the table and
+runner in `cases.rs`; each restores what it changed. `--cases`
+runs the named cases in the order given; the default is every case but B3 in
+table order, with the bounds group last so a target they wedge cannot poison
+the rest. B3 locates the transport's request size bound by bisection and runs
+under `--locate-size-bound` (or by name) on its own. Before each case the
+runner sends the cheapest admin query to every node the case uses and to
+every Go node; a node that no longer answers makes the case `Infra`, naming
+the last case that used it. A case whose topology requirement the mesh cannot host is skipped, not
+failed. Outcomes: `Pass`, `Fail { expected, got }`, `Skip { reason }`,
+`Infra { error }` (a harness fault, never a product finding). `--out` receives `manifest.json` (nodes, peer ids, actors in
+cleartext like `run`), `summary.json` (per case: outcome, notes a case
+recorded, every relayed op with status and latency, and the target's list for
+that op's family after each mutate) and `cases.md`. `--docker` is not
+supported yet, so P1 (partition) skips.
 
 ## Not yet
 

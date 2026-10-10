@@ -205,6 +205,21 @@ async fn docker(args: &[&str]) -> Result<String> {
 }
 
 /// Names of every `soak-*` network on the docker host.
+/// `kill <sig> <pid>`; `-STOP` freezes a node with its connections up,
+/// `-CONT` lets it go on.
+pub fn signal(pid: u32, sig: &str) -> Result<()> {
+    let out = std::process::Command::new("kill")
+        .args([sig, &pid.to_string()])
+        .output()
+        .wrap_err_with(|| format!("kill {sig} {pid}"))?;
+    ensure!(
+        out.status.success(),
+        "kill {sig} {pid}: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(())
+}
+
 pub async fn existing_networks() -> Result<Vec<String>> {
     let out = docker(&[
         "network",

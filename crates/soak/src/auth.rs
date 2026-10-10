@@ -23,6 +23,17 @@ pub struct Identities {
 
 /// A 15-minute bearer token for `key_hex`, audience = the API host with port.
 pub fn auth_token(key_hex: &str, api_url: &str) -> Result<String> {
+    token(key_hex, host_port(api_url))
+}
+
+/// A 15-minute actor token for the P2P management channel, audience = the
+/// target node's peer id (copy of the integration tests' `mint_manage_token`,
+/// tools/integration-test/tests/manage_relay_common.rs).
+pub fn manage_token(key_hex: &str, target_peer_id: &str) -> Result<String> {
+    token(key_hex, target_peer_id)
+}
+
+fn token(key_hex: &str, audience: &str) -> Result<String> {
     let key = hex::decode(key_hex).wrap_err("identity hex")?;
     let key_type = match key.len() {
         32 => crypto::KeyType::Secp256k1,
@@ -30,9 +41,13 @@ pub fn auth_token(key_hex: &str, api_url: &str) -> Result<String> {
         n => eyre::bail!("unsupported identity length {n}"),
     };
     let raw = identity::RawIdentity::from_bytes(key_type, &key).wrap_err("raw identity")?;
-    let audience = host_port(api_url).to_string();
-    let token = identity::new_token(&raw, Duration::from_secs(15 * 60), Some(audience), None)
-        .wrap_err("mint token")?;
+    let token = identity::new_token(
+        &raw,
+        Duration::from_secs(15 * 60),
+        Some(audience.to_string()),
+        None,
+    )
+    .wrap_err("mint token")?;
     String::from_utf8(token).wrap_err("token utf-8")
 }
 
@@ -93,6 +108,15 @@ mod tests {
         assert_eq!(parts.len(), 3, "{tok}");
         let claims = base64_url_decode(parts[1]);
         assert!(claims.contains("\"aud\":[\"127.0.0.1:55110\"]"), "{claims}");
+    }
+
+    #[test]
+    fn manage_token_audience_is_the_target_peer_id() {
+        let tok = manage_token(KEY, "12D3KooWTarget").unwrap();
+        let parts: Vec<&str> = tok.split('.').collect();
+        assert_eq!(parts.len(), 3, "{tok}");
+        let claims = base64_url_decode(parts[1]);
+        assert!(claims.contains("\"aud\":[\"12D3KooWTarget\"]"), "{claims}");
     }
 
     #[test]

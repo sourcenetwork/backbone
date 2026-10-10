@@ -15,6 +15,8 @@
 //!             [--grace SECS] [--settle SECS]
 //! soak summarize <run dir>
 //! soak compare <run dir A> <run dir B>
+//! soak manage --topology 2r0g --out <dir> [--cases R2,A2,S1] [--transport libp2p|iroh]
+//!             [--node-env KEY=VALUE]...
 //! ```
 //! Env: `DEFRA_RUST_BINARY` (built `defra`), Go `defradb` on PATH with
 //! `DEFRA_GO_COMPAT_COMMIT` set.
@@ -42,6 +44,10 @@
 //! `--nodes docker` runs the M2 six-node topology as containers on a
 //! `soak-<run_id>` network instead of harness processes (p0-crud only);
 //! the backend is recorded in the manifest and honoured by `replay`.
+//!
+//! `manage` runs the management-channel cases (`manage/cases.rs`) on a
+//! NAC-enabled Rust mesh and writes `summary.json` + `cases.md` under
+//! `--out`; `--cases` selects from the table, default all.
 
 mod auth;
 mod checker;
@@ -49,6 +55,7 @@ mod churn;
 mod confirm;
 mod executor;
 mod generator;
+mod manage;
 mod meter;
 mod nodes;
 mod sse;
@@ -62,7 +69,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use defra_harness::TestCluster;
+use defra_harness::{BinarySource, TestCluster};
 use eyre::{bail, eyre, Result, WrapErr};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
@@ -149,6 +156,30 @@ impl Topology {
     }
 }
 
+/// The Rust nodes' P2P transport, `--transport libp2p|iroh` (`manage`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transport {
+    Libp2p,
+    Iroh,
+}
+
+impl Transport {
+    fn parse(s: Option<&str>) -> Result<Self> {
+        match s {
+            None | Some("libp2p") => Ok(Self::Libp2p),
+            Some("iroh") => Ok(Self::Iroh),
+            Some(other) => bail!("unknown --transport {other}; use libp2p or iroh"),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Libp2p => "libp2p",
+            Self::Iroh => "iroh",
+        }
+    }
+}
+
 /// Kind and store per node index. Without `--topology` each backend keeps the
 /// shape every published run used: the M2 six in containers, two of each as
 /// processes.
@@ -206,6 +237,9 @@ struct RunArgs {
     /// Start even if a `soak-*` network is left over from an earlier run.
     reuse_network: bool,
     topology: Option<Topology>,
+    /// `--node-acp-enable` with a startup identity on every node (`manage`).
+    nac: bool,
+    transport: Transport,
 }
 
 impl RunArgs {
@@ -290,6 +324,8 @@ impl RunArgs {
             docker,
             reuse_network: has_flag("reuse-network"),
             topology,
+            nac: false,
+            transport: Transport::Libp2p,
         })
     }
 
@@ -360,6 +396,8 @@ impl RunArgs {
                 None => None,
             },
             reuse_network: has_flag("reuse-network"),
+            nac: false,
+            transport: Transport::Libp2p,
         })
     }
 }
@@ -426,7 +464,25 @@ fn main() -> Result<()> {
             );
             tokio::runtime::Runtime::new()?.block_on(run(&run_dir, args))
         }
-        other => eyre::bail!("unknown command {other}; use run, replay, summarize or compare"),
+        "manage" => {
+            eyre::ensure!(
+                std::env::var_os("DEFRA_RUST_BINARY").is_some(),
+                "set DEFRA_RUST_BINARY to a built `defra` (e.g. <defradb.rs>/target/debug/defra)"
+            );
+            let mut args = RunArgs::from_flags()?;
+            args.nac = true;
+            args.transport = Transport::parse(flag("transport").as_deref())?;
+            let out = flag("out").ok_or_else(|| eyre!("manage needs --out <dir>"))?;
+            std::fs::create_dir_all(&out)?;
+            let out = Path::new(&out).canonicalize()?;
+            std::env::set_var("DEFRA_WORKSPACE_ROOT", &out);
+            std::env::set_var("DEFRA_E2E_KEEP", "1");
+            println!("out dir: {}", out.display());
+            tokio::runtime::Runtime::new()?.block_on(manage::run(&out, args))
+        }
+        other => {
+            eyre::bail!("unknown command {other}; use run, replay, manage, summarize or compare")
+        }
     }
 }
 
@@ -540,6 +596,19 @@ async fn start_nodes(run_dir: &Path, a: &RunArgs) -> Result<Nodes> {
     }
     if a.profile.is_acp() {
         builder = builder.with_acp_local();
+    }
+    if a.nac {
+        builder = builder.with_acp_local().with_nac();
+    }
+    if a.transport == Transport::Iroh {
+        // Under iroh the builder would otherwise build the workspace with
+        // the feature; `DEFRA_RUST_BINARY` must already carry it.
+        let bin = std::env::var("DEFRA_RUST_BINARY").wrap_err(
+            "--transport iroh needs DEFRA_RUST_BINARY, a `defra` built with --features iroh",
+        )?;
+        builder = builder
+            .with_iroh_transport()
+            .with_rust_binary(BinarySource::Path(bin.into()));
     }
     if let Some(intervals) = &a.retry_intervals {
         let flag = ["--replicator-retry-intervals", intervals.as_str()];
@@ -1326,6 +1395,15 @@ mod tests {
         for bad in ["0r0g", "2r2", "r2g", "2g2r", "", "2r2gx", "-1r2g"] {
             assert!(Topology::parse(bad).is_err(), "{bad} should be rejected");
         }
+    }
+
+    #[test]
+    fn transport_parses_and_defaults_to_libp2p() {
+        assert_eq!(Transport::parse(None).unwrap(), Transport::Libp2p);
+        assert_eq!(Transport::parse(Some("libp2p")).unwrap(), Transport::Libp2p);
+        assert_eq!(Transport::parse(Some("iroh")).unwrap(), Transport::Iroh);
+        assert!(Transport::parse(Some("quic")).is_err());
+        assert_eq!(Transport::Iroh.label(), "iroh");
     }
 
     #[test]
