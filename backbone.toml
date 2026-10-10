@@ -13,13 +13,13 @@ cargo_package = "cli"
 [components.orbis-node]
 prefix = "ORBIS"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "7604a291567602ba4eaa1fd3efc4342be6d96bd2"
+ref = "67ed409901ed694ac9855ef5217e2b57ee75be40"
 cargo_package = "orbis-node"
 
 [components.cli-tool]
 prefix = "ORBIS_CLI"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "7604a291567602ba4eaa1fd3efc4342be6d96bd2"
+ref = "67ed409901ed694ac9855ef5217e2b57ee75be40"
 cargo_package = "cli-tool"
 
 [components.verad]
@@ -30,4 +30,4 @@ cargo_package = "verad"
 
 # Test fixtures may advance without rebuilding unchanged production runtimes.
 [qualification.orbis-fixture]
-ref = "df74650d2683659baf254b52ae34f87256a15347"
+ref = "7a36d73168274568fb869aea57bc4323cb1ccabc"
