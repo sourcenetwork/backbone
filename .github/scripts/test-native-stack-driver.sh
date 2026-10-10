@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 scripts=$(cd "$(dirname "$0")" && pwd)
+real_git=$(command -v git)
 work=$(mktemp -d "${TMPDIR:-/tmp}/native-stack-driver-tests.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 mkdir -p "$work/tools" "$work/repo/.github/scripts"
@@ -30,21 +31,33 @@ for forbidden in none bls12-381 jubjub; do
     printf 'PASS native-stack-driver forbidden=%s\n' "$forbidden"
 done
 
-for failure in sdk unsafe runtime ignored; do
+for failure in sdk client_tree unsafe runtime runtime_rename ignored; do
     case "$failure" in
         sdk) variable=MOCK_SDK_MISMATCH ;;
+        client_tree) variable=MOCK_CLIENT_TREE_MISMATCH ;;
         unsafe) variable=MOCK_UNSAFE_IMAGE ;;
         runtime) variable=MOCK_RUNTIME_CHANGE ;;
+        runtime_rename) variable=MOCK_RUNTIME_RENAME ;;
         ignored) variable=MOCK_IGNORED_SCENARIO ;;
     esac
     result=0
     : > "$work/$failure.trace"
     MOCK_SDK_MISMATCH= MOCK_UNSAFE_IMAGE= \
         PATH="$work/tools:$PATH" MOCK_TRACE="$work/$failure.trace" MOCK_FORBIDDEN=none \
+        MOCK_REAL_GIT="$real_git" \
         GITHUB_ENV="$work/$failure.env" CARGO_TARGET_DIR="$work/target-$failure" \
         env "$variable=1" \
         bash "$work/repo/.github/scripts/test-native-stack.sh" > "$work/$failure.log" 2>&1 || result=$?
     [[ $result -ne 0 ]]
+    if [[ $failure == runtime_rename ]]; then
+        [[ $result -eq 1 ]]
+        grep -Fxq 'Orbis fixture changes runtime source: bin/orbis-node/src/runtime/mod.rs' "$work/$failure.log"
+    fi
     [[ $failure == ignored ]] || ! grep -q '^compile ' "$work/$failure.trace"
+    if [[ $failure == client_tree ]]; then
+        [[ $result -eq 1 ]]
+        grep -q '^Pinned proof client differs from the qualification source$' "$work/$failure.log"
+        ! grep -Eq '^pull (bls12-381|jubjub)$' "$work/$failure.trace"
+    fi
     printf 'PASS native-stack-driver rejects=%s\n' "$failure"
 done

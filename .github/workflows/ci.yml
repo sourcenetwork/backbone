@@ -68,6 +68,8 @@ jobs:
           shared-key: backbone-unit-ubuntu-24.04
       - name: Check native scenario retry rules
         run: bash .github/scripts/test-native-scenario.sh
+      - name: Check native source and image guards
+        run: bash .github/scripts/test-native-stack-driver.sh
       - run: cargo test --workspace --exclude defra-harness
       - name: Cleanup
         if: always()
