@@ -13,13 +13,13 @@ cargo_package = "cli"
 [components.orbis-node]
 prefix = "ORBIS"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "fb3a8fb33de978f8332ca8044f0fadeb4968d359"
+ref = "68cf26d15fb554adfbab50df157e8e2d085463d4"
 cargo_package = "orbis-node"
 
 [components.cli-tool]
 prefix = "ORBIS_CLI"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "fb3a8fb33de978f8332ca8044f0fadeb4968d359"
+ref = "68cf26d15fb554adfbab50df157e8e2d085463d4"
 cargo_package = "cli-tool"
 
 [components.verad]
@@ -30,14 +30,14 @@ cargo_package = "verad"
 
 # Test fixtures may advance without rebuilding unchanged production runtimes.
 [qualification.orbis-fixture]
-ref = "a4d2e165bbda9b6b9b9e6a4b2bceadbf31a0a8a1"
+ref = "68cf26d15fb554adfbab50df157e8e2d085463d4"
 
 # Normal runtime images qualified against the component sources above.
 [qualification.vera-image]
-ref = "ghcr.io/sourcenetwork/orbis-rs/vera-native@sha256:02410ba0f76e0cb3c7b6fd0b9f8c4d47dbbe411b3481f0fc3fb5b32968ecf050"
+ref = "ghcr.io/sourcenetwork/orbis-rs/vera-native@sha256:13100a948d3dc642839aeb29de747d7a0c7d9c78fb018d33bce6bfb3902bebfd"
 
 [qualification.orbis-image-bls12-381]
-ref = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:dd0397491833ef883c5c6ec86120936eaedc1fe9b904efef607ac686798608d1"
+ref = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:b0c0c87f9516c51aa1e6db363d602e50b9d00f06fe2338bdc38a7aa185206895"
 
 [qualification.orbis-image-jubjub]
-ref = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:6d74feb8b48a9c58370937b1d06c48f92ea7aec1c47132ee498b0a9b7868b744"
+ref = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:062bcc69615d2c3357839532eaf42ace0eb759887dc3960327165777e8b6e43e"
