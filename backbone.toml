@@ -7,37 +7,37 @@
 [components.defra]
 prefix = "DEFRA"
 repo = "https://github.com/sourcenetwork/defradb.rs"
-ref = "c77e9a8594b6ca43f913110d96ecb63df48008b9"
+ref = "8cfd791fe7f3b69777c60b436f6b32c1a4447526"
 cargo_package = "cli"
 
 [components.orbis-node]
 prefix = "ORBIS"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "c28954d867e90f1b06a7492b034d9a603dff1cd8"
+ref = "fb3a8fb33de978f8332ca8044f0fadeb4968d359"
 cargo_package = "orbis-node"
 
 [components.cli-tool]
 prefix = "ORBIS_CLI"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "c28954d867e90f1b06a7492b034d9a603dff1cd8"
+ref = "fb3a8fb33de978f8332ca8044f0fadeb4968d359"
 cargo_package = "cli-tool"
 
 [components.verad]
 prefix = "VERAD"
 repo = "https://github.com/sourcenetwork/vera.rs"
-ref = "95fc6b893fc247d4680c716f3ddf69aa6d27d053"
+ref = "9d5c2b9ea7cb971a7871028b7b0b22d488a7ecbf"
 cargo_package = "verad"
 
 # Test fixtures may advance without rebuilding unchanged production runtimes.
 [qualification.orbis-fixture]
-ref = "db7955dfdfb600f715a14251837f8caf6c1b6453"
+ref = "a4d2e165bbda9b6b9b9e6a4b2bceadbf31a0a8a1"
 
 # Normal runtime images qualified against the component sources above.
 [qualification.vera-image]
-ref = "ghcr.io/sourcenetwork/orbis-rs/vera-native@sha256:1b34c9f9b02bf704a1609640ecc86f0ad0a1d11564673396bfc5eb009ab180cc"
+ref = "ghcr.io/sourcenetwork/orbis-rs/vera-native@sha256:02410ba0f76e0cb3c7b6fd0b9f8c4d47dbbe411b3481f0fc3fb5b32968ecf050"
 
 [qualification.orbis-image-bls12-381]
-ref = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:47cdfa662be27f57af96a17fb89c9d05aecfb4ae1140d80996e97d774bd2e368"
+ref = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:dd0397491833ef883c5c6ec86120936eaedc1fe9b904efef607ac686798608d1"
 
 [qualification.orbis-image-jubjub]
-ref = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:8b30c97ce14741a31f3f22c36e2a04a8c80ddabe1336ae053aab07ab03a717c6"
+ref = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:6d74feb8b48a9c58370937b1d06c48f92ea7aec1c47132ee498b0a9b7868b744"
