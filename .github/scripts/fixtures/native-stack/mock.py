@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
+import json
 import os
+import subprocess
+import tempfile
 from pathlib import Path
 import sys
 
@@ -32,10 +35,37 @@ if tool == "git":
             if os.environ.get("MOCK_SDK_MISMATCH") and command == "diff" and "--name-only" not in args:
                 sys.exit(1)
             if command == "diff" and "--name-only" in args:
-                print("bin/orbis-node/src/runtime/mod.rs" if os.environ.get("MOCK_RUNTIME_CHANGE")
-                      else "docker/docker-compose-native-integration-test.yml")
+                if os.environ.get("MOCK_RUNTIME_RENAME"):
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        def real_git(*arguments):
+                            return subprocess.check_output(
+                                [os.environ["MOCK_REAL_GIT"], "-c", "user.name=iverc",
+                                 "-c", "user.email=ivanverch@gmail.com", "-c", "commit.gpgsign=false",
+                                 "-c", "core.hooksPath=/dev/null", *arguments],
+                                cwd=root, text=True,
+                            ).strip()
+                        real_git("init", "--quiet", "--template=")
+                        original = root / "bin/orbis-node/src/runtime/mod.rs"
+                        original.parent.mkdir(parents=True)
+                        original.write_text("pub fn runtime() {}\n")
+                        real_git("add", ".")
+                        real_git("commit", "--quiet", "-m", "Create runtime fixture")
+                        base = real_git("rev-parse", "HEAD")
+                        renamed = root / "bin/orbis-node/tests/native_startup.rs"
+                        renamed.parent.mkdir(parents=True)
+                        original.rename(renamed)
+                        real_git("add", "-A")
+                        real_git("commit", "--quiet", "-m", "Move runtime fixture")
+                        print(real_git(*args[2:-2], base, "HEAD"))
+                else:
+                    print("bin/orbis-node/src/runtime/mod.rs" if os.environ.get("MOCK_RUNTIME_CHANGE")
+                          else "docker/docker-compose-native-integration-test.yml")
         elif command == "rev-parse":
-            print((repo / "ref").read_text() if (repo / "ref").exists() else "4" * 40)
+            if os.environ.get("MOCK_CLIENT_TREE_MISMATCH") and args[-1] == "HEAD:crates/acp-light-client":
+                print("5" * 40)
+            else:
+                print((repo / "ref").read_text() if (repo / "ref").exists() else "4" * 40)
         else:
             raise AssertionError(args)
     sys.exit(0)
@@ -44,24 +74,30 @@ if tool == "rustc":
     sys.exit(0)
 if tool == "docker":
     image = args[-1]
-    curve = "jubjub" if image.endswith("jubjub") else "bls12-381"
+    curve = "jubjub" if image.endswith("3" * 64) else "bls12-381"
     if args[0] == "pull":
-        event = "pull vera" if "/vera-native:" in image else "pull " + curve
+        assert "@sha256:" in image, "qualification must use image digests"
+        event = "pull vera" if "/vera-native@" in image else "pull " + curve
         with open(os.environ["MOCK_TRACE"], "a") as trace:
             trace.write(event + "\n")
     else:
         assert args[:2] == ["image", "inspect"], args
         field = args[args.index("--format") + 1]
         if field == "{{.Id}}":
-            print("sha256:" + ("1" * 64 if "/vera-native:" in image else ("2" if curve == "bls12-381" else "3") * 64))
+            print("sha256:" + ("1" * 64 if "/vera-native@" in image else ("2" if curve == "bls12-381" else "3") * 64))
         elif "org.opencontainers.image.revision" in field:
-            print(("1" if "/vera-native:" in image else "2") * 40)
+            print(("1" if "/vera-native@" in image else "2") * 40)
         elif "orbis.backend" in field:
             print("native")
         elif "orbis.curve" in field:
             print(curve)
         elif "orbis.integration-features" in field:
             print("true" if os.environ.get("MOCK_UNSAFE_IMAGE") else "false")
+        elif field == "{{ json .Config.Labels }}":
+            print(json.dumps({"io.sourcenetwork.orbis.unsafe-testing": "true"}
+                             if os.environ.get("MOCK_DIAGNOSTIC_IMAGE") else
+                             {"io.sourcenetwork.orbis.unsafe-testing": "false"}
+                             if curve == "bls12-381" else {}))
         else:
             raise AssertionError(args)
     sys.exit(0)
