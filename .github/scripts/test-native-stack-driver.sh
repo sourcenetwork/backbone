@@ -31,11 +31,39 @@ for forbidden in none bls12-381 jubjub; do
     printf 'PASS native-stack-driver forbidden=%s\n' "$forbidden"
 done
 
-for failure in sdk client_tree unsafe runtime runtime_rename ignored; do
+for runtime in vera orbis; do
+    cp "$work/repo/backbone.toml" "$work/backbone.toml.saved"
+    python3 - "$work/repo/backbone.toml" "$runtime" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+name = 'vera-native' if sys.argv[2] == 'vera' else 'node-integration'
+digest = ('1' if sys.argv[2] == 'vera' else '2') * 64
+old = 'ghcr.io/sourcenetwork/orbis-rs/' + name + '@sha256:' + digest
+text = p.read_text()
+assert text.count(old) == 1
+p.write_text(text.replace(old, 'ghcr.io/sourcenetwork/orbis-rs/' + name + ':latest'))
+PY
+    result=0
+    : > "$work/mutable-$runtime.trace"
+    PATH="$work/tools:$PATH" MOCK_TRACE="$work/mutable-$runtime.trace" MOCK_FORBIDDEN=none \
+        GITHUB_ENV="$work/mutable-$runtime.env" CARGO_TARGET_DIR="$work/target-mutable-$runtime" \
+        bash "$work/repo/.github/scripts/test-native-stack.sh" > "$work/mutable-$runtime.log" 2>&1 || result=$?
+    [[ $result -eq 1 ]]
+    ! grep -q '^compile ' "$work/mutable-$runtime.trace"
+    expected=Vera
+    [[ $runtime != orbis ]] || expected=Orbis
+    grep -Fxq "Expected immutable $expected image digest" "$work/mutable-$runtime.log"
+    cp "$work/backbone.toml.saved" "$work/repo/backbone.toml"
+    printf 'PASS native-stack-driver rejects=mutable-%s-image\n' "$runtime"
+done
+
+for failure in sdk client_tree unsafe diagnostic runtime runtime_rename ignored; do
     case "$failure" in
         sdk) variable=MOCK_SDK_MISMATCH ;;
         client_tree) variable=MOCK_CLIENT_TREE_MISMATCH ;;
         unsafe) variable=MOCK_UNSAFE_IMAGE ;;
+        diagnostic) variable=MOCK_DIAGNOSTIC_IMAGE ;;
         runtime) variable=MOCK_RUNTIME_CHANGE ;;
         runtime_rename) variable=MOCK_RUNTIME_RENAME ;;
         ignored) variable=MOCK_IGNORED_SCENARIO ;;
@@ -58,6 +86,10 @@ for failure in sdk client_tree unsafe runtime runtime_rename ignored; do
         [[ $result -eq 1 ]]
         grep -q '^Pinned proof client differs from the qualification source$' "$work/$failure.log"
         ! grep -Eq '^pull (bls12-381|jubjub)$' "$work/$failure.trace"
+    fi
+    if [[ $failure == diagnostic ]]; then
+        [[ $result -eq 1 ]]
+        grep -Fxq 'Normal Orbis runtime image enables diagnostic features' "$work/$failure.log"
     fi
     printf 'PASS native-stack-driver rejects=%s\n' "$failure"
 done

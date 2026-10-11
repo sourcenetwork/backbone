@@ -65,6 +65,7 @@ git -C "$WORK/orbis" diff --name-only --no-ext-diff --no-textconv --no-renames "
 while IFS= read -r path; do
     case "$path" in
         .github/workflows/rust.yml|scripts/qualify-native-restart.py|\
+        scripts/native_trust_hosted.py|scripts/test-native-trust-hosted.py|scripts/test-native-qualification.py|\
         crates/test-support/src/container.rs|crates/test-support/src/lib.rs|\
         crates/test-support/src/native_network.rs|crates/test-support/src/network/native.rs|\
         bin/orbis-node/tests/support/defra_signer.rs|\
@@ -117,7 +118,10 @@ verify_image_label() {
 
 # The Compose fixture uses image IDs, so qualify those exact runtimes.
 [[ $(cat "$WORK/orbis/docker/NATIVE_VERA_REF") == "$vera_ref" ]]
-vera_image="ghcr.io/sourcenetwork/orbis-rs/vera-native:$orbis_ref"
+vera_image=$(ref_for vera-image qualification)
+[[ "$vera_image" =~ ^ghcr\.io/sourcenetwork/orbis-rs/vera-native@sha256:[0-9a-f]{64}$ ]] || {
+    echo "Expected immutable Vera image digest" >&2; exit 1;
+}
 docker pull "$vera_image"
 verify_image_label "$vera_image" org.opencontainers.image.revision "$vera_ref"
 export ORBIS_NATIVE_VERA_IMAGE=$(docker image inspect --format '{{.Id}}' "$vera_image")
@@ -141,12 +145,23 @@ git -C "$ROOT" diff --no-ext-diff --no-textconv --no-renames --exit-code "$clien
 for curve in bls12-381 jubjub; do
     native=(--manifest-path "$WORK/orbis/Cargo.toml" -p orbis-node
         --no-default-features --features "native,redb,iroh,$curve")
-    image="ghcr.io/sourcenetwork/orbis-rs/node-integration:$orbis_ref-native-$curve"
+    image=$(ref_for "orbis-image-$curve" qualification)
+    [[ "$image" =~ ^ghcr\.io/sourcenetwork/orbis-rs/node-integration@sha256:[0-9a-f]{64}$ ]] || {
+        echo "Expected immutable Orbis image digest" >&2; exit 1;
+    }
     docker pull "$image"
     verify_image_label "$image" org.opencontainers.image.revision "$orbis_ref"
     verify_image_label "$image" io.sourcenetwork.orbis.backend native
     verify_image_label "$image" io.sourcenetwork.orbis.curve "$curve"
     verify_image_label "$image" io.sourcenetwork.orbis.integration-features false
+    if ! docker image inspect --format '{{ json .Config.Labels }}' "$image" | python3 -c '
+import json, sys
+labels = json.load(sys.stdin) or {}
+sys.exit(0 if labels.get("io.sourcenetwork.orbis.unsafe-testing") in (None, "false") else 1)
+'; then
+        echo "Normal Orbis runtime image enables diagnostic features" >&2
+        exit 1
+    fi
     export ORBIS_NATIVE_IMAGE=$(docker image inspect --format '{{.Id}}' "$image")
     echo "curve=$curve profile=release orbis_features=native,redb,iroh,$curve default_features=false" \
         | tee "$RUN/provenance-$curve.log"

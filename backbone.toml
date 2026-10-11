@@ -7,27 +7,37 @@
 [components.defra]
 prefix = "DEFRA"
 repo = "https://github.com/sourcenetwork/defradb.rs"
-ref = "e591f732a7efcc6ff52254fd3d53bc39e36eb684"
+ref = "c77e9a8594b6ca43f913110d96ecb63df48008b9"
 cargo_package = "cli"
 
 [components.orbis-node]
 prefix = "ORBIS"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "67ed409901ed694ac9855ef5217e2b57ee75be40"
+ref = "c28954d867e90f1b06a7492b034d9a603dff1cd8"
 cargo_package = "orbis-node"
 
 [components.cli-tool]
 prefix = "ORBIS_CLI"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "67ed409901ed694ac9855ef5217e2b57ee75be40"
+ref = "c28954d867e90f1b06a7492b034d9a603dff1cd8"
 cargo_package = "cli-tool"
 
 [components.verad]
 prefix = "VERAD"
 repo = "https://github.com/sourcenetwork/vera.rs"
-ref = "c8a718743b19e6e8b9320baa5643380ada2a6932"
+ref = "95fc6b893fc247d4680c716f3ddf69aa6d27d053"
 cargo_package = "verad"
 
 # Test fixtures may advance without rebuilding unchanged production runtimes.
 [qualification.orbis-fixture]
-ref = "7a36d73168274568fb869aea57bc4323cb1ccabc"
+ref = "db7955dfdfb600f715a14251837f8caf6c1b6453"
+
+# Normal runtime images qualified against the component sources above.
+[qualification.vera-image]
+ref = "ghcr.io/sourcenetwork/orbis-rs/vera-native@sha256:1b34c9f9b02bf704a1609640ecc86f0ad0a1d11564673396bfc5eb009ab180cc"
+
+[qualification.orbis-image-bls12-381]
+ref = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:47cdfa662be27f57af96a17fb89c9d05aecfb4ae1140d80996e97d774bd2e368"
+
+[qualification.orbis-image-jubjub]
+ref = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:8b30c97ce14741a31f3f22c36e2a04a8c80ddabe1336ae053aab07ab03a717c6"

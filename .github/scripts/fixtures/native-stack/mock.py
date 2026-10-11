@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import subprocess
 import tempfile
@@ -73,24 +74,30 @@ if tool == "rustc":
     sys.exit(0)
 if tool == "docker":
     image = args[-1]
-    curve = "jubjub" if image.endswith("jubjub") else "bls12-381"
+    curve = "jubjub" if image.endswith("3" * 64) else "bls12-381"
     if args[0] == "pull":
-        event = "pull vera" if "/vera-native:" in image else "pull " + curve
+        assert "@sha256:" in image, "qualification must use image digests"
+        event = "pull vera" if "/vera-native@" in image else "pull " + curve
         with open(os.environ["MOCK_TRACE"], "a") as trace:
             trace.write(event + "\n")
     else:
         assert args[:2] == ["image", "inspect"], args
         field = args[args.index("--format") + 1]
         if field == "{{.Id}}":
-            print("sha256:" + ("1" * 64 if "/vera-native:" in image else ("2" if curve == "bls12-381" else "3") * 64))
+            print("sha256:" + ("1" * 64 if "/vera-native@" in image else ("2" if curve == "bls12-381" else "3") * 64))
         elif "org.opencontainers.image.revision" in field:
-            print(("1" if "/vera-native:" in image else "2") * 40)
+            print(("1" if "/vera-native@" in image else "2") * 40)
         elif "orbis.backend" in field:
             print("native")
         elif "orbis.curve" in field:
             print(curve)
         elif "orbis.integration-features" in field:
             print("true" if os.environ.get("MOCK_UNSAFE_IMAGE") else "false")
+        elif field == "{{ json .Config.Labels }}":
+            print(json.dumps({"io.sourcenetwork.orbis.unsafe-testing": "true"}
+                             if os.environ.get("MOCK_DIAGNOSTIC_IMAGE") else
+                             {"io.sourcenetwork.orbis.unsafe-testing": "false"}
+                             if curve == "bls12-381" else {}))
         else:
             raise AssertionError(args)
     sys.exit(0)
