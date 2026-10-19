@@ -142,7 +142,7 @@ for curve in bls12-381 jubjub; do
     cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup --no-run \
         2>&1 | tee "$RUN/build-tests-$curve.log"
     cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
-        -- --ignored --list | tee "$RUN/scenarios-$curve.log"
+        -- --list | tee "$RUN/scenarios-$curve.log"
     scenarios=(native_startup_registers_and_preserves_identity_on_restart)
     if [[ $curve == bls12-381 ]]; then
         scenarios+=(native_defra_signing)
@@ -152,6 +152,6 @@ for curve in bls12-381 jubjub; do
         grep -Fx "$scenario: test" "$RUN/scenarios-$curve.log" >/dev/null
         NATIVE_STACK_CURVE="$curve" bash "$ROOT/.github/scripts/run-native-scenario.sh" "$RUN" "$scenario" \
             cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
-            "$scenario" -- --ignored --exact --test-threads=1 --nocapture
+            "$scenario" -- --exact --test-threads=1 --nocapture
     done
 done

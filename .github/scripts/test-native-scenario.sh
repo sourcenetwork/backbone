@@ -19,6 +19,17 @@ if [[ $MODE == success || ($count == 2 && ($MODE == collision || $MODE == follow
     echo 'test result: ok. 1 passed; 0 failed; 0 ignored;'
     exit 0
 fi
+if [[ $MODE == zero-tests ]]; then
+    echo 'running 0 tests'
+    echo 'test result: ok. 0 passed; 0 failed; 0 ignored;'
+    exit 0
+fi
+if [[ $MODE == ignored-test ]]; then
+    echo 'running 1 test'
+    echo 'test native_defra_signing ... ignored'
+    echo 'test result: ok. 0 passed; 0 failed; 1 ignored;'
+    exit 0
+fi
 for node in 0 1 2 3; do
     mkdir -p "$VERA_E2E_DIR/fresh/node$node/logs"
     : > "$VERA_E2E_DIR/fresh/node$node/logs/stdout.log"
@@ -87,6 +98,8 @@ check() {
     printf 'PASS %s\n' "$mode"
 }
 check success 0 1
+check zero-tests 1 1
+check ignored-test 1 1
 check collision 0 2
 check follow-on 0 2
 check full-backtrace 0 2
@@ -138,5 +151,5 @@ NATIVE_STACK_CURVE=unsupported MODE=success COUNT="$work/invalid-curve-count" \
 [[ $result == 2 && ! -e $work/invalid-curve-count && ! -e $work/invalid-curve ]]
 printf 'PASS invalid-curve\n'
 
-# The existing CI shell check also exercises curve selection and binary staging.
+# Exercise the complete image-based driver and both curve selections.
 bash "$scripts/test-native-stack-driver.sh"

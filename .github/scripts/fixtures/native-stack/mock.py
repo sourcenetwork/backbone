@@ -100,6 +100,7 @@ if command == 'tree':
     print('cosmrs v0.21.1' if fault == curve else 'orbis-node v0.1.0')
 else:
     assert command == 'test' and '--locked' in args and '--release' in args
+    assert '--ignored' not in args, 'current functional scenarios are regular tests'
     assert args[args.index('--test') + 1] == 'native_startup'
     assert 'ORBIS_NODE_BINARY' not in os.environ and 'VERAD_BINARY' not in os.environ
     if '--no-run' in args:
@@ -113,7 +114,7 @@ else:
         print('native_pet_threshold_workflows: test')
     else:
         scenario = args[args.index('--test') + 2]
-        assert '--ignored' in args and '--exact' in args and '--test-threads=1' in args
+        assert '--exact' in args and '--test-threads=1' in args
         assert '--nocapture' in args and os.environ['NATIVE_STACK_CURVE'] == curve
         expected = curve + '-' + scenario
         assert Path(os.environ['VERA_E2E_DIR']).parts[-3:] == (expected, 'attempt-1', 'clusters')
@@ -122,4 +123,5 @@ else:
         assert retained.is_dir()
         event = 'run ' + curve + ' ' + scenario
         print('test ' + scenario + ' ... ok')
+        print('test result: ok. 1 passed; 0 failed; 0 ignored;')
 record(event)
