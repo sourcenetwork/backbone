@@ -7,23 +7,33 @@
 [components.defra]
 prefix = "DEFRA"
 repo = "https://github.com/sourcenetwork/defradb.rs"
-ref = "e278a34a9d2d9075941abff0a386566eb90b4149"
+ref = "6524b3a331ab6520ae4fbf30ab69d7be92becc49"
 cargo_package = "cli"
 
 [components.orbis-node]
 prefix = "ORBIS"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "19864af8f0fb211bc0cd525fadc348802412df31"
+ref = "29fd26b70cd7df9a5d9134dc1ddef0a6f23f8013"
 cargo_package = "orbis-node"
 
 [components.cli-tool]
 prefix = "ORBIS_CLI"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "19864af8f0fb211bc0cd525fadc348802412df31"
+ref = "29fd26b70cd7df9a5d9134dc1ddef0a6f23f8013"
 cargo_package = "cli-tool"
 
 [components.verad]
 prefix = "VERAD"
 repo = "https://github.com/sourcenetwork/vera.rs"
-ref = "a1cbace66f2f88afaa0ee87148cdbfb7158db9a6"
+ref = "982a617e7626a855bc9edce63d85385f74824129"
 cargo_package = "verad"
+
+[qualification]
+orbis_runtime_ref = "29fd26b70cd7df9a5d9134dc1ddef0a6f23f8013"
+orbis_image_revision = "f3697ab8356ee840610fc5dd265f0b9192ee40f2"
+vera_image = "ghcr.io/sourcenetwork/orbis-rs/vera-native@sha256:a7592e96e1b369a9fb8db96aeaf34e8b5929633661be2d8a0ea0d0e7b8fd69d0"
+vera_image_id = "sha256:aa8da5856e40f1a3b0323d9abd4806fdafed412537dccd8c27c8976343420982"
+orbis_image_bls12_381 = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:224fe559200fcc668da8c1914cd733c9e3edb1e5a578ef98ccb5ba6494810d27"
+orbis_image_id_bls12_381 = "sha256:4ac363161ff0e95034607b1e9cf101d21310117527c55c4ed486e2f0a2f4e417"
+orbis_image_jubjub = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:69f4b88d935464cef5eab8eed2cd3e4a3360a2e2b98e06aa63b39a239866a3ee"
+orbis_image_id_jubjub = "sha256:91ab8f3215d29f228225e0219721771975e3ec250f29899d2f473524efe9e8be"

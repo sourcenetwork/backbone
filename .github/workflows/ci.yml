@@ -66,6 +66,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: backbone-unit-ubuntu-24.04
+      - name: Check native image evidence guards
+        run: python3 .github/scripts/test-native-image-evidence.py
+      - name: Check native stack driver
+        run: bash .github/scripts/test-native-stack-driver.sh
       - name: Check native scenario retry rules
         run: bash .github/scripts/test-native-scenario.sh
       - run: cargo test --workspace --exclude defra-harness
@@ -78,9 +82,12 @@ jobs:
   full-stack:
     name: Full Stack
     runs-on: ubuntu-24.04
-    # Vera, both Orbis curves and the linked Defra fixture build from source.
+    # Verify normal runtime images and build both curves of the linked Defra fixture.
     timeout-minutes: 240
     needs: [fmt, clippy, unit-test]
+    permissions:
+      contents: read
+      packages: read
     env:
       CARGO_BUILD_JOBS: "2"
       PROTOC: /usr/bin/protoc
@@ -92,6 +99,11 @@ jobs:
         with:
           free-build-space: "true"
           private-repo-token: ${{ secrets.PRIVATE_REPO_PAT }}
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Run pinned native stack
         run: bash .github/scripts/test-native-stack.sh
       - name: Retain native qualification evidence
@@ -101,6 +113,7 @@ jobs:
           name: native-stack-logs
           path: |
             ${{ env.NATIVE_STACK_EVIDENCE }}/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/image-*.json
             ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/command.log
             ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/retry.log
             ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/clusters/*/node*/logs/*.log
