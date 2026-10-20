@@ -4,3 +4,13 @@ ref = "1111111111111111111111111111111111111111"
 ref = "2222222222222222222222222222222222222222"
 [components.defra]
 ref = "3333333333333333333333333333333333333333"
+
+[qualification]
+orbis_runtime_ref = "2222222222222222222222222222222222222222"
+orbis_image_revision = "5555555555555555555555555555555555555555"
+vera_image = "ghcr.io/sourcenetwork/orbis-rs/vera-native@sha256:8888888888888888888888888888888888888888888888888888888888888888"
+vera_image_id = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+orbis_image_bls12_381 = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+orbis_image_id_bls12_381 = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+orbis_image_jubjub = "ghcr.io/sourcenetwork/orbis-rs/node-integration@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+orbis_image_id_jubjub = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"

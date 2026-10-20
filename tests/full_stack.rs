@@ -639,7 +639,7 @@ async fn secure_training_data_compartments() {
     );
 
     // Step 16. TRAINING_SVC writes training transcripts
-    let transcripts = vec![
+    let transcripts = [
         (
             "call-001",
             "Customer asked about billing cycle",
@@ -920,7 +920,7 @@ async fn secure_training_data_compartments() {
     eprintln!("[backbone] Step 21: Schema added: SupportTicket @policy, PlatformCo subscribed");
 
     // Step 22. GLOBEX_SVC writes + reads tickets
-    let tickets = vec![
+    let tickets = [
         (
             "GLOB-001",
             "Login timeout",

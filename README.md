@@ -150,22 +150,26 @@ freshness. Direct-certificate responses retain their existing shape.
 
 ### Native stack CI
 
-The Full Stack job builds pinned Vera once, then runs BLS12-381 and Jubjub Orbis
-builds sequentially. Both curves exercise native startup, signing, PRE, revocation,
+The Full Stack job verifies the normal Vera and Orbis images pinned by digest in
+`backbone.toml`, then runs BLS12-381 and Jubjub fixtures sequentially. Both curves exercise native startup, signing, PRE, revocation,
 restart, resharing, and certified fault reports. A separate PET scenario on each
 curve checks paired DKG, stored and inline decryption, document and audit
 permissions, revocation and regrant, both polynomials after resharing, and restart.
 It does not qualify time-scheduled refresh. The BLS build also exercises Defra
 signing and replication. It tests this checkout's ACP light client through a local
-Cargo source override. Defra is linked into the signing fixture at the revision
-in `backbone.toml`. No external release artifacts or floating component branches
-are used. These Vera and Orbis pins require fresh native state and matching
+Cargo source override and requires the runtime's pinned SDK to contain the same
+proof-client source and workspace dependencies. SDK changes require updating
+the consumer pin and qualified images. Defra is linked into the signing fixture
+at the revision in `backbone.toml`. Image IDs, build trees, backend, curve and
+normal build mode are checked before scenarios start. The CI build revision may
+differ from the runtime revision only when their Git trees match; fixture-only
+changes must pass Orbis's qualification guard. These Vera and Orbis pins require fresh native state and matching
 deployment roots.
 
-Run `bash .github/scripts/test-native-stack.sh` with Rust 1.98.0 and protoc
-installed. The script uses a temporary source checkout and retains build artifacts
+Run `bash .github/scripts/test-native-stack.sh` with Rust 1.98.0, protoc and
+Docker Compose installed. The script uses a temporary source checkout and retains build artifacts
 under `target/native-stack` and per-curve logs and scenario evidence under
-`target/native-stack-runs`. Orbis state and logs remain in each attempt's private
+`target/native-stack-runs`, including the verified image/source records. Orbis state and logs remain in each attempt's private
 `orbis-clusters` directory and are not included in CI artifacts. The older
 `tests/full_stack.rs` fixture uses EVM
 administration and is not the native CI entry point. Native coverage checks

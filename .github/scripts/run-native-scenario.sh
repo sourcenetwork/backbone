@@ -36,6 +36,10 @@ for attempt in 1 2; do
         exit "${statuses[1]}"
     fi
     if [[ ${statuses[0]} -eq 0 ]]; then
+        if ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$attempt_dir/command.log"; then
+            echo "Native scenario must execute exactly one passing test: $scenario" >&2
+            exit 1
+        fi
         exit 0
     fi
     if [[ $attempt -eq 1 && ${statuses[0]} -eq 101 ]] &&

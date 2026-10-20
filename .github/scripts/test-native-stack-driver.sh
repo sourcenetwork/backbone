@@ -5,16 +5,15 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/native-stack-driver-tests.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 mkdir -p "$work/tools" "$work/repo/.github/scripts"
 cp "$scripts/test-native-stack.sh" "$scripts/run-native-scenario.sh" \
-    "$scripts/native-bind-race.py" "$work/repo/.github/scripts/"
+    "$scripts/native-bind-race.py" "$scripts/native-image-evidence.py" "$work/repo/.github/scripts/"
 cp "$scripts/fixtures/native-stack/backbone.toml" "$work/repo/backbone.toml"
 
-# No network or compiler is used. Test builds overwrite Cargo's production
-# output to expose any driver that stages the executable too late or reuses it.
+# All external tools are stubbed; source/image mismatches must stop before scenarios.
 cp "$scripts/fixtures/native-stack/mock.py" "$work/tools/mock"
 chmod +x "$work/tools/mock"
-for tool in git cargo rustc; do ln -s mock "$work/tools/$tool"; done
+for tool in git cargo rustc docker; do ln -s mock "$work/tools/$tool"; done
 
-for forbidden in none bls12-381 jubjub; do
+for forbidden in none bls12-381 jubjub proof source fixture image; do
     evidence_env="$work/$forbidden.env"
     trace="$work/$forbidden.trace"
     result=0
