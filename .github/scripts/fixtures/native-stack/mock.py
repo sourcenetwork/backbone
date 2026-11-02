@@ -34,6 +34,32 @@ if tool == "git":
 if tool == "rustc":
     print("rustc fixture")
     sys.exit(0)
+if tool == "docker":
+    if args == ["info", "--format", "{{.ServerVersion}}"]:
+        print("fixture")
+        sys.exit(0)
+    if args[:2] == ["image", "rm"]:
+        sys.exit(0)
+    if args[:2] == ["image", "inspect"]:
+        assert args[2:4] == ["--format", "{{.Id}}"]
+        print("sha256:" + "a" * 64)
+        sys.exit(0)
+    assert args[0] == "build", args
+    executable = args[args.index("--build-arg") + 1].removeprefix("EXECUTABLE=")
+    assert executable in ("verad", "orbis-node")
+    source = Path(args[-1]) / executable
+    value = source.read_text()
+    if executable == "verad":
+        assert value == "vera production\n"
+        event = "image vera"
+    else:
+        curve = source.parent.name
+        assert curve in ("bls12-381", "jubjub")
+        assert value == curve + " production\n"
+        event = "image " + curve
+    with open(os.environ["MOCK_TRACE"], "a") as trace:
+        trace.write(event + "\n")
+    sys.exit(0)
 assert tool == "cargo" and args.pop(0) == "+1.99.1", (tool, args)
 command = args.pop(0)
 for variable in os.environ:
@@ -71,6 +97,8 @@ else:
         print("cosmrs v0.21.1" if os.environ["MOCK_FORBIDDEN"] == curve else "orbis-node v0.1.0")
     else:
         assert command == "test" and "--locked" in args
+        assert os.environ["ORBIS_NATIVE_VERA_IMAGE"].endswith("-vera:local")
+        assert os.environ["ORBIS_NATIVE_IMAGE"].endswith("-" + curve + ":local")
         assert args[args.index("--test") + 1] == "native_startup"
         staged = Path(os.environ["ORBIS_NODE_BINARY"])
         assert staged.parts[-3:] == ("bin", curve, "orbis-node"), staged

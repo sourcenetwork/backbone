@@ -3,7 +3,8 @@ import sys
 
 trace, forbidden, result, run = sys.argv[1:]
 run = Path(run)
-expected = ["build vera"]
+expected = ["build vera", "image vera"]
+assert (run / "vera-image-id.txt").read_text().startswith("sha256:")
 for curve in ("bls12-381", "jubjub"):
     expected += ["build " + curve, "tree " + curve]
     assert (run / ("build-orbis-" + curve + ".log")).exists()
@@ -11,7 +12,8 @@ for curve in ("bls12-381", "jubjub"):
     assert (run / ("provenance-" + curve + ".log")).exists()
     if forbidden == curve:
         break
-    expected += ["compile " + curve, "list " + curve]
+    expected += ["image " + curve, "compile " + curve, "list " + curve]
+    assert (run / ("orbis-image-id-" + curve + ".txt")).read_text().startswith("sha256:")
     scenarios = ["native_startup_registers_and_preserves_identity_on_restart"]
     if curve == "bls12-381":
         scenarios += ["native_defra_signing"]

@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/backbone-native.XXXXXX")
+built_images=()
 cleanup() {
     local result=$?
     if [[ -n "${RUN:-}" ]]; then
@@ -11,6 +12,9 @@ cleanup() {
                 cp "$WORK/$repo/Cargo.lock" "$RUN/$repo-Cargo.lock" || result=1
             fi
         done
+    fi
+    if ((${#built_images[@]})); then
+        docker image rm "${built_images[@]}" >/dev/null 2>&1 || true
     fi
     rm -rf -- "$WORK" || result=1
     exit "$result"
@@ -23,6 +27,7 @@ RUN=$(mktemp -d "$ROOT/target/native-stack-runs/release.XXXXXX")
 if [[ -n "${GITHUB_ENV:-}" ]]; then
     echo "NATIVE_STACK_EVIDENCE=$RUN" >> "$GITHUB_ENV"
 fi
+docker info --format '{{.ServerVersion}}' >/dev/null
 
 # Use repository release profiles and native host binaries, without inherited
 # profiling, sanitizer, or development-profile compiler overrides.
@@ -89,6 +94,12 @@ cargo +1.99.1 build --release --locked --manifest-path "$WORK/vera/Cargo.toml" \
     -p verad --bin verad 2>&1 | tee "$RUN/build-verad.log"
 cp "$CARGO_TARGET_DIR/release/verad" "$WORK/bin/verad"
 export VERAD_BINARY="$WORK/bin/verad"
+ORBIS_NATIVE_VERA_IMAGE="backbone-native-$$-vera:local"
+docker build --file "$ROOT/.github/scripts/native-runtime.Dockerfile" \
+    --build-arg EXECUTABLE=verad --tag "$ORBIS_NATIVE_VERA_IMAGE" "$WORK/bin"
+built_images+=("$ORBIS_NATIVE_VERA_IMAGE")
+export ORBIS_NATIVE_VERA_IMAGE
+docker image inspect --format '{{.Id}}' "$ORBIS_NATIVE_VERA_IMAGE" > "$RUN/vera-image-id.txt"
 # Exercise this PR's proof client, including through Defra and Orbis consumers.
 patch="patch.'https://github.com/sourcenetwork/backbone.git'.acp-light-client.path='$ROOT/crates/acp-light-client'"
 for curve in bls12-381 jubjub; do
@@ -111,6 +122,12 @@ for curve in bls12-381 jubjub; do
         echo "Native $curve node includes Cosmos transport dependencies" >&2
         exit 1
     fi
+    ORBIS_NATIVE_IMAGE="backbone-native-$$-$curve:local"
+    docker build --file "$ROOT/.github/scripts/native-runtime.Dockerfile" \
+        --build-arg EXECUTABLE=orbis-node --tag "$ORBIS_NATIVE_IMAGE" "$WORK/bin/$curve"
+    built_images+=("$ORBIS_NATIVE_IMAGE")
+    export ORBIS_NATIVE_IMAGE
+    docker image inspect --format '{{.Id}}' "$ORBIS_NATIVE_IMAGE" > "$RUN/orbis-image-id-$curve.txt"
     shasum -a 256 "$VERAD_BINARY" "$ORBIS_NODE_BINARY" "$WORK/vera/Cargo.lock" \
         "$WORK/orbis/Cargo.lock" | tee -a "$RUN/provenance-$curve.log"
 
