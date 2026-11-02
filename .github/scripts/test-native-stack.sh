@@ -64,7 +64,7 @@ check_fixture_pin() {
         -v revision="rev = \"$revision\"" '
         index($0, dependency) { found=1; if (!index($0, revision)) mismatch=1 }
         END { exit !found || mismatch }
-    ' "$WORK/orbis/bin/orbis-node/Cargo.toml"; then
+    ' "$WORK/orbis/Cargo.toml" "$WORK/orbis/bin/orbis-node/Cargo.toml"; then
         echo "Orbis fixture dependencies do not match the $repo release pin" >&2
         return 1
     fi

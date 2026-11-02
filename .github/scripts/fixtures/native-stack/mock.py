@@ -20,8 +20,10 @@ if tool == "git":
             if repo.name == "orbis":
                 manifest = repo / "bin/orbis-node/Cargo.toml"
                 manifest.parent.mkdir(parents=True)
-                manifest.write_text(
+                (repo / "Cargo.toml").write_text(
                     'vera = { git = "https://github.com/sourcenetwork/vera.rs", rev = "' + "1" * 40 + '" }\n'
+                )
+                manifest.write_text(
                     'defra = { git = "https://github.com/sourcenetwork/defradb.rs", rev = "' + "3" * 40 + '" }\n'
                 )
         elif command == "rev-parse":
