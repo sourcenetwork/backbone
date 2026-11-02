@@ -98,5 +98,6 @@ else:
             assert retained.is_dir()
             event = "run " + curve + " " + scenario
             print("test " + scenario + " ... ok")
+            print("test result: ok. 1 passed; 0 failed; 0 ignored;")
 with open(os.environ["MOCK_TRACE"], "a") as trace:
     trace.write(event + "\n")

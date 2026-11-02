@@ -19,6 +19,10 @@ if [[ $MODE == success || ($count == 2 && ($MODE == collision || $MODE == follow
     echo 'test result: ok. 1 passed; 0 failed; 0 ignored;'
     exit 0
 fi
+if [[ $MODE == zero-tests ]]; then
+    echo 'test result: ok. 0 passed; 0 failed; 0 ignored;'
+    exit 0
+fi
 for node in 0 1 2 3; do
     mkdir -p "$VERA_E2E_DIR/fresh/node$node/logs"
     : > "$VERA_E2E_DIR/fresh/node$node/logs/stdout.log"
@@ -87,6 +91,7 @@ check() {
     printf 'PASS %s\n' "$mode"
 }
 check success 0 1
+check zero-tests 1 1
 check collision 0 2
 check follow-on 0 2
 check full-backtrace 0 2
