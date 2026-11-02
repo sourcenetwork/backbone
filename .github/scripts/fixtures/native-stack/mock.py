@@ -80,6 +80,7 @@ else:
         if "--no-run" in args:
             event = "compile " + curve
         elif "--list" in args:
+            assert "--ignored" not in args
             event = "list " + curve
             print("native_startup_registers_and_preserves_identity_on_restart: test")
             if curve == "bls12-381":
@@ -88,7 +89,7 @@ else:
             print("native_pet_threshold_workflows: test")
         else:
             scenario = args[args.index("--test") + 2]
-            assert "--ignored" in args and "--exact" in args and "--test-threads=1" in args
+            assert "--ignored" not in args and "--exact" in args and "--test-threads=1" in args
             assert "--nocapture" in args and os.environ["NATIVE_STACK_CURVE"] == curve
             expected = curve + "-" + scenario
             assert Path(os.environ["VERA_E2E_DIR"]).parts[-3:] == (expected, "attempt-1", "clusters")
