@@ -27,7 +27,9 @@ pub fn auth_token(key_hex: &str, api_url: &str) -> Result<String> {
     let key_type = match key.len() {
         32 => crypto::KeyType::Secp256k1,
         64 => crypto::KeyType::Ed25519,
-        n => eyre::bail!("unsupported identity length {n}"),
+        n => {
+            eyre::bail!("unsupported identity length {n}");
+        }
     };
     let raw = identity::RawIdentity::from_bytes(key_type, &key).wrap_err("raw identity")?;
     let audience = host_port(api_url).to_string();
