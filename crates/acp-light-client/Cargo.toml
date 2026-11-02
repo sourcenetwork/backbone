@@ -19,9 +19,9 @@ futures.workspace = true
 alloy-primitives = { workspace = true, features = ["serde"] }
 
 # Shared wire types and finality verification
-vera-domain = { git = "https://github.com/sourcenetwork/vera.rs", rev = "fd1e934344f31e4bebc2978bd5d2023fa8c9201e" }
-vera-permission = { git = "https://github.com/sourcenetwork/vera.rs", rev = "fd1e934344f31e4bebc2978bd5d2023fa8c9201e" }
-vera-modules = { git = "https://github.com/sourcenetwork/vera.rs", rev = "fd1e934344f31e4bebc2978bd5d2023fa8c9201e" }
+vera-domain = { git = "https://github.com/sourcenetwork/vera.rs", rev = "c0bdd708ab840c45986bc3dc18d70e402954e6da" }
+vera-permission = { git = "https://github.com/sourcenetwork/vera.rs", rev = "c0bdd708ab840c45986bc3dc18d70e402954e6da" }
+vera-modules = { git = "https://github.com/sourcenetwork/vera.rs", rev = "c0bdd708ab840c45986bc3dc18d70e402954e6da" }
 commonware-codec.workspace = true
 
 # Transport
@@ -34,7 +34,7 @@ commonware-cryptography.workspace = true
 commonware-utils.workspace = true
 commonware-parallel = "=2026.10.0"
 axum = "0.8"
-vera-backend = { git = "https://github.com/sourcenetwork/vera.rs", rev = "fd1e934344f31e4bebc2978bd5d2023fa8c9201e" }
+vera-backend = { git = "https://github.com/sourcenetwork/vera.rs", rev = "c0bdd708ab840c45986bc3dc18d70e402954e6da" }
 commonware-glue = "=2026.10.0"
 commonware-runtime = "=2026.10.0"
 tempfile = "3"

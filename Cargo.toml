@@ -60,7 +60,7 @@ path = "tests/hub_light_client.rs"
 orbis-harness = { path = "crates/orbis-harness" }
 defra-harness = { path = "crates/defra-harness" }
 acp-light-client = { path = "crates/acp-light-client" }
-vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "fd1e934344f31e4bebc2978bd5d2023fa8c9201e" }
+vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "c0bdd708ab840c45986bc3dc18d70e402954e6da" }
 commonware-codec.workspace = true
 test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }
