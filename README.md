@@ -150,6 +150,8 @@ freshness. Direct-certificate responses retain their existing shape.
 
 ### Native stack CI
 
+The Native deployment qualification workflow can also be run manually against a selected checkout.
+
 The Full Stack job builds pinned Vera once, then runs BLS12-381 and Jubjub Orbis
 builds sequentially. Both curves exercise native startup, signing, PRE, revocation,
 restart, resharing, and certified fault reports. A separate PET scenario on each

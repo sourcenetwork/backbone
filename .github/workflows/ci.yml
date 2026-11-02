@@ -101,6 +101,7 @@ jobs:
           name: native-stack-logs
           path: |
             ${{ env.NATIVE_STACK_EVIDENCE }}/*.log
+            ${{ env.NATIVE_STACK_EVIDENCE }}/*-image-id*.txt
             ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/command.log
             ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/retry.log
             ${{ env.NATIVE_STACK_EVIDENCE }}/scenarios/*/attempt-*/clusters/*/node*/logs/*.log
