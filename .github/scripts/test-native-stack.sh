@@ -82,10 +82,10 @@ unset ORBIS_LOCAL_STORAGE_KDF_M_COST_KIB ORBIS_LOCAL_STORAGE_KDF_T_COST
     echo "vera=$vera_ref orbis=$orbis_ref defra=$defra_ref"
     echo "profile=release curves=bls12-381,jubjub default_features=false"
     echo "kdf=production-defaults (262144 KiB, 3 iterations)"
-    rustc +1.98.0 --version --verbose
+    rustc +1.99.1 --version --verbose
 } | tee "$RUN/provenance.log"
 
-cargo +1.98.0 build --release --locked --manifest-path "$WORK/vera/Cargo.toml" \
+cargo +1.99.1 build --release --locked --manifest-path "$WORK/vera/Cargo.toml" \
     -p verad --bin verad 2>&1 | tee "$RUN/build-verad.log"
 cp "$CARGO_TARGET_DIR/release/verad" "$WORK/bin/verad"
 export VERAD_BINARY="$WORK/bin/verad"
@@ -98,12 +98,12 @@ for curve in bls12-381 jubjub; do
         | tee "$RUN/provenance-$curve.log"
     # The local override changes the disposable lockfile. Stage each curve's
     # production binary before test dev-dependencies can enable extra features.
-    cargo +1.98.0 build --release "${native[@]}" --bin orbis-node \
+    cargo +1.99.1 build --release "${native[@]}" --bin orbis-node \
         2>&1 | tee "$RUN/build-orbis-$curve.log"
     mkdir -p "$WORK/bin/$curve"
     cp "$CARGO_TARGET_DIR/release/orbis-node" "$WORK/bin/$curve/orbis-node"
     export ORBIS_NODE_BINARY="$WORK/bin/$curve/orbis-node"
-    cargo +1.98.0 tree --locked "${native[@]}" --color never --edges normal,build \
+    cargo +1.99.1 tree --locked "${native[@]}" --color never --edges normal,build \
         --prefix none > "$RUN/native-dependencies-$curve.log"
     if grep -E '^(cosmrs|tendermint(-rpc|-config|-proto)?|cosmos-sdk-proto) v' "$RUN/native-dependencies-$curve.log"; then
         echo "Native $curve node includes Cosmos transport dependencies" >&2
@@ -112,9 +112,9 @@ for curve in bls12-381 jubjub; do
     shasum -a 256 "$VERAD_BINARY" "$ORBIS_NODE_BINARY" "$WORK/vera/Cargo.lock" \
         "$WORK/orbis/Cargo.lock" | tee -a "$RUN/provenance-$curve.log"
 
-    cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup --no-run \
+    cargo +1.99.1 test --release --locked "${native[@]}" --test native_startup --no-run \
         2>&1 | tee "$RUN/build-tests-$curve.log"
-    cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
+    cargo +1.99.1 test --release --locked "${native[@]}" --test native_startup \
         -- --ignored --list | tee "$RUN/scenarios-$curve.log"
     scenarios=(native_startup_registers_and_preserves_identity_on_restart)
     if [[ $curve == bls12-381 ]]; then
@@ -124,7 +124,7 @@ for curve in bls12-381 jubjub; do
     for scenario in "${scenarios[@]}"; do
         grep -Fx "$scenario: test" "$RUN/scenarios-$curve.log" >/dev/null
         NATIVE_STACK_CURVE="$curve" bash "$ROOT/.github/scripts/run-native-scenario.sh" "$RUN" "$scenario" \
-            cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
+            cargo +1.99.1 test --release --locked "${native[@]}" --test native_startup \
             "$scenario" -- --ignored --exact --test-threads=1 --nocapture
     done
 done

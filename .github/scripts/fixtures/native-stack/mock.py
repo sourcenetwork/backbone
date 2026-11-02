@@ -32,7 +32,7 @@ if tool == "git":
 if tool == "rustc":
     print("rustc fixture")
     sys.exit(0)
-assert tool == "cargo" and args.pop(0) == "+1.98.0", (tool, args)
+assert tool == "cargo" and args.pop(0) == "+1.99.1", (tool, args)
 command = args.pop(0)
 for variable in os.environ:
     assert not variable.startswith("CARGO_PROFILE_"), variable
