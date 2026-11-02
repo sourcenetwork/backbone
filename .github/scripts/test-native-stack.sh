@@ -94,6 +94,8 @@ patch="patch.'https://github.com/sourcenetwork/backbone.git'.acp-light-client.pa
 for curve in bls12-381 jubjub; do
     native=(--manifest-path "$WORK/orbis/Cargo.toml" --config "$patch" -p orbis-node
         --no-default-features --features "native,redb,iroh,$curve")
+    native_test=(--manifest-path "$WORK/orbis/Cargo.toml" --config "$patch" -p orbis-node
+        --no-default-features --features "integration-test-native,redb,iroh,$curve")
     echo "curve=$curve profile=release orbis_features=native,redb,iroh,$curve default_features=false" \
         | tee "$RUN/provenance-$curve.log"
     # The local override changes the disposable lockfile. Stage each curve's
@@ -112,9 +114,9 @@ for curve in bls12-381 jubjub; do
     shasum -a 256 "$VERAD_BINARY" "$ORBIS_NODE_BINARY" "$WORK/vera/Cargo.lock" \
         "$WORK/orbis/Cargo.lock" | tee -a "$RUN/provenance-$curve.log"
 
-    cargo +1.99.1 test --release --locked "${native[@]}" --test native_startup --no-run \
+    cargo +1.99.1 test --release --locked "${native_test[@]}" --test native_startup --no-run \
         2>&1 | tee "$RUN/build-tests-$curve.log"
-    cargo +1.99.1 test --release --locked "${native[@]}" --test native_startup \
+    cargo +1.99.1 test --release --locked "${native_test[@]}" --test native_startup \
         -- --ignored --list | tee "$RUN/scenarios-$curve.log"
     scenarios=(native_startup_registers_and_preserves_identity_on_restart)
     if [[ $curve == bls12-381 ]]; then
@@ -124,7 +126,7 @@ for curve in bls12-381 jubjub; do
     for scenario in "${scenarios[@]}"; do
         grep -Fx "$scenario: test" "$RUN/scenarios-$curve.log" >/dev/null
         NATIVE_STACK_CURVE="$curve" bash "$ROOT/.github/scripts/run-native-scenario.sh" "$RUN" "$scenario" \
-            cargo +1.99.1 test --release --locked "${native[@]}" --test native_startup \
+            cargo +1.99.1 test --release --locked "${native_test[@]}" --test native_startup \
             "$scenario" -- --ignored --exact --test-threads=1 --nocapture
     done
 done

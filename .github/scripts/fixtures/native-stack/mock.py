@@ -55,7 +55,9 @@ if args[args.index("-p") + 1] == "verad":
     event = "build vera"
 else:
     features = args[args.index("--features") + 1]
-    curve = features.removeprefix("native,redb,iroh,")
+    expected_prefix = "integration-test-native,redb,iroh," if command == "test" else "native,redb,iroh,"
+    assert features.startswith(expected_prefix), features
+    curve = features.removeprefix(expected_prefix)
     assert curve in ("bls12-381", "jubjub"), features
     assert "--no-default-features" in args and "--config" in args
     assert "acp-light-client.path=" in args[args.index("--config") + 1]
