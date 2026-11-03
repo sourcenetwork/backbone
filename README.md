@@ -150,6 +150,8 @@ freshness. Direct-certificate responses retain their existing shape.
 
 ### Native stack CI
 
+The Native deployment qualification workflow can also be run manually against a selected checkout.
+
 The Full Stack job builds pinned Vera once, then runs BLS12-381 and Jubjub Orbis
 builds sequentially. Both curves exercise native startup, signing, PRE, revocation,
 restart, resharing, and certified fault reports. A separate PET scenario on each
@@ -162,7 +164,7 @@ in `backbone.toml`. No external release artifacts or floating component branches
 are used. These Vera and Orbis pins require fresh native state and matching
 deployment roots.
 
-Run `bash .github/scripts/test-native-stack.sh` with Rust 1.98.0 and protoc
+Run `bash .github/scripts/test-native-stack.sh` with Rust 1.99.1 and protoc
 installed. The script uses a temporary source checkout and retains build artifacts
 under `target/native-stack` and per-curve logs and scenario evidence under
 `target/native-stack-runs`. Orbis state and logs remain in each attempt's private

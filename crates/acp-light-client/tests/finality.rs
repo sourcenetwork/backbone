@@ -79,7 +79,7 @@ fn fixture_records_with_operations(
         let directory = tempfile::tempdir().unwrap();
         tokio::Runner::new(tokio::Config::new().with_storage_directory(directory.path())).start(
             |context| async move {
-                let cache = CacheRef::from_pooler(&context, NZU16!(4084), NZUsize!(64));
+                let cache = CacheRef::new(NZU16!(4084), NZUsize!(64));
                 let set = NativeStateSet::init(
                     context.child("proof"),
                     native::state_config("proof", cache),
@@ -256,6 +256,7 @@ fn fixture_records_with_operations(
         height,
         timestamp,
         prevrandao: B256::ZERO,
+        randomness: None,
         state_root: StateRoot(B256::repeat_byte(1)),
         module_state_root: root,
         txs: (0..operations)

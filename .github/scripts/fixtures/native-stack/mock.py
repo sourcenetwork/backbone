@@ -20,8 +20,10 @@ if tool == "git":
             if repo.name == "orbis":
                 manifest = repo / "bin/orbis-node/Cargo.toml"
                 manifest.parent.mkdir(parents=True)
-                manifest.write_text(
+                (repo / "Cargo.toml").write_text(
                     'vera = { git = "https://github.com/sourcenetwork/vera.rs", rev = "' + "1" * 40 + '" }\n'
+                )
+                manifest.write_text(
                     'defra = { git = "https://github.com/sourcenetwork/defradb.rs", rev = "' + "3" * 40 + '" }\n'
                 )
         elif command == "rev-parse":
@@ -32,7 +34,33 @@ if tool == "git":
 if tool == "rustc":
     print("rustc fixture")
     sys.exit(0)
-assert tool == "cargo" and args.pop(0) == "+1.98.0", (tool, args)
+if tool == "docker":
+    if args == ["info", "--format", "{{.ServerVersion}}"]:
+        print("fixture")
+        sys.exit(0)
+    if args[:2] == ["image", "rm"]:
+        sys.exit(0)
+    if args[:2] == ["image", "inspect"]:
+        assert args[2:4] == ["--format", "{{.Id}}"]
+        print("sha256:" + "a" * 64)
+        sys.exit(0)
+    assert args[0] == "build", args
+    executable = args[args.index("--build-arg") + 1].removeprefix("EXECUTABLE=")
+    assert executable in ("verad", "orbis-node")
+    source = Path(args[-1]) / executable
+    value = source.read_text()
+    if executable == "verad":
+        assert value == "vera production\n"
+        event = "image vera"
+    else:
+        curve = source.parent.name
+        assert curve in ("bls12-381", "jubjub")
+        assert value == curve + " production\n"
+        event = "image " + curve
+    with open(os.environ["MOCK_TRACE"], "a") as trace:
+        trace.write(event + "\n")
+    sys.exit(0)
+assert tool == "cargo" and args.pop(0) == "+1.99.1", (tool, args)
 command = args.pop(0)
 for variable in os.environ:
     assert not variable.startswith("CARGO_PROFILE_"), variable
@@ -53,7 +81,9 @@ if args[args.index("-p") + 1] == "verad":
     event = "build vera"
 else:
     features = args[args.index("--features") + 1]
-    curve = features.removeprefix("native,redb,iroh,")
+    expected_prefix = "integration-test-native,redb,iroh," if command == "test" else "native,redb,iroh,"
+    assert features.startswith(expected_prefix), features
+    curve = features.removeprefix(expected_prefix)
     assert curve in ("bls12-381", "jubjub"), features
     assert "--no-default-features" in args and "--config" in args
     assert "acp-light-client.path=" in args[args.index("--config") + 1]
@@ -67,6 +97,8 @@ else:
         print("cosmrs v0.21.1" if os.environ["MOCK_FORBIDDEN"] == curve else "orbis-node v0.1.0")
     else:
         assert command == "test" and "--locked" in args
+        assert os.environ["ORBIS_NATIVE_VERA_IMAGE"].endswith("-vera:local")
+        assert os.environ["ORBIS_NATIVE_IMAGE"].endswith("-" + curve + ":local")
         assert args[args.index("--test") + 1] == "native_startup"
         staged = Path(os.environ["ORBIS_NODE_BINARY"])
         assert staged.parts[-3:] == ("bin", curve, "orbis-node"), staged
@@ -76,6 +108,7 @@ else:
         if "--no-run" in args:
             event = "compile " + curve
         elif "--list" in args:
+            assert "--ignored" not in args
             event = "list " + curve
             print("native_startup_registers_and_preserves_identity_on_restart: test")
             if curve == "bls12-381":
@@ -84,7 +117,7 @@ else:
             print("native_pet_threshold_workflows: test")
         else:
             scenario = args[args.index("--test") + 2]
-            assert "--ignored" in args and "--exact" in args and "--test-threads=1" in args
+            assert "--ignored" not in args and "--exact" in args and "--test-threads=1" in args
             assert "--nocapture" in args and os.environ["NATIVE_STACK_CURVE"] == curve
             expected = curve + "-" + scenario
             assert Path(os.environ["VERA_E2E_DIR"]).parts[-3:] == (expected, "attempt-1", "clusters")
@@ -93,5 +126,6 @@ else:
             assert retained.is_dir()
             event = "run " + curve + " " + scenario
             print("test " + scenario + " ... ok")
+            print("test result: ok. 1 passed; 0 failed; 0 ignored;")
 with open(os.environ["MOCK_TRACE"], "a") as trace:
     trace.write(event + "\n")

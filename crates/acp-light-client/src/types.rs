@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use alloy_primitives::B256;
 
-pub use vera_domain::{ConsensusPublicKey, GossipHeader, LightBlock, ModuleId, ModuleStateProof};
+pub use vera_domain::{ConsensusPublicKey, GossipHeader, LightBlock, ModuleId};
 
 /// A value authenticated against one finalized module root.
 #[derive(Debug, Clone)]
