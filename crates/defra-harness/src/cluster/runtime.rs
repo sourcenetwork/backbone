@@ -201,6 +201,9 @@ impl TestCluster {
     /// handed the address while it is down. Start it again on the same ports
     /// with [`start_stopped_node`](Self::start_stopped_node).
     pub async fn stop_node(&mut self, index: usize) -> Result<StoppedNode> {
+        // A paused node holds SIGTERM until it runs again, so it would be
+        // killed instead of stopping; let it run first.
+        let _ = self.resume_node(index);
         let old = &self.nodes[index];
         let config = old.config.clone();
         let kind = old.kind;
