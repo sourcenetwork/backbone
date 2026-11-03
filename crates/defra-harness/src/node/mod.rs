@@ -132,7 +132,7 @@ fn current_platform() -> eyre::Result<(&'static str, &'static str)> {
     } else if cfg!(target_os = "windows") {
         "windows"
     } else {
-        eyre::bail!("unsupported OS for release download")
+        eyre::bail!("unsupported OS for release download");
     };
 
     let arch = if cfg!(target_arch = "x86_64") {
@@ -140,7 +140,7 @@ fn current_platform() -> eyre::Result<(&'static str, &'static str)> {
     } else if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else {
-        eyre::bail!("unsupported architecture for release download")
+        eyre::bail!("unsupported architecture for release download");
     };
 
     Ok((os, arch))
@@ -288,10 +288,12 @@ pub fn seed_searchable_encryption_key(
     };
     let (path, secret) = match &config.keyring {
         KeyringBackend::File { path, secret } => (path.clone(), secret.clone()),
-        other => eyre::bail!(
-            "seeding a shared searchable-encryption key requires a File keyring backend, got {:?}",
-            other
-        ),
+        other => {
+            eyre::bail!(
+                "seeding a shared searchable-encryption key requires a File keyring backend, got {:?}",
+                other
+            );
+        }
     };
 
     let hex_key: String = key.iter().map(|b| format!("{:02x}", b)).collect();

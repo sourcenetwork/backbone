@@ -657,7 +657,9 @@ impl Nodes {
     /// The port returns on `rejoin`, which re-reads the container's address.
     pub async fn partition(&mut self, i: usize) -> Result<()> {
         match self {
-            Nodes::Process { .. } => bail!("process backend cannot partition"),
+            Nodes::Process { .. } => {
+                bail!("process backend cannot partition");
+            }
             Nodes::Docker(d) => {
                 let name = d.container_name(i);
                 docker(&["network", "disconnect", &d.network, &name]).await?;
@@ -668,7 +670,9 @@ impl Nodes {
 
     pub async fn rejoin(&mut self, i: usize) -> Result<()> {
         match self {
-            Nodes::Process { .. } => bail!("process backend cannot partition"),
+            Nodes::Process { .. } => {
+                bail!("process backend cannot partition");
+            }
             Nodes::Docker(d) => {
                 let name = d.container_name(i);
                 let Some(ip) = d.containers[i].ip.clone() else {

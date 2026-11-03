@@ -181,7 +181,7 @@ impl BinaryResolver {
             self.prefix,
             self.prefix,
             self.binary_name
-        )
+        );
     }
 
     fn build_from_workspace(&self, workspace: &Path, package: &str) -> Result<ResolvedBinary> {

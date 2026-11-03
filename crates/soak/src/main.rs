@@ -222,7 +222,9 @@ impl RunArgs {
         let docker = match flag("nodes").as_deref() {
             None | Some("process") => false,
             Some("docker") => true,
-            Some(other) => bail!("unknown --nodes {other}; use process or docker"),
+            Some(other) => {
+                bail!("unknown --nodes {other}; use process or docker");
+            }
         };
         let topology = match flag("topology") {
             Some(spec) => Some(Topology::parse(&spec)?),
@@ -386,7 +388,9 @@ fn main() -> Result<()> {
         "compare" => {
             let (a, b) = match (argv.get(1), argv.get(2)) {
                 (Some(a), Some(b)) => (a, b),
-                _ => eyre::bail!("usage: soak compare <run dir A> <run dir B>"),
+                _ => {
+                    eyre::bail!("usage: soak compare <run dir A> <run dir B>");
+                }
             };
             let report = summary::compare(Path::new(a), Path::new(b))?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -426,7 +430,9 @@ fn main() -> Result<()> {
             );
             tokio::runtime::Runtime::new()?.block_on(run(&run_dir, args))
         }
-        other => eyre::bail!("unknown command {other}; use run, replay, summarize or compare"),
+        other => {
+            eyre::bail!("unknown command {other}; use run, replay, summarize or compare");
+        }
     }
 }
 

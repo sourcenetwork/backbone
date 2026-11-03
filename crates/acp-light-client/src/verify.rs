@@ -1,3 +1,3 @@
-//! Finality verification shared with Vera.
+//! Finality and state proof verification shared with Vera.
 
 pub use vera_domain::{verify_light_block, LightBlockError};

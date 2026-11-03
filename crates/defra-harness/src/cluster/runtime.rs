@@ -180,7 +180,7 @@ impl TestCluster {
         if self.vera.take().is_some() {
             Ok(())
         } else {
-            eyre::bail!("no Vera node to stop")
+            eyre::bail!("no Vera node to stop");
         }
     }
 

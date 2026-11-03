@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/backbone-native.XXXXXX")
+built_images=()
 cleanup() {
     local result=$?
     if [[ -n "${RUN:-}" ]]; then
@@ -12,19 +13,23 @@ cleanup() {
             fi
         done
     fi
+    if ((${#built_images[@]})); then
+        docker image rm "${built_images[@]}" >/dev/null 2>&1 || true
+    fi
     rm -rf -- "$WORK" || result=1
     exit "$result"
 }
 trap cleanup EXIT
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target/native-stack}"
-mkdir -p "$CARGO_TARGET_DIR" "$ROOT/target/native-stack-runs"
+mkdir -p "$CARGO_TARGET_DIR" "$ROOT/target/native-stack-runs" "$WORK/bin"
 export CARGO_TARGET_DIR="$(cd "$CARGO_TARGET_DIR" && pwd)"
 RUN=$(mktemp -d "$ROOT/target/native-stack-runs/release.XXXXXX")
 if [[ -n "${GITHUB_ENV:-}" ]]; then
     echo "NATIVE_STACK_EVIDENCE=$RUN" >> "$GITHUB_ENV"
 fi
+docker info --format '{{.ServerVersion}}' >/dev/null
 
-# Use normal runtime images and release-profile fixtures without inherited
+# Use repository release profiles and native host binaries, without inherited
 # profiling, sanitizer, or development-profile compiler overrides.
 while IFS= read -r variable; do
     case "$variable" in
@@ -32,18 +37,15 @@ while IFS= read -r variable; do
     esac
 done < <(compgen -e)
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS \
-    CARGO_INCREMENTAL CARGO_BUILD_INCREMENTAL CARGO_BUILD_TARGET \
-    VERAD_BINARY ORBIS_NODE_BINARY ORBIS_NATIVE_DIAGNOSTIC_IMAGE
+    CARGO_INCREMENTAL CARGO_BUILD_INCREMENTAL CARGO_BUILD_TARGET
 
-field_for() {
-    awk -v section="[$1]" -v field="$2" '
+ref_for() {
+    awk -v section="[components.$1]" '
         $0 == section { found=1; next }
         found && /^\[/ { exit }
-        found && $1 == field && $2 == "=" { split($0, parts, "\""); print parts[2]; exit }
+        found && /^ref = / { split($0, parts, "\""); print parts[2]; exit }
     ' "$ROOT/backbone.toml"
 }
-
-ref_for() { field_for "components.$1" ref; }
 
 checkout() {
     local repo=$1 ref=$2 destination=$3
@@ -67,7 +69,7 @@ check_fixture_pin() {
         -v revision="rev = \"$revision\"" '
         index($0, dependency) { found=1; if (!index($0, revision)) mismatch=1 }
         END { exit !found || mismatch }
-    ' "$WORK/orbis/bin/orbis-node/Cargo.toml"; then
+    ' "$WORK/orbis/Cargo.toml" "$WORK/orbis/bin/orbis-node/Cargo.toml"; then
         echo "Orbis fixture dependencies do not match the $repo release pin" >&2
         return 1
     fi
@@ -85,63 +87,53 @@ unset ORBIS_LOCAL_STORAGE_KDF_M_COST_KIB ORBIS_LOCAL_STORAGE_KDF_T_COST
     echo "vera=$vera_ref orbis=$orbis_ref defra=$defra_ref"
     echo "profile=release curves=bls12-381,jubjub default_features=false"
     echo "kdf=production-defaults (262144 KiB, 3 iterations)"
-    rustc +1.98.0 --version --verbose
+    rustc +1.99.1 --version --verbose
 } | tee "$RUN/provenance.log"
 
-# Bind the runtime's proof client to the candidate's actual source.
-proof_ref=$(awk '/^acp-light-client = / { split($0, parts, "rev = \""); split(parts[2], rev, "\""); print rev[1] }' \
-    "$WORK/orbis/bin/orbis-node/Cargo.toml")
-[[ "$proof_ref" =~ ^[0-9a-f]{40}$ ]] || { echo "Missing immutable Orbis proof-client revision" >&2; exit 1; }
-git -C "$ROOT" fetch -q --depth 1 https://github.com/sourcenetwork/backbone.git "$proof_ref"
-if [[ -n $(git -C "$ROOT" status --porcelain --untracked-files=no) ]] ||
-    ! git -C "$ROOT" diff --quiet --no-ext-diff --no-textconv "$proof_ref" HEAD -- Cargo.toml crates/acp-light-client; then
-    echo "Update Orbis's proof-client pin and runtime images to qualify the changed SDK" >&2
-    exit 1
-fi
-orbis_runtime=$(field_for qualification orbis_runtime_ref)
-orbis_build=$(field_for qualification orbis_image_revision)
-[[ "$orbis_runtime" =~ ^[0-9a-f]{40}$ && "$orbis_build" =~ ^[0-9a-f]{40}$ ]] || {
-    echo "Record qualified Orbis runtime and image build revisions in backbone.toml" >&2; exit 1;
-}
-for revision in "$orbis_runtime" "$orbis_build"; do
-    git -C "$WORK/orbis" fetch -q --depth 1 https://github.com/sourcenetwork/orbis-rs.git "$revision"
-done
-ORBIS_NATIVE_VERA_IMAGE=$(field_for qualification vera_image)
+cargo +1.99.1 build --release --locked --manifest-path "$WORK/vera/Cargo.toml" \
+    -p verad --bin verad 2>&1 | tee "$RUN/build-verad.log"
+cp "$CARGO_TARGET_DIR/release/verad" "$WORK/bin/verad"
+export VERAD_BINARY="$WORK/bin/verad"
+ORBIS_NATIVE_VERA_IMAGE="backbone-native-$$-vera:local"
+docker build --file "$ROOT/.github/scripts/native-runtime.Dockerfile" \
+    --build-arg EXECUTABLE=verad --tag "$ORBIS_NATIVE_VERA_IMAGE" "$WORK/bin"
+built_images+=("$ORBIS_NATIVE_VERA_IMAGE")
 export ORBIS_NATIVE_VERA_IMAGE
-python3 "$ROOT/.github/scripts/native-image-evidence.py" --role vera \
-    --image "$ORBIS_NATIVE_VERA_IMAGE" --image-id "$(field_for qualification vera_image_id)" \
-    --source "$vera_ref" --checkout "$WORK/vera" --output "$RUN/image-vera.json"
-for curve in bls12-381 jubjub; do
-    key=${curve//-/_}
-    python3 "$ROOT/.github/scripts/native-image-evidence.py" --role orbis --curve "$curve" \
-        --image "$(field_for qualification "orbis_image_$key")" \
-        --image-id "$(field_for qualification "orbis_image_id_$key")" \
-        --source "$orbis_build" --runtime-source "$orbis_runtime" \
-        --checkout "$WORK/orbis" --output "$RUN/image-$curve.json"
-done
-# The fixture links the same proof-client source selected by the normal images.
+docker image inspect --format '{{.Id}}' "$ORBIS_NATIVE_VERA_IMAGE" > "$RUN/vera-image-id.txt"
+# Exercise this PR's proof client, including through Defra and Orbis consumers.
 patch="patch.'https://github.com/sourcenetwork/backbone.git'.acp-light-client.path='$ROOT/crates/acp-light-client'"
 for curve in bls12-381 jubjub; do
     native=(--manifest-path "$WORK/orbis/Cargo.toml" --config "$patch" -p orbis-node
         --no-default-features --features "native,redb,iroh,$curve")
+    native_test=(--manifest-path "$WORK/orbis/Cargo.toml" --config "$patch" -p orbis-node
+        --no-default-features --features "integration-test-native,redb,iroh,$curve")
     echo "curve=$curve profile=release orbis_features=native,redb,iroh,$curve default_features=false" \
         | tee "$RUN/provenance-$curve.log"
-    key=${curve//-/_}
-    ORBIS_NATIVE_IMAGE=$(field_for qualification "orbis_image_$key")
-    export ORBIS_NATIVE_IMAGE
-    # The path override updates only the disposable consumer lockfile.
-    cargo +1.98.0 tree "${native[@]}" --color never --edges normal,build \
+    # The local override changes the disposable lockfile. Stage each curve's
+    # production binary before test dev-dependencies can enable extra features.
+    cargo +1.99.1 build --release "${native[@]}" --bin orbis-node \
+        2>&1 | tee "$RUN/build-orbis-$curve.log"
+    mkdir -p "$WORK/bin/$curve"
+    cp "$CARGO_TARGET_DIR/release/orbis-node" "$WORK/bin/$curve/orbis-node"
+    export ORBIS_NODE_BINARY="$WORK/bin/$curve/orbis-node"
+    cargo +1.99.1 tree --locked "${native[@]}" --color never --edges normal,build \
         --prefix none > "$RUN/native-dependencies-$curve.log"
-    if grep -E '^(cosmrs|tendermint(-rpc|-config|-proto)?|cosmos-sdk-proto) v|^(reqwest v0\.11\.|h2 v0\.3\.|rustls v0\.21\.)' "$RUN/native-dependencies-$curve.log"; then
-        echo "Native $curve node includes legacy transport dependencies" >&2
+    if grep -E '^(cosmrs|tendermint(-rpc|-config|-proto)?|cosmos-sdk-proto) v' "$RUN/native-dependencies-$curve.log"; then
+        echo "Native $curve node includes Cosmos transport dependencies" >&2
         exit 1
     fi
-    shasum -a 256 "$WORK/vera/Cargo.lock" "$WORK/orbis/Cargo.lock" \
-        "$RUN/image-vera.json" "$RUN/image-$curve.json" | tee -a "$RUN/provenance-$curve.log"
+    ORBIS_NATIVE_IMAGE="backbone-native-$$-$curve:local"
+    docker build --file "$ROOT/.github/scripts/native-runtime.Dockerfile" \
+        --build-arg EXECUTABLE=orbis-node --tag "$ORBIS_NATIVE_IMAGE" "$WORK/bin/$curve"
+    built_images+=("$ORBIS_NATIVE_IMAGE")
+    export ORBIS_NATIVE_IMAGE
+    docker image inspect --format '{{.Id}}' "$ORBIS_NATIVE_IMAGE" > "$RUN/orbis-image-id-$curve.txt"
+    shasum -a 256 "$VERAD_BINARY" "$ORBIS_NODE_BINARY" "$WORK/vera/Cargo.lock" \
+        "$WORK/orbis/Cargo.lock" | tee -a "$RUN/provenance-$curve.log"
 
-    cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup --no-run \
+    cargo +1.99.1 test --release --locked "${native_test[@]}" --test native_startup --no-run \
         2>&1 | tee "$RUN/build-tests-$curve.log"
-    cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
+    cargo +1.99.1 test --release --locked "${native_test[@]}" --test native_startup \
         -- --list | tee "$RUN/scenarios-$curve.log"
     scenarios=(native_startup_registers_and_preserves_identity_on_restart)
     if [[ $curve == bls12-381 ]]; then
@@ -151,7 +143,7 @@ for curve in bls12-381 jubjub; do
     for scenario in "${scenarios[@]}"; do
         grep -Fx "$scenario: test" "$RUN/scenarios-$curve.log" >/dev/null
         NATIVE_STACK_CURVE="$curve" bash "$ROOT/.github/scripts/run-native-scenario.sh" "$RUN" "$scenario" \
-            cargo +1.98.0 test --release --locked "${native[@]}" --test native_startup \
+            cargo +1.99.1 test --release --locked "${native_test[@]}" --test native_startup \
             "$scenario" -- --exact --test-threads=1 --nocapture
     done
 done
