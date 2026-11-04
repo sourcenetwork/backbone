@@ -63,11 +63,11 @@ pub async fn start_node(
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    let stdout_path = config.log_dir.join("stdout.log");
-    let log_tracker = LogTracker::start(stdout_path, patterns::DEFRA_READY_PATTERN, named_patterns);
-
     let mut process =
         test_infra::ManagedProcess::spawn(&config.name, &program, &args, &envs, &config.log_dir)?;
+
+    let stdout_path = config.log_dir.join("stdout.log");
+    let log_tracker = LogTracker::start(stdout_path, patterns::DEFRA_READY_PATTERN, named_patterns);
 
     wait_ready_or_exit(&log_tracker, &mut process, &config, ready_timeout).await?;
 
@@ -266,6 +266,30 @@ mod tests {
         let running = start_node(&node, config, Duration::from_secs(10))
             .await
             .expect("ready node must start");
+        drop(running);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restart_waits_for_new_readiness_not_a_stale_log() {
+        let node = StubNode::new(
+            "echo 'new process starting'; sleep 0.2; echo 'Providing HTTP API at fresh'; sleep 30",
+        );
+        let config = test_config("stale-ready");
+        std::fs::create_dir_all(&config.log_dir).unwrap();
+        std::fs::write(
+            config.log_dir.join("stdout.log"),
+            format!(
+                "Providing HTTP API at stale\n{}",
+                "stale output\n".repeat(20_000)
+            ),
+        )
+        .unwrap();
+
+        let running = start_node(&node, config.clone(), Duration::from_secs(5))
+            .await
+            .expect("new process must become ready");
+        let log = std::fs::read_to_string(config.log_dir.join("stdout.log")).unwrap();
+        assert!(log.contains("Providing HTTP API at fresh"));
         drop(running);
     }
 }
