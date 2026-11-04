@@ -72,6 +72,7 @@ pub struct TestClusterBuilder {
     acp_receipt_timeout: Option<u64>,
     signing_multiplier_opt_out: bool,
     extra_rust_args: Vec<String>,
+    node_extra_rust_args: Vec<Vec<String>>,
     extra_go_args: Vec<String>,
 }
 
@@ -112,6 +113,7 @@ impl TestClusterBuilder {
             acp_receipt_timeout: None,
             signing_multiplier_opt_out: false,
             extra_rust_args: Vec::new(),
+            node_extra_rust_args: Vec::new(),
             extra_go_args: Vec::new(),
         }
     }
@@ -135,6 +137,31 @@ impl TestClusterBuilder {
         self.extra_rust_args
             .extend(args.into_iter().map(Into::into));
         self
+    }
+
+    /// Append raw CLI flags to one Rust node's `start` invocation (by cluster
+    /// index), after the cluster-wide [`with_extra_rust_args`](Self::with_extra_rust_args),
+    /// so they win for that node. They survive a restart of the node.
+    pub fn with_node_extra_rust_args<I, S>(mut self, index: usize, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        while self.node_extra_rust_args.len() <= index {
+            self.node_extra_rust_args.push(Vec::new());
+        }
+        self.node_extra_rust_args[index].extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// The flags appended to Rust node `index`: the cluster-wide ones, then
+    /// that node's own.
+    fn rust_args_for(&self, index: usize) -> Vec<String> {
+        self.extra_rust_args
+            .iter()
+            .chain(self.node_extra_rust_args.get(index).into_iter().flatten())
+            .cloned()
+            .collect()
     }
 
     /// Extra flags appended to every Go node's `start` command, after the
@@ -511,7 +538,7 @@ impl TestClusterBuilder {
                 acp_circuit_breaker_reset_timeout: self.acp_circuit_breaker_reset_timeout,
                 acp_request_timeout: self.acp_request_timeout,
                 acp_receipt_timeout: self.acp_receipt_timeout,
-                extra_args: self.extra_rust_args.clone(),
+                extra_args: self.rust_args_for(i),
             };
 
             let mut attempt = 1;
@@ -711,6 +738,16 @@ mod tests {
             !signed_docs_in(Some("SIGNED-DOCS")),
             "case-sensitive → false"
         );
+    }
+
+    #[test]
+    fn node_extra_rust_args_follow_the_cluster_wide_ones_for_that_node_only() {
+        let b = TestClusterBuilder::new()
+            .with_extra_rust_args(["--a", "1"])
+            .with_node_extra_rust_args(2, ["--b", "2"]);
+        assert_eq!(b.rust_args_for(0), vec!["--a", "1"]);
+        assert_eq!(b.rust_args_for(2), vec!["--a", "1", "--b", "2"]);
+        assert_eq!(b.rust_args_for(3), vec!["--a", "1"]);
     }
 
     #[test]
