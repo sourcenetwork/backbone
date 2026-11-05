@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -32,6 +33,7 @@ type SeenPatterns = Arc<Mutex<HashMap<String, String>>>;
 /// are supplied by the consuming harness.
 pub struct LogTracker {
     tx: broadcast::Sender<LogEvent>,
+    ready: Arc<AtomicBool>,
     seen: SeenPatterns,
     task: JoinHandle<()>,
 }
@@ -43,6 +45,7 @@ impl LogTracker {
         let task = tokio::spawn(async {});
         Self {
             tx,
+            ready: Arc::new(AtomicBool::new(false)),
             seen: Arc::new(Mutex::new(HashMap::new())),
             task,
         }
@@ -58,19 +61,33 @@ impl LogTracker {
     ) -> Self {
         let (tx, _) = broadcast::channel(64);
         let tx_clone = tx.clone();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = ready.clone();
         let seen: SeenPatterns = Arc::new(Mutex::new(HashMap::new()));
         let seen_clone = seen.clone();
         let ready_owned = ready_pattern.to_string();
 
         let task = tokio::spawn(async move {
-            if let Err(e) =
-                tail_loop(log_path, tx_clone, &ready_owned, named_patterns, seen_clone).await
+            if let Err(e) = tail_loop(
+                log_path,
+                tx_clone,
+                &ready_owned,
+                named_patterns,
+                seen_clone,
+                ready_clone,
+            )
+            .await
             {
                 tracing::warn!("log tracker stopped: {}", e);
             }
         });
 
-        Self { tx, seen, task }
+        Self {
+            tx,
+            ready,
+            seen,
+            task,
+        }
     }
 
     /// Wait for the Ready event or timeout.
@@ -78,6 +95,9 @@ impl LogTracker {
         let mut rx = self.tx.subscribe();
         let result = tokio::time::timeout(timeout, async {
             loop {
+                if self.ready.load(Ordering::Acquire) {
+                    return Ok(());
+                }
                 match rx.recv().await {
                     Ok(LogEvent::Ready) => return Ok(()),
                     Ok(LogEvent::Error(e)) => {
@@ -158,6 +178,7 @@ async fn tail_loop(
     ready_pattern: &str,
     named_patterns: Vec<NamedPattern>,
     seen: SeenPatterns,
+    ready: Arc<AtomicBool>,
 ) -> Result<()> {
     // Wait for the log file to appear
     loop {
@@ -182,6 +203,7 @@ async fn tail_loop(
             }
             Ok(_) => {
                 if line.contains(ready_pattern) {
+                    ready.store(true, Ordering::Release);
                     let _ = tx.send(LogEvent::Ready);
                 }
                 if line.contains("ERROR") {
@@ -205,5 +227,34 @@ async fn tail_loop(
                 return Err(eyre::eyre!("error reading log: {}", e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn readiness_is_remembered_before_a_waiter_subscribes() {
+        let dir = crate::TestRunDir::new(&std::env::temp_dir(), "BACKBONE_LOG_TEST_KEEP")
+            .expect("create isolated log directory");
+        let path = dir.path().join("stdout.log");
+        std::fs::write(&path, "server ready\n").expect("write readiness line");
+        let tracker = LogTracker::start(
+            path,
+            "server ready",
+            vec![NamedPattern {
+                name: "readiness_seen",
+                regex: Regex::new("server ready").unwrap(),
+            }],
+        );
+        tracker
+            .wait_for_pattern("readiness_seen", Duration::from_secs(2))
+            .await
+            .expect("tracker must consume the ready line before the wait");
+        tracker
+            .wait_for_ready(Duration::from_millis(100))
+            .await
+            .expect("readiness observed before subscription must remain visible");
     }
 }
