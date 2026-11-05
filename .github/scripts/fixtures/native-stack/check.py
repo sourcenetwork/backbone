@@ -17,7 +17,7 @@ for curve in ("bls12-381", "jubjub"):
     scenarios = ['tests::e2e::restart_scenario::test_restarted_member_keeps_identity_and_polynomial', 'tests::e2e::member_replacement::test_spare_member_replaces_original', 'tests::e2e::integration::test_cli_calls_dkg_for_pet_ring']
     for scenario in scenarios:
         expected += ["run " + curve + " " + scenario]
-        attempt = run / "scenarios" / (curve + "-" + scenario) / "attempt-1"
+        attempt = run / "scenarios" / (curve + "-" + scenario.replace("::", "--")) / "attempt-1"
         assert (attempt / "command.log").is_file()
         assert (attempt / "exit-code").read_text() == "0\n"
     assert (run / ("build-tests-" + curve + ".log")).exists()

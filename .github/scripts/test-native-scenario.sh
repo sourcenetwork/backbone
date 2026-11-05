@@ -106,6 +106,14 @@ check missing-log 101 1
 check command-failure 127 1
 check repeated-collision 101 2
 
+qualified='tests::e2e::restart_scenario::test_restarted_member_keeps_identity_and_polynomial'
+mkdir "$work/qualified"
+bash "$scripts/run-native-scenario.sh" "$work/qualified" "$qualified" \
+    bash -c 'echo "test result: ok. 1 passed; 0 failed; 0 ignored;"' >/dev/null
+[[ -f "$work/qualified/scenarios/${qualified//::/--}/attempt-1/exit-code" ]]
+[[ ! -e "$work/qualified/scenarios/$qualified" ]]
+printf 'PASS qualified-scenario-path\n'
+
 mkdir "$work/tools" "$work/logging-failure"
 cat > "$work/tools/tee" <<'MOCK'
 #!/usr/bin/env bash

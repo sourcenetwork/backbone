@@ -18,7 +18,8 @@ case "${NATIVE_STACK_CURVE:-}" in
     ""|bls12-381|jubjub) ;;
     *) echo "Unknown native curve: $NATIVE_STACK_CURVE" >&2; exit 2 ;;
 esac
-scenario_dir="$root/scenarios/${NATIVE_STACK_CURVE:+$NATIVE_STACK_CURVE-}$scenario"
+scenario_path=${scenario//::/--}
+scenario_dir="$root/scenarios/${NATIVE_STACK_CURVE:+$NATIVE_STACK_CURVE-}$scenario_path"
 mkdir -p "$scenario_dir"
 
 for attempt in 1 2; do

@@ -117,7 +117,7 @@ else:
             scenario = args[args.index("--lib") + 1]
             assert "--ignored" not in args and "--exact" in args and "--test-threads=1" in args
             assert "--nocapture" in args and os.environ["NATIVE_STACK_CURVE"] == curve
-            expected = curve + "-" + scenario
+            expected = curve + "-" + scenario.replace("::", "--")
             assert Path(os.environ["VERA_E2E_DIR"]).parts[-3:] == (expected, "attempt-1", "clusters")
             retained = Path(os.environ["ORBIS_NATIVE_E2E_DIR"])
             assert retained.parts[-3:] == (expected, "attempt-1", "orbis-clusters")
