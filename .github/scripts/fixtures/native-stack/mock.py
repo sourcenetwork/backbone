@@ -81,7 +81,7 @@ if args[args.index("-p") + 1] == "verad":
     event = "build vera"
 else:
     features = args[args.index("--features") + 1]
-    expected_prefix = "integration-test-native,redb,iroh," if command == "test" else "native,redb,iroh,"
+    expected_prefix = "integration-test,native,redb,iroh," if command == "test" else "native,redb,iroh,"
     assert features.startswith(expected_prefix), features
     curve = features.removeprefix(expected_prefix)
     assert curve in ("bls12-381", "jubjub"), features
@@ -99,7 +99,7 @@ else:
         assert command == "test" and "--locked" in args
         assert os.environ["ORBIS_NATIVE_VERA_IMAGE"].endswith("-vera:local")
         assert os.environ["ORBIS_NATIVE_IMAGE"].endswith("-" + curve + ":local")
-        assert args[args.index("--test") + 1] == "native_startup"
+        assert "--lib" in args
         staged = Path(os.environ["ORBIS_NODE_BINARY"])
         assert staged.parts[-3:] == ("bin", curve, "orbis-node"), staged
         assert staged.read_text() == curve + " production\n", staged
@@ -110,13 +110,11 @@ else:
         elif "--list" in args:
             assert "--ignored" not in args
             event = "list " + curve
-            print("native_startup_registers_and_preserves_identity_on_restart: test")
-            if curve == "bls12-381":
-                print("native_defra_signing: test")
-            print("native_distributed_threshold_workflows: test")
-            print("native_pet_threshold_workflows: test")
+            print('tests::e2e::restart_scenario::test_restarted_member_keeps_identity_and_polynomial: test')
+            print('tests::e2e::member_replacement::test_spare_member_replaces_original: test')
+            print('tests::e2e::integration::test_cli_calls_dkg_for_pet_ring: test')
         else:
-            scenario = args[args.index("--test") + 2]
+            scenario = args[args.index("--lib") + 1]
             assert "--ignored" not in args and "--exact" in args and "--test-threads=1" in args
             assert "--nocapture" in args and os.environ["NATIVE_STACK_CURVE"] == curve
             expected = curve + "-" + scenario

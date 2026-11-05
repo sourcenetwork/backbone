@@ -10,6 +10,7 @@ scenario=$2
 shift 2
 case "$scenario" in
     native_startup_registers_and_preserves_identity_on_restart|native_defra_signing|native_distributed_threshold_workflows|native_pet_threshold_workflows) ;;
+    tests::e2e::restart_scenario::test_restarted_member_keeps_identity_and_polynomial|tests::e2e::member_replacement::test_spare_member_replaces_original|tests::e2e::integration::test_cli_calls_dkg_for_pet_ring) ;;
     *) echo "Unknown native scenario: $scenario" >&2; exit 2 ;;
 esac
 scripts=$(cd "$(dirname "$0")" && pwd)
