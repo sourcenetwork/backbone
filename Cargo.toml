@@ -60,7 +60,7 @@ path = "tests/hub_light_client.rs"
 orbis-harness = { path = "crates/orbis-harness" }
 defra-harness = { path = "crates/defra-harness" }
 acp-light-client = { path = "crates/acp-light-client" }
-vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "523de40514848e9f0349f3bf7d5a0e9d161402c9" }
+vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", tag = "v0.1.1" }
 commonware-codec.workspace = true
 test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }
@@ -77,3 +77,13 @@ alloy-eips.workspace = true
 alloy-signer.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types = "1"
+
+# Resolve the Vera git crates' internal dependencies to the published 0.1.1 packages.
+[patch."https://github.com/sourcenetwork/vera.rs"]
+vera-acp = "0.1.1"
+vera-crypto = "0.1.1"
+vera-domain = "0.1.1"
+vera-identity = "0.1.1"
+vera-modules = "0.1.1"
+vera-permission = "0.1.1"
+vera-zanzibar = "0.1.1"
