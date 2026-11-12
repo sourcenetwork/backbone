@@ -1,42 +1,47 @@
 //! Fetch state proofs against finality authenticated by a configured consensus key.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use commonware_codec::DecodeExt as _;
 use eyre::{ensure, WrapErr};
 
 use crate::header_sync::SyncState;
 use crate::rpc;
+use crate::transport::{AcpTransport, HttpWsTransport};
 use crate::types::{ConsensusPublicKey, LightBlock, ModuleId, VerifiedRecord};
 use crate::verify;
 
-/// HTTP JSON-RPC client with an independently configured consensus trust anchor.
+/// JSON-RPC client with an independently configured consensus trust anchor.
 #[derive(Clone)]
 pub struct ProofClient {
-    client: reqwest::Client,
-    rpc_url: String,
+    transport: Arc<dyn AcpTransport>,
     trusted_key: ConsensusPublicKey,
 }
 
 impl ProofClient {
     /// `trusted_key_hex` must come from operator configuration, not the RPC endpoint.
     pub fn new(rpc_url: &str, trusted_key_hex: &str) -> eyre::Result<Self> {
-        let bytes = decode_hex(trusted_key_hex).wrap_err("invalid trusted consensus key hex")?;
-        let trusted_key =
-            ConsensusPublicKey::decode(bytes).wrap_err("invalid trusted consensus key")?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
+        let trusted_key = decode_trusted_key(trusted_key_hex)?;
         Ok(Self {
-            client,
-            rpc_url: rpc_url.to_string(),
+            transport: Arc::new(HttpWsTransport::calls_only(rpc_url)?),
             trusted_key,
+        })
+    }
+
+    /// Fetch through `transport`. The trust anchor is still configured here, not by the node.
+    pub fn with_transport(
+        transport: Arc<dyn AcpTransport>,
+        trusted_key_hex: &str,
+    ) -> eyre::Result<Self> {
+        Ok(Self {
+            transport,
+            trusted_key: decode_trusted_key(trusted_key_hex)?,
         })
     }
 
     /// Fetch a light block without verifying it.
     pub async fn get_light_block(&self, height: u64) -> eyre::Result<LightBlock> {
-        rpc::get_light_block(&self.client, &self.rpc_url, height).await
+        rpc::light_block(self.transport.as_ref(), height).await
     }
 
     /// Authenticate the requested revision using the configured consensus key.
@@ -66,14 +71,8 @@ impl ProofClient {
         minimum_height: u64,
     ) -> eyre::Result<(SyncState, bool)> {
         vera_permission::validate_request(policy, request, vera_permission::PERMISSION_LIMITS)?;
-        let response = rpc::get_current_permission_proof(
-            &self.client,
-            &self.rpc_url,
-            policy,
-            request,
-            minimum_height,
-        )
-        .await?;
+        let response =
+            rpc::permission_proof(self.transport.as_ref(), policy, request, minimum_height).await?;
         let allowed = response.verify(
             policy,
             request,
@@ -92,14 +91,9 @@ impl ProofClient {
         minimum_height: u64,
     ) -> eyre::Result<(SyncState, Option<vera_permission::Actor>)> {
         let prefix = vera_permission::object_owner_prefix(policy, object)?;
-        let response = rpc::get_current_policy_prefix_proof(
-            &self.client,
-            &self.rpc_url,
-            policy,
-            &prefix,
-            minimum_height,
-        )
-        .await?;
+        let response =
+            rpc::policy_prefix_proof(self.transport.as_ref(), policy, &prefix, minimum_height)
+                .await?;
         let owner =
             response.verify_object_owner(policy, object, minimum_height, &self.trusted_key)?;
         Ok((revision_state(&response.revision)?, owner))
@@ -113,14 +107,8 @@ impl ProofClient {
         key: &[u8],
         minimum_height: u64,
     ) -> eyre::Result<(SyncState, VerifiedRecord)> {
-        let response = rpc::get_current_policy_prefix_proof(
-            &self.client,
-            &self.rpc_url,
-            policy,
-            key,
-            minimum_height,
-        )
-        .await?;
+        let response =
+            rpc::policy_prefix_proof(self.transport.as_ref(), policy, key, minimum_height).await?;
         let evidence = response.verify(
             policy,
             key,
@@ -168,8 +156,7 @@ impl ProofClient {
             "record key exceeds limit"
         );
         let response =
-            rpc::get_current_record_proof(&self.client, &self.rpc_url, module, key, minimum_height)
-                .await?;
+            rpc::record_proof(self.transport.as_ref(), module, key, minimum_height).await?;
         response.verify(
             module,
             key,
@@ -188,6 +175,11 @@ pub(crate) fn revision_state(light: &LightBlock) -> eyre::Result<SyncState> {
         module_state_root: light.module_state_root.parse()?,
         block_hash: light.block_hash.parse()?,
     })
+}
+
+fn decode_trusted_key(trusted_key_hex: &str) -> eyre::Result<ConsensusPublicKey> {
+    let bytes = decode_hex(trusted_key_hex).wrap_err("invalid trusted consensus key hex")?;
+    ConsensusPublicKey::decode(bytes).wrap_err("invalid trusted consensus key")
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, hex::FromHexError> {

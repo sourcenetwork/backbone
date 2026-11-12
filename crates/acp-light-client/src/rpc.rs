@@ -5,6 +5,7 @@ use std::time::Duration;
 use eyre::WrapErr;
 use serde::de::DeserializeOwned;
 
+use crate::transport::{AcpTransport, HttpWsTransport};
 use crate::types::{LightBlock, ModuleId};
 
 /// Maximum light-block response, including hex-encoded block and consensus material.
@@ -22,14 +23,7 @@ pub async fn get_current_record_proof(
     key: &[u8],
     minimum_height: u64,
 ) -> eyre::Result<vera_permission::RecordResponse> {
-    request(
-        client,
-        rpc_url,
-        "vera_getCurrentRecordProof",
-        serde_json::json!([module, format!("0x{}", hex::encode(key)), minimum_height]),
-        RECORD_RESPONSE_BYTES,
-    )
-    .await
+    record_proof(&http(client, rpc_url), module, key, minimum_height).await
 }
 
 /// Fetch complete current prefix evidence paired with its finalized revision.
@@ -40,9 +34,8 @@ pub async fn get_current_prefix_proof(
     prefix: &[u8],
     minimum_height: u64,
 ) -> eyre::Result<vera_permission::PrefixResponse> {
-    request(
-        client,
-        rpc_url,
+    fetch(
+        &http(client, rpc_url),
         "vera_getCurrentPrefixProof",
         serde_json::json!([module, format!("0x{}", hex::encode(prefix)), minimum_height]),
         RECORD_RESPONSE_BYTES,
@@ -58,15 +51,7 @@ pub async fn get_current_policy_prefix_proof(
     prefix: &[u8],
     minimum_height: u64,
 ) -> eyre::Result<vera_permission::PolicyPrefixResponse> {
-    vera_permission::validate_policy_prefix(policy, prefix)?;
-    request(
-        client,
-        rpc_url,
-        "vera_getCurrentPolicyPrefixProof",
-        serde_json::json!([policy, format!("0x{}", hex::encode(prefix)), minimum_height]),
-        RECORD_RESPONSE_BYTES,
-    )
-    .await
+    policy_prefix_proof(&http(client, rpc_url), policy, prefix, minimum_height).await
 }
 
 /// Fetch a finalized block and its certificate.
@@ -75,14 +60,7 @@ pub async fn get_light_block(
     rpc_url: &str,
     height: u64,
 ) -> eyre::Result<LightBlock> {
-    request(
-        client,
-        rpc_url,
-        "vera_getLightBlock",
-        serde_json::json!([height]),
-        LIGHT_BLOCK_RESPONSE_BYTES,
-    )
-    .await
+    light_block(&http(client, rpc_url), height).await
 }
 
 /// Fetch current permission evidence paired with its finalized revision.
@@ -93,9 +71,61 @@ pub async fn get_current_permission_proof(
     access: &vera_permission::AccessRequest,
     minimum_height: u64,
 ) -> eyre::Result<vera_permission::PermissionResponse> {
-    request(
-        client,
-        rpc_url,
+    permission_proof(&http(client, rpc_url), policy, access, minimum_height).await
+}
+
+pub(crate) async fn record_proof(
+    transport: &dyn AcpTransport,
+    module: ModuleId,
+    key: &[u8],
+    minimum_height: u64,
+) -> eyre::Result<vera_permission::RecordResponse> {
+    fetch(
+        transport,
+        "vera_getCurrentRecordProof",
+        serde_json::json!([module, format!("0x{}", hex::encode(key)), minimum_height]),
+        RECORD_RESPONSE_BYTES,
+    )
+    .await
+}
+
+pub(crate) async fn policy_prefix_proof(
+    transport: &dyn AcpTransport,
+    policy: &str,
+    prefix: &[u8],
+    minimum_height: u64,
+) -> eyre::Result<vera_permission::PolicyPrefixResponse> {
+    vera_permission::validate_policy_prefix(policy, prefix)?;
+    fetch(
+        transport,
+        "vera_getCurrentPolicyPrefixProof",
+        serde_json::json!([policy, format!("0x{}", hex::encode(prefix)), minimum_height]),
+        RECORD_RESPONSE_BYTES,
+    )
+    .await
+}
+
+pub(crate) async fn light_block(
+    transport: &dyn AcpTransport,
+    height: u64,
+) -> eyre::Result<LightBlock> {
+    fetch(
+        transport,
+        "vera_getLightBlock",
+        serde_json::json!([height]),
+        LIGHT_BLOCK_RESPONSE_BYTES,
+    )
+    .await
+}
+
+pub(crate) async fn permission_proof(
+    transport: &dyn AcpTransport,
+    policy: &str,
+    access: &vera_permission::AccessRequest,
+    minimum_height: u64,
+) -> eyre::Result<vera_permission::PermissionResponse> {
+    fetch(
+        transport,
         "vera_getCurrentPermissionProof",
         serde_json::json!([policy, access, minimum_height]),
         PERMISSION_RESPONSE_BYTES,
@@ -103,13 +133,27 @@ pub async fn get_current_permission_proof(
     .await
 }
 
-async fn request<T: DeserializeOwned>(
+fn http(client: &reqwest::Client, rpc_url: &str) -> HttpWsTransport {
+    HttpWsTransport::from_client(client.clone(), rpc_url)
+}
+
+async fn fetch<T: DeserializeOwned>(
+    transport: &dyn AcpTransport,
+    method: &'static str,
+    params: serde_json::Value,
+    maximum: usize,
+) -> eyre::Result<T> {
+    let result = transport.call(method, params, maximum).await?;
+    serde_json::from_value(result).wrap_err_with(|| format!("deserializing {method} result"))
+}
+
+pub(crate) async fn http_call(
     client: &reqwest::Client,
     rpc_url: &str,
     method: &str,
     params: serde_json::Value,
     maximum: usize,
-) -> eyre::Result<T> {
+) -> eyre::Result<serde_json::Value> {
     let mut response = client
         .post(rpc_url)
         .timeout(Duration::from_secs(10))
@@ -149,9 +193,8 @@ async fn request<T: DeserializeOwned>(
             .unwrap_or("unknown");
         return Err(eyre::eyre!("{method} RPC error ({code}): {message}"));
     }
-    let result = value
+    value
         .get_mut("result")
         .map(serde_json::Value::take)
-        .ok_or_else(|| eyre::eyre!("{method} RPC response has no result"))?;
-    serde_json::from_value(result).wrap_err_with(|| format!("deserializing {method} result"))
+        .ok_or_else(|| eyre::eyre!("{method} RPC response has no result"))
 }

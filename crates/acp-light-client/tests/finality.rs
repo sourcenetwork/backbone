@@ -1,7 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use acp_light_client::{
-    AcpCache, AcpLightClient, GossipHeader, LightBlock, ModuleId, ProofClient, RecordProof,
+    AcpCache, AcpLightClient, AcpTransport, FreshnessPolicy, GossipHeader, HeaderStream,
+    LightBlock, ModuleId, ProofClient, RecordProof,
 };
 use alloy_primitives::B256;
 use axum::{extract::State, routing::post, Json, Router};
@@ -287,6 +288,43 @@ fn fixture_records_with_operations(
     }
 }
 
+fn respond(f: &Fixture, method: &str, params: &serde_json::Value) -> serde_json::Value {
+    match method {
+        "vera_getLightBlock" => serde_json::to_value(&f.light).unwrap(),
+        "vera_getCurrentRecordProof" => {
+            let key = params[1].as_str().unwrap();
+            let key = hex::decode(key.trim_start_matches("0x")).unwrap();
+            let proof = if key == KEY {
+                &f.proof
+            } else {
+                f.points.get(&key).unwrap_or(&f.proof)
+            };
+            serde_json::to_value(vera_permission::RecordResponse {
+                revision: f.light.clone(),
+                record: proof.clone(),
+            })
+            .unwrap()
+        }
+        "vera_getCurrentPolicyPrefixProof" => {
+            let prefix = params[1].as_str().unwrap();
+            let prefix = hex::decode(prefix.trim_start_matches("0x")).unwrap();
+            serde_json::to_value(vera_permission::PolicyPrefixResponse {
+                revision: f.light.clone(),
+                proof: f.policy_prefixes[&prefix].clone(),
+            })
+            .unwrap()
+        }
+        "vera_getCurrentPermissionProof" => {
+            serde_json::to_value(vera_permission::PermissionResponse {
+                revision: f.light.clone(),
+                proof: f.permission.as_ref().unwrap().clone(),
+            })
+            .unwrap()
+        }
+        method => panic!("unexpected RPC: {method}"),
+    }
+}
+
 struct Server {
     url: String,
     fixture: Arc<RwLock<Fixture>>,
@@ -304,42 +342,8 @@ impl Server {
                      Json(request): Json<serde_json::Value>| async move {
                         let (result, delay) = {
                             let f = f.read();
-                            let result = match request["method"].as_str().unwrap() {
-                                "vera_getLightBlock" => serde_json::to_value(&f.light).unwrap(),
-                                "vera_getCurrentRecordProof" => {
-                                    let key = request["params"][1].as_str().unwrap();
-                                    let key = hex::decode(key.trim_start_matches("0x")).unwrap();
-                                    let proof = if key == KEY {
-                                        &f.proof
-                                    } else {
-                                        f.points.get(&key).unwrap_or(&f.proof)
-                                    };
-                                    serde_json::to_value(vera_permission::RecordResponse {
-                                        revision: f.light.clone(),
-                                        record: proof.clone(),
-                                    })
-                                    .unwrap()
-                                }
-                                "vera_getCurrentPolicyPrefixProof" => {
-                                    let prefix = request["params"][1].as_str().unwrap();
-                                    let prefix =
-                                        hex::decode(prefix.trim_start_matches("0x")).unwrap();
-                                    serde_json::to_value(vera_permission::PolicyPrefixResponse {
-                                        revision: f.light.clone(),
-                                        proof: f.policy_prefixes[&prefix].clone(),
-                                    })
-                                    .unwrap()
-                                }
-                                "vera_getCurrentPermissionProof" => {
-                                    serde_json::to_value(vera_permission::PermissionResponse {
-                                        revision: f.light.clone(),
-                                        proof: f.permission.as_ref().unwrap().clone(),
-                                    })
-                                    .unwrap()
-                                }
-                                method => panic!("unexpected RPC: {method}"),
-                            };
-                            (result, f.delay)
+                            let method = request["method"].as_str().unwrap();
+                            (respond(&f, method, &request["params"]), f.delay)
                         };
                         tokio::time::sleep(delay).await;
                         Json(serde_json::json!({"jsonrpc":"2.0", "id":1, "result":result}))
@@ -986,3 +990,105 @@ async fn current_protocol_revision_count_is_verified_and_bounded() {
 
 #[path = "support/policy_liveness.rs"]
 mod policy_liveness;
+
+/// Serves fixture responses and caller-supplied headers with no socket.
+struct FixtureTransport {
+    fixture: Arc<RwLock<Fixture>>,
+    headers: parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<GossipHeader>>>,
+}
+
+impl AcpTransport for FixtureTransport {
+    fn call(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+        max_bytes: usize,
+    ) -> futures::future::BoxFuture<'_, eyre::Result<serde_json::Value>> {
+        let result = respond(&self.fixture.read(), method, &params);
+        Box::pin(async move {
+            eyre::ensure!(
+                serde_json::to_vec(&result)?.len() <= max_bytes,
+                "{method} response exceeds byte limit"
+            );
+            Ok(result)
+        })
+    }
+
+    fn subscribe_headers(&self) -> futures::future::BoxFuture<'_, eyre::Result<HeaderStream>> {
+        let headers = self.headers.lock().take();
+        Box::pin(async move {
+            let headers = headers.ok_or_else(|| eyre::eyre!("headers already subscribed"))?;
+            Ok(futures::stream::unfold(headers, |mut headers| async move {
+                headers.recv().await.map(|header| (Ok(header), headers))
+            })
+            .boxed())
+        })
+    }
+}
+
+#[tokio::test]
+async fn injected_transport_is_verified_like_a_network_endpoint() {
+    let fixture = Arc::new(RwLock::new(fixture(42)));
+    let (light, key) = {
+        let fixture = fixture.read();
+        (fixture.light.clone(), fixture.key.clone())
+    };
+    let (send, receive) = tokio::sync::mpsc::unbounded_channel();
+    let transport = Arc::new(FixtureTransport {
+        fixture: fixture.clone(),
+        headers: parking_lot::Mutex::new(Some(receive)),
+    });
+    let client =
+        AcpLightClient::with_transport(transport, &key, 10, FreshnessPolicy::default()).unwrap();
+
+    let genuine = GossipHeader {
+        chain_id: 9001,
+        height: HEIGHT,
+        block_hash: light.block_hash.parse().unwrap(),
+        parent_hash: light.parent_hash.parse().unwrap(),
+        timestamp: light.timestamp,
+        state_root: light.state_root.parse().unwrap(),
+        module_state_root: light.module_state_root.parse().unwrap(),
+        tx_count: 0,
+        publisher_index: 0,
+        signature: vec![],
+    };
+    // A header whose root the certified block does not carry is never published.
+    send.send(GossipHeader {
+        module_state_root: B256::repeat_byte(99),
+        ..genuine.clone()
+    })
+    .unwrap();
+    assert!(client
+        .wait_for_height(HEIGHT, Duration::from_millis(300))
+        .await
+        .is_err());
+    assert!(client.header_chain().state().is_none());
+
+    send.send(genuine).unwrap();
+    let state = client
+        .wait_for_height(HEIGHT, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        state.module_state_root,
+        light.module_state_root.parse::<B256>().unwrap()
+    );
+    assert!(client
+        .proof_client()
+        .fetch_and_verify_record(ModuleId::Acp, KEY, HEIGHT)
+        .await
+        .unwrap()
+        .record
+        .value
+        .is_some());
+
+    // The transport cannot substitute its own trust: a differently signed chain is rejected.
+    *fixture.write() = self::fixture(99);
+    assert!(client.proof_client().verified_state(HEIGHT).await.is_err());
+    assert!(client
+        .proof_client()
+        .fetch_and_verify_record(ModuleId::Acp, KEY, HEIGHT)
+        .await
+        .is_err());
+}

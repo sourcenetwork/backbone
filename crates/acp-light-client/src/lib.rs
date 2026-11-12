@@ -9,6 +9,7 @@ mod freshness;
 pub mod header_sync;
 pub mod proof_client;
 pub mod rpc;
+pub mod transport;
 pub mod types;
 pub mod verify;
 
@@ -16,6 +17,7 @@ pub use cache::AcpCache;
 pub use freshness::FreshnessPolicy;
 pub use header_sync::{HeaderChain, SyncState};
 pub use proof_client::ProofClient;
+pub use transport::{AcpTransport, HeaderStream, HttpWsTransport};
 pub use types::{ConsensusPublicKey, GossipHeader, LightBlock, ModuleId, VerifiedRecord};
 pub use vera_modules::acp::types::RelationPair;
 pub use vera_permission::{
@@ -74,9 +76,26 @@ impl AcpLightClient {
         staleness_threshold: u64,
         freshness: FreshnessPolicy,
     ) -> eyre::Result<Self> {
-        let proof_client = ProofClient::new(rpc_url, trusted_key_hex)?;
-        let header_chain =
-            HeaderChain::connect_with_freshness(ws_url, proof_client.clone(), freshness).await?;
+        Self::with_transport(
+            Arc::new(HttpWsTransport::new(rpc_url, ws_url)?),
+            trusted_key_hex,
+            staleness_threshold,
+            freshness,
+        )
+    }
+
+    /// Create a client that reaches the node through `transport`.
+    ///
+    /// Verification does not depend on the transport: every response and header
+    /// is checked against `trusted_key_hex`. Must be called inside a Tokio runtime.
+    pub fn with_transport(
+        transport: Arc<dyn AcpTransport>,
+        trusted_key_hex: &str,
+        staleness_threshold: u64,
+        freshness: FreshnessPolicy,
+    ) -> eyre::Result<Self> {
+        let proof_client = ProofClient::with_transport(transport.clone(), trusted_key_hex)?;
+        let header_chain = HeaderChain::start(transport, proof_client.clone(), freshness)?;
         let cache = AcpCache::new(staleness_threshold);
 
         Ok(Self {
