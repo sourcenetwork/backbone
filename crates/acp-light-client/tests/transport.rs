@@ -226,7 +226,11 @@ async fn oversize_and_stalled_bodies_keep_their_text() {
                             >()))
                             .unwrap()
                     } else {
-                        Response::new(Body::from(vec![b' '; maximum + 1]))
+                        let chunks = std::iter::repeat_n(
+                            Ok::<_, Infallible>(Bytes::from_static(&[b' '; 8192])),
+                            maximum / 8192 + 1,
+                        );
+                        Response::new(Body::from_stream(futures::stream::iter(chunks)))
                     }
                 }),
             );
