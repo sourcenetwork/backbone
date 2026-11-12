@@ -12,7 +12,11 @@ use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tracing::{debug, warn};
 
 use crate::{
-    freshness::ObservedState, proof_client::ProofClient, types::GossipHeader, FreshnessPolicy,
+    freshness::ObservedState,
+    proof_client::ProofClient,
+    transport::{AcpTransport, HeaderStream, HttpWsTransport},
+    types::GossipHeader,
+    FreshnessPolicy,
 };
 
 /// Maximum frame and assembled-message bytes accepted from the header stream.
@@ -52,6 +56,19 @@ impl HeaderChain {
         proof_client: ProofClient,
         freshness: FreshnessPolicy,
     ) -> eyre::Result<Self> {
+        Self::start(
+            Arc::new(HttpWsTransport::headers_only(ws_url)),
+            proof_client,
+            freshness,
+        )
+    }
+
+    /// Follow the headers `transport` delivers, resubscribing when its stream ends.
+    pub fn start(
+        transport: Arc<dyn AcpTransport>,
+        proof_client: ProofClient,
+        freshness: FreshnessPolicy,
+    ) -> eyre::Result<Self> {
         eyre::ensure!(
             !freshness.max_age.is_zero(),
             "maximum revision age must be positive"
@@ -61,12 +78,11 @@ impl HeaderChain {
 
         let state_clone = state.clone();
         let notify_clone = notify.clone();
-        let ws_url = ws_url.to_string();
 
         let handle = tokio::spawn(async move {
             loop {
                 if let Err(e) = run_header_loop(
-                    &ws_url,
+                    transport.as_ref(),
                     &proof_client,
                     &state_clone,
                     &notify_clone,
@@ -186,12 +202,39 @@ impl Drop for HeaderChain {
 }
 
 async fn run_header_loop(
-    ws_url: &str,
+    transport: &dyn AcpTransport,
     proof_client: &ProofClient,
     state: &RwLock<Option<ObservedState>>,
     notify: &tokio::sync::Notify,
     freshness: FreshnessPolicy,
 ) -> eyre::Result<()> {
+    let mut headers = transport.subscribe_headers().await?;
+    while let Some(header) = headers.next().await {
+        let header = header?;
+        if state
+            .read()
+            .as_ref()
+            .is_some_and(|prev| header.height <= prev.revision.height)
+        {
+            continue;
+        }
+        match authenticate_header(proof_client, &header)
+            .await
+            .and_then(|verified| observe_revision(state, notify, freshness, verified))
+        {
+            Ok(verified) => {
+                debug!(height = verified.height, "verified finalized revision");
+            }
+            Err(error) => {
+                warn!(height = header.height, %error, "rejecting unverified header")
+            }
+        }
+    }
+    Err(eyre::eyre!("header stream ended"))
+}
+
+/// Subscribe over a WebSocket and yield each `vera_header` notification.
+pub(crate) async fn websocket_headers(ws_url: &str) -> eyre::Result<HeaderStream> {
     let config = WebSocketConfig::default()
         .max_message_size(Some(HEADER_MESSAGE_BYTES))
         .max_frame_size(Some(HEADER_MESSAGE_BYTES))
@@ -214,51 +257,45 @@ async fn run_header_loop(
         .await
         .wrap_err("sending vera_subscribeHeaders")?;
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    let mut subscription = None;
-    loop {
-        let msg = if subscription.is_none() {
-            tokio::time::timeout_at(deadline, ws.next())
-                .await
-                .wrap_err("header subscription acknowledgement timeout")?
-        } else {
-            ws.next().await
-        };
-        let msg = match msg {
-            Some(Ok(msg)) => msg,
-            Some(Err(e)) => return Err(eyre::eyre!("websocket error: {e}")),
-            None => return Err(eyre::eyre!("websocket closed")),
-        };
-
-        if let Message::Text(ref text) = msg {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(text.as_ref()) {
-                let Some(subscription_id) = subscription.as_ref() else {
-                    subscription = Some(subscription_id(&json)?);
-                    continue;
-                };
-                if let Some(header) = extract_header(&json, subscription_id) {
-                    if state
-                        .read()
-                        .as_ref()
-                        .is_some_and(|prev| header.height <= prev.revision.height)
-                    {
-                        continue;
-                    }
-                    match authenticate_header(proof_client, &header)
-                        .await
-                        .and_then(|verified| observe_revision(state, notify, freshness, verified))
-                    {
-                        Ok(verified) => {
-                            debug!(height = verified.height, "verified finalized revision");
-                        }
-                        Err(error) => {
-                            warn!(height = header.height, %error, "rejecting unverified header")
-                        }
+    let acknowledgement = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(text.as_ref()) {
+                        return subscription_id(&json);
                     }
                 }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(eyre::eyre!("websocket error: {e}")),
+                None => return Err(eyre::eyre!("websocket closed")),
             }
         }
-    }
+    })
+    .await
+    .wrap_err("header subscription acknowledgement timeout")??;
+
+    Ok(
+        futures::stream::unfold((ws, acknowledgement), |(mut ws, subscription)| async move {
+            loop {
+                let header = match ws.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        serde_json::from_str::<serde_json::Value>(text.as_ref())
+                            .ok()
+                            .and_then(|json| extract_header(&json, &subscription))
+                    }
+                    Some(Ok(_)) => None,
+                    Some(Err(e)) => {
+                        return Some((Err(eyre::eyre!("websocket error: {e}")), (ws, subscription)))
+                    }
+                    None => return None,
+                };
+                if let Some(header) = header {
+                    return Some((Ok(header), (ws, subscription)));
+                }
+            }
+        })
+        .boxed(),
+    )
 }
 
 fn observe_revision(
