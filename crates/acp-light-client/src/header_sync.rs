@@ -4,7 +4,6 @@
 //! latest finalized revision after checking its certificate against a configured key.
 
 use alloy_primitives::B256;
-use eyre::WrapErr;
 use futures::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -14,7 +13,7 @@ use tracing::{debug, warn};
 use crate::{
     freshness::ObservedState,
     proof_client::ProofClient,
-    transport::{AcpTransport, HeaderStream, HttpWsTransport},
+    transport::{AcpTransport, HeaderStream, HttpWsTransport, TransportError},
     types::GossipHeader,
     FreshnessPolicy,
 };
@@ -234,7 +233,7 @@ async fn run_header_loop(
 }
 
 /// Subscribe over a WebSocket and yield each `vera_header` notification.
-pub(crate) async fn websocket_headers(ws_url: &str) -> eyre::Result<HeaderStream> {
+pub(crate) async fn websocket_headers(ws_url: &str) -> Result<HeaderStream, TransportError> {
     let config = WebSocketConfig::default()
         .max_message_size(Some(HEADER_MESSAGE_BYTES))
         .max_frame_size(Some(HEADER_MESSAGE_BYTES))
@@ -244,8 +243,8 @@ pub(crate) async fn websocket_headers(ws_url: &str) -> eyre::Result<HeaderStream
         tokio_tungstenite::connect_async_with_config(ws_url, Some(config), false),
     )
     .await
-    .wrap_err("header WebSocket connection timeout")?
-    .wrap_err("connecting to hub.rs WebSocket")?;
+    .map_err(|elapsed| TransportError::context("header WebSocket connection timeout", elapsed))?
+    .map_err(|error| TransportError::context("connecting to hub.rs WebSocket", error))?;
 
     let subscribe_msg = serde_json::json!({
         "jsonrpc": "2.0",
@@ -255,7 +254,7 @@ pub(crate) async fn websocket_headers(ws_url: &str) -> eyre::Result<HeaderStream
     });
     ws.send(Message::Text(subscribe_msg.to_string().into()))
         .await
-        .wrap_err("sending vera_subscribeHeaders")?;
+        .map_err(|error| TransportError::context("sending vera_subscribeHeaders", error))?;
 
     let acknowledgement = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
@@ -266,13 +265,15 @@ pub(crate) async fn websocket_headers(ws_url: &str) -> eyre::Result<HeaderStream
                     }
                 }
                 Some(Ok(_)) => {}
-                Some(Err(e)) => return Err(eyre::eyre!("websocket error: {e}")),
-                None => return Err(eyre::eyre!("websocket closed")),
+                Some(Err(e)) => return Err(websocket_error(e)),
+                None => return Err(TransportError::other("websocket closed")),
             }
         }
     })
     .await
-    .wrap_err("header subscription acknowledgement timeout")??;
+    .map_err(|elapsed| {
+        TransportError::context("header subscription acknowledgement timeout", elapsed)
+    })??;
 
     Ok(
         futures::stream::unfold((ws, acknowledgement), |(mut ws, subscription)| async move {
@@ -284,9 +285,7 @@ pub(crate) async fn websocket_headers(ws_url: &str) -> eyre::Result<HeaderStream
                             .and_then(|json| extract_header(&json, &subscription))
                     }
                     Some(Ok(_)) => None,
-                    Some(Err(e)) => {
-                        return Some((Err(eyre::eyre!("websocket error: {e}")), (ws, subscription)))
-                    }
+                    Some(Err(e)) => return Some((Err(websocket_error(e)), (ws, subscription))),
                     None => return None,
                 };
                 if let Some(header) = header {
@@ -296,6 +295,10 @@ pub(crate) async fn websocket_headers(ws_url: &str) -> eyre::Result<HeaderStream
         })
         .boxed(),
     )
+}
+
+fn websocket_error(error: tokio_tungstenite::tungstenite::Error) -> TransportError {
+    TransportError::other(format!("websocket error: {error}"))
 }
 
 fn observe_revision(
@@ -326,21 +329,21 @@ fn observe_revision(
     Ok(current)
 }
 
-fn subscription_id(msg: &serde_json::Value) -> eyre::Result<serde_json::Value> {
-    eyre::ensure!(
-        msg["jsonrpc"] == "2.0" && msg["id"] == 1,
-        "invalid header subscription acknowledgement"
-    );
-    eyre::ensure!(
-        msg.get("error").is_none(),
-        "header subscription rejected: {}",
-        msg["error"]
-    );
+fn subscription_id(msg: &serde_json::Value) -> Result<serde_json::Value, TransportError> {
+    if msg["jsonrpc"] != "2.0" || msg["id"] != 1 {
+        return Err(TransportError::other(
+            "invalid header subscription acknowledgement",
+        ));
+    }
+    if let Some(error) = msg.get("error") {
+        return Err(TransportError::other(format!(
+            "header subscription rejected: {error}"
+        )));
+    }
     let id = &msg["result"];
-    eyre::ensure!(
-        id.is_string() || id.as_u64().is_some(),
-        "invalid header subscription ID"
-    );
+    if !id.is_string() && id.as_u64().is_none() {
+        return Err(TransportError::other("invalid header subscription ID"));
+    }
     Ok(id.clone())
 }
 
