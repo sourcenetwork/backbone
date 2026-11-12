@@ -9,23 +9,91 @@ use futures::{future::BoxFuture, stream::BoxStream, FutureExt as _};
 
 use crate::types::GossipHeader;
 
+/// Why a transport could not deliver a response or a header.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum TransportError {
+    /// The node answered `method` with a JSON-RPC error.
+    #[error("{method} RPC error ({code}): {message}")]
+    Rpc {
+        method: &'static str,
+        code: i64,
+        message: String,
+    },
+
+    /// The response to `method` is larger than the caller allows.
+    #[error("{method} response exceeds byte limit")]
+    ResponseTooLarge { method: &'static str },
+
+    /// Any other failure, reported in the words of its cause.
+    #[error(transparent)]
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl TransportError {
+    /// A failure described by a message or by another error.
+    pub fn other(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self::Other(error.into())
+    }
+
+    pub(crate) fn context<E>(message: impl Into<String>, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::other(Context {
+            message: message.into(),
+            source,
+        })
+    }
+
+    /// Reports an HTTP or JSON failure as that error itself, with any message
+    /// as context, because callers downcast reports to those types.
+    pub(crate) fn into_report(self) -> eyre::Report {
+        let Self::Other(source) = self else {
+            return self.into();
+        };
+        let source = match source.downcast::<reqwest::Error>() {
+            Ok(error) => return eyre::Report::new(*error),
+            Err(source) => source,
+        };
+        let source = match source.downcast::<serde_json::Error>() {
+            Ok(error) => return eyre::Report::new(*error),
+            Err(source) => source,
+        };
+        match source.downcast::<Context<reqwest::Error>>() {
+            Ok(context) => eyre::Report::new(context.source).wrap_err(context.message),
+            Err(source) => Self::Other(source).into(),
+        }
+    }
+}
+
+/// A cause with a message that says what was being attempted.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct Context<E> {
+    message: String,
+    source: E,
+}
+
 /// Finalized-header notifications. The stream ends when the connection does.
-pub type HeaderStream = BoxStream<'static, eyre::Result<GossipHeader>>;
+pub type HeaderStream = BoxStream<'static, Result<GossipHeader, TransportError>>;
 
 /// A JSON-RPC channel to a Vera node.
 pub trait AcpTransport: Send + Sync + 'static {
     /// Call `method` with positional `params` and return its `result` value.
     ///
-    /// Implementations reject a response larger than `max_bytes`.
+    /// A JSON-RPC error from the node is [`TransportError::Rpc`]. Implementations
+    /// reject a response larger than `max_bytes` with
+    /// [`TransportError::ResponseTooLarge`].
     fn call(
         &self,
         method: &'static str,
         params: serde_json::Value,
         max_bytes: usize,
-    ) -> BoxFuture<'_, eyre::Result<serde_json::Value>>;
+    ) -> BoxFuture<'_, Result<serde_json::Value, TransportError>>;
 
     /// Subscribe to finalized headers (`vera_subscribeHeaders`).
-    fn subscribe_headers(&self) -> BoxFuture<'_, eyre::Result<HeaderStream>>;
+    fn subscribe_headers(&self) -> BoxFuture<'_, Result<HeaderStream, TransportError>>;
 }
 
 /// HTTP JSON-RPC for calls and a WebSocket for headers.
@@ -76,16 +144,16 @@ impl AcpTransport for HttpWsTransport {
         method: &'static str,
         params: serde_json::Value,
         max_bytes: usize,
-    ) -> BoxFuture<'_, eyre::Result<serde_json::Value>> {
+    ) -> BoxFuture<'_, Result<serde_json::Value, TransportError>> {
         crate::rpc::http_call(&self.client, &self.rpc_url, method, params, max_bytes).boxed()
     }
 
-    fn subscribe_headers(&self) -> BoxFuture<'_, eyre::Result<HeaderStream>> {
+    fn subscribe_headers(&self) -> BoxFuture<'_, Result<HeaderStream, TransportError>> {
         async move {
             let ws_url = self
                 .ws_url
                 .as_deref()
-                .ok_or_else(|| eyre::eyre!("transport has no header endpoint"))?;
+                .ok_or_else(|| TransportError::other("transport has no header endpoint"))?;
             crate::header_sync::websocket_headers(ws_url).await
         }
         .boxed()

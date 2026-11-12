@@ -5,7 +5,7 @@ use std::time::Duration;
 use eyre::WrapErr;
 use serde::de::DeserializeOwned;
 
-use crate::transport::{AcpTransport, HttpWsTransport};
+use crate::transport::{AcpTransport, HttpWsTransport, TransportError};
 use crate::types::{LightBlock, ModuleId};
 
 /// Maximum light-block response, including hex-encoded block and consensus material.
@@ -143,58 +143,67 @@ async fn fetch<T: DeserializeOwned>(
     params: serde_json::Value,
     maximum: usize,
 ) -> eyre::Result<T> {
-    let result = transport.call(method, params, maximum).await?;
+    let result = transport
+        .call(method, params, maximum)
+        .await
+        .map_err(TransportError::into_report)?;
     serde_json::from_value(result).wrap_err_with(|| format!("deserializing {method} result"))
 }
 
 pub(crate) async fn http_call(
     client: &reqwest::Client,
     rpc_url: &str,
-    method: &str,
+    method: &'static str,
     params: serde_json::Value,
     maximum: usize,
-) -> eyre::Result<serde_json::Value> {
+) -> Result<serde_json::Value, TransportError> {
     let mut response = client
         .post(rpc_url)
         .timeout(Duration::from_secs(10))
         .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
         .send()
         .await
-        .wrap_err_with(|| format!("{method} request"))?
-        .error_for_status()?;
-    eyre::ensure!(
-        response
-            .content_length()
-            .is_none_or(|n| n <= maximum as u64),
-        "{method} response exceeds byte limit"
-    );
+        .map_err(|error| TransportError::context(format!("{method} request"), error))?
+        .error_for_status()
+        .map_err(TransportError::other)?;
+    if response
+        .content_length()
+        .is_some_and(|n| n > maximum as u64)
+    {
+        return Err(TransportError::ResponseTooLarge { method });
+    }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        eyre::ensure!(
-            chunk.len() <= maximum - bytes.len(),
-            "{method} response exceeds byte limit"
-        );
+    while let Some(chunk) = response.chunk().await.map_err(TransportError::other)? {
+        if chunk.len() > maximum - bytes.len() {
+            return Err(TransportError::ResponseTooLarge { method });
+        }
         bytes.extend_from_slice(&chunk);
     }
-    let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
-    eyre::ensure!(
-        value["id"] == 1 && value["jsonrpc"] == "2.0",
-        "{method} RPC response metadata mismatch"
-    );
-    eyre::ensure!(
-        !(value.get("result").is_some() && value.get("error").is_some()),
-        "{method} RPC response has both result and error"
-    );
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(TransportError::other)?;
+    if value["id"] != 1 || value["jsonrpc"] != "2.0" {
+        return Err(TransportError::other(format!(
+            "{method} RPC response metadata mismatch"
+        )));
+    }
+    if value.get("result").is_some() && value.get("error").is_some() {
+        return Err(TransportError::other(format!(
+            "{method} RPC response has both result and error"
+        )));
+    }
     if let Some(error) = value.get("error") {
-        let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-        let message = error
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("unknown");
-        return Err(eyre::eyre!("{method} RPC error ({code}): {message}"));
+        return Err(TransportError::Rpc {
+            method,
+            code: error.get("code").and_then(|c| c.as_i64()).unwrap_or(0),
+            message: error
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+        });
     }
     value
         .get_mut("result")
         .map(serde_json::Value::take)
-        .ok_or_else(|| eyre::eyre!("{method} RPC response has no result"))
+        .ok_or_else(|| TransportError::other(format!("{method} RPC response has no result")))
 }

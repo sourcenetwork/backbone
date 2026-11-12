@@ -17,7 +17,7 @@ pub use cache::AcpCache;
 pub use freshness::FreshnessPolicy;
 pub use header_sync::{HeaderChain, SyncState};
 pub use proof_client::ProofClient;
-pub use transport::{AcpTransport, HeaderStream, HttpWsTransport};
+pub use transport::{AcpTransport, HeaderStream, HttpWsTransport, TransportError};
 pub use types::{ConsensusPublicKey, GossipHeader, LightBlock, ModuleId, VerifiedRecord};
 pub use vera_modules::acp::types::RelationPair;
 pub use vera_permission::{

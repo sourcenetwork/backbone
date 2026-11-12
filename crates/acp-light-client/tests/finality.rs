@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use acp_light_client::{
     AcpCache, AcpLightClient, AcpTransport, FreshnessPolicy, GossipHeader, HeaderStream,
-    LightBlock, ModuleId, ProofClient, RecordProof,
+    LightBlock, ModuleId, ProofClient, RecordProof, TransportError,
 };
 use alloy_primitives::B256;
 use axum::{extract::State, routing::post, Json, Router};
@@ -988,13 +988,43 @@ async fn current_protocol_revision_count_is_verified_and_bounded() {
     }
 }
 
+#[tokio::test]
+async fn an_unreachable_node_is_reported_with_the_method_and_the_http_error() {
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let client = ProofClient::new(&url, &fixture(42).key).unwrap();
+
+    let error = client.verified_state(HEIGHT).await.unwrap_err();
+    assert_eq!(error.to_string(), "fetching light block");
+    let cause = error.downcast_ref::<reqwest::Error>().unwrap();
+    assert!(cause.is_connect(), "{error:?}");
+    assert!(
+        format!("{error:#}").starts_with(&format!(
+            "fetching light block: vera_getLightBlock request: {cause}: "
+        )),
+        "{error:#}"
+    );
+
+    let error = client
+        .fetch_and_verify_record(ModuleId::Acp, KEY, HEIGHT)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "vera_getCurrentRecordProof request");
+    assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_connect());
+}
+
 #[path = "support/policy_liveness.rs"]
 mod policy_liveness;
+
+/// The error a transport returns for a call to the named method.
+type Failure = fn(&'static str) -> TransportError;
 
 /// Serves fixture responses and caller-supplied headers with no socket.
 struct FixtureTransport {
     fixture: Arc<RwLock<Fixture>>,
     headers: parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<GossipHeader>>>,
+    failure: parking_lot::Mutex<Option<Failure>>,
 }
 
 impl AcpTransport for FixtureTransport {
@@ -1003,21 +1033,29 @@ impl AcpTransport for FixtureTransport {
         method: &'static str,
         params: serde_json::Value,
         max_bytes: usize,
-    ) -> futures::future::BoxFuture<'_, eyre::Result<serde_json::Value>> {
+    ) -> futures::future::BoxFuture<'_, Result<serde_json::Value, TransportError>> {
+        if let Some(failure) = *self.failure.lock() {
+            return Box::pin(async move { Err(failure(method)) });
+        }
         let result = respond(&self.fixture.read(), method, &params);
         Box::pin(async move {
-            eyre::ensure!(
-                serde_json::to_vec(&result)?.len() <= max_bytes,
-                "{method} response exceeds byte limit"
-            );
+            let size = serde_json::to_vec(&result)
+                .map_err(TransportError::other)?
+                .len();
+            if size > max_bytes {
+                return Err(TransportError::ResponseTooLarge { method });
+            }
             Ok(result)
         })
     }
 
-    fn subscribe_headers(&self) -> futures::future::BoxFuture<'_, eyre::Result<HeaderStream>> {
+    fn subscribe_headers(
+        &self,
+    ) -> futures::future::BoxFuture<'_, Result<HeaderStream, TransportError>> {
         let headers = self.headers.lock().take();
         Box::pin(async move {
-            let headers = headers.ok_or_else(|| eyre::eyre!("headers already subscribed"))?;
+            let headers =
+                headers.ok_or_else(|| TransportError::other("headers already subscribed"))?;
             Ok(futures::stream::unfold(headers, |mut headers| async move {
                 headers.recv().await.map(|header| (Ok(header), headers))
             })
@@ -1037,6 +1075,7 @@ async fn injected_transport_is_verified_like_a_network_endpoint() {
     let transport = Arc::new(FixtureTransport {
         fixture: fixture.clone(),
         headers: parking_lot::Mutex::new(Some(receive)),
+        failure: parking_lot::Mutex::new(None),
     });
     let client =
         AcpLightClient::with_transport(transport, &key, 10, FreshnessPolicy::default()).unwrap();
@@ -1091,4 +1130,89 @@ async fn injected_transport_is_verified_like_a_network_endpoint() {
         .fetch_and_verify_record(ModuleId::Acp, KEY, HEIGHT)
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn injected_transport_errors_reach_the_caller_with_their_text_and_type() {
+    let fixture = fixture(42);
+    let (light, key) = (fixture.light.clone(), fixture.key.clone());
+    let (send, receive) = tokio::sync::mpsc::unbounded_channel();
+    let transport = Arc::new(FixtureTransport {
+        fixture: Arc::new(RwLock::new(fixture)),
+        headers: parking_lot::Mutex::new(Some(receive)),
+        failure: parking_lot::Mutex::new(None),
+    });
+    let client =
+        AcpLightClient::with_transport(transport.clone(), &key, 10, FreshnessPolicy::default())
+            .unwrap();
+    send.send(GossipHeader {
+        chain_id: 9001,
+        height: HEIGHT,
+        block_hash: light.block_hash.parse().unwrap(),
+        parent_hash: light.parent_hash.parse().unwrap(),
+        timestamp: light.timestamp,
+        state_root: light.state_root.parse().unwrap(),
+        module_state_root: light.module_state_root.parse().unwrap(),
+        tx_count: 0,
+        publisher_index: 0,
+        signature: vec![],
+    })
+    .unwrap();
+    client
+        .wait_for_height(HEIGHT, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let failures: [(Failure, &str); 4] = [
+        (
+            |method| TransportError::Rpc {
+                method,
+                code: -32002,
+                message: "busy".to_string(),
+            },
+            "vera_getCurrentRecordProof RPC error (-32002): busy",
+        ),
+        (
+            |method| TransportError::ResponseTooLarge { method },
+            "vera_getCurrentRecordProof response exceeds byte limit",
+        ),
+        (
+            |method| TransportError::other(format!("{method}: node is not serving requests")),
+            "vera_getCurrentRecordProof: node is not serving requests",
+        ),
+        (
+            |_| TransportError::other(std::io::Error::other("node stopped")),
+            "node stopped",
+        ),
+    ];
+    for (failure, expected) in failures {
+        *transport.failure.lock() = Some(failure);
+        let error = client.read_policy("unread").await.unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(format!("{error:#}"), expected);
+    }
+
+    *transport.failure.lock() = Some(failures[0].0);
+    let error = client.read_policy("unread").await.unwrap_err();
+    assert!(matches!(
+        error.downcast_ref(),
+        Some(TransportError::Rpc {
+            method: "vera_getCurrentRecordProof",
+            code: -32002,
+            ..
+        })
+    ));
+    let error = client
+        .proof_client()
+        .verified_state(HEIGHT)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "fetching light block");
+    assert_eq!(
+        format!("{error:#}"),
+        "fetching light block: vera_getLightBlock RPC error (-32002): busy"
+    );
+
+    *transport.failure.lock() = None;
+    assert!(client.proof_client().verified_state(HEIGHT).await.is_ok());
 }
