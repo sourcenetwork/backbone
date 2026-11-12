@@ -988,6 +988,32 @@ async fn current_protocol_revision_count_is_verified_and_bounded() {
     }
 }
 
+#[tokio::test]
+async fn an_unreachable_node_is_reported_with_the_method_and_the_http_error() {
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let client = ProofClient::new(&url, &fixture(42).key).unwrap();
+
+    let error = client.verified_state(HEIGHT).await.unwrap_err();
+    assert_eq!(error.to_string(), "fetching light block");
+    let cause = error.downcast_ref::<reqwest::Error>().unwrap();
+    assert!(cause.is_connect(), "{error:?}");
+    assert!(
+        format!("{error:#}").starts_with(&format!(
+            "fetching light block: vera_getLightBlock request: {cause}: "
+        )),
+        "{error:#}"
+    );
+
+    let error = client
+        .fetch_and_verify_record(ModuleId::Acp, KEY, HEIGHT)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "vera_getCurrentRecordProof request");
+    assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_connect());
+}
+
 #[path = "support/policy_liveness.rs"]
 mod policy_liveness;
 
