@@ -54,17 +54,10 @@ verification before they can advance cached state.
 
 ## Native dependency set
 
-This workspace pins Vera to `d50ab9e5f94b81cccd1c70c36190dea7e7cd74c2`
-and its Commonware fork to `d0cef38586581911ddbeb3060ea6b0d7e33d2a98`.
-The selected Vera and Commonware
-revisions must match the node and proof-verifier deployment. The Defra and
-Orbis integration fixture revisions are recorded separately in `backbone.toml`.
-
-Cargo does not inherit dependency patches from a dependency's workspace. A
-consumer of this crate must carry this workspace's Commonware `[patch.crates-io]`
-entries in its own root manifest. Keep all entries on the same revision, retain
-the lockfile, and use `--frozen` for validation. Otherwise the released Commonware
-API can be selected alongside Vera's fork-dependent code.
-
-The Defra and Orbis fixture revisions in `backbone.toml` still await aligned consumer
-branches. This crate update alone does not qualify the full native stack.
+This workspace uses the published Vera 0.1.2 crates and the released Commonware
+2026.10.0 crates. Tests that need Vera's unpublished node crates pin the Vera
+0.1.2 release commit, `a9ce2e431d6f43786f94946dfc5c8a3405a9a8f6`; the root
+manifest's patch section resolves that revision's published crates to the
+crates.io packages, so each is built once. The selected Vera version must match
+the node and proof-verifier deployment. The Defra and Orbis integration fixture
+revisions are recorded separately in `backbone.toml`.
