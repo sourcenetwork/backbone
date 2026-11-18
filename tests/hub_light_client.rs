@@ -231,6 +231,52 @@ async fn hub_acp_light_client() {
         recheck.verified_at_height
     );
 
+    // Step 11. Evaluate permissions from the node's evidence
+    eprintln!("[hub-lc] Step 11: Verifying permissions from certified evidence...");
+    let access = |actor: &str, permission: &str| acp_light_client::AccessRequest {
+        actor: acp_light_client::Actor(actor.parse().expect("actor DID")),
+        operations: vec![acp_light_client::Operation {
+            object: acp_light_client::Object {
+                resource: "transcript".into(),
+                id: "test-transcripts".into(),
+            },
+            permission: permission.into(),
+        }],
+    };
+    for (actor, permission, expected) in [
+        ("did:key:zQ3shtest1234", "write", true),
+        ("did:key:zQ3shtest5678", "read", true),
+        ("did:key:zQ3shtest5678", "write", false),
+    ] {
+        let allowed = light_client
+            .verify_access(policy_id_str, &access(actor, permission))
+            .await
+            .expect("permission evidence should verify");
+        assert_eq!(allowed, expected, "{actor} {permission}");
+    }
+    eprintln!("[hub-lc] PASSED: Permissions evaluated from certified evidence");
+
+    // Step 12. Verify the reader grant's receipt against its revision's commitment
+    eprintln!("[hub-lc] Step 12: Verifying a committed receipt...");
+    let submission: serde_json::Value = serde_json::from_str(&mutate_output).expect("receipt JSON");
+    let submission = submission["transactionHash"]
+        .as_str()
+        .expect("transaction hash")
+        .parse()
+        .expect("transaction hash hex");
+    let verified = light_client
+        .proof_client()
+        .fetch_and_verify_receipt(submission)
+        .await
+        .expect("receipt evidence should verify")
+        .expect("node should hold the receipt");
+    assert!(verified.receipt.success());
+    assert!(verified.receipt.refusal.is_none());
+    eprintln!(
+        "[hub-lc] PASSED: Receipt verified at height {}",
+        verified.revision.height
+    );
+
     drop(hub_cluster);
     eprintln!("[hub-lc] === All steps passed ===");
 }

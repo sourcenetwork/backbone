@@ -443,6 +443,7 @@ async fn connect_current(server: &Server) -> (AcpLightClient, tokio::task::JoinH
             block_hash: light.block_hash.parse().unwrap(),
             parent_hash: light.parent_hash.parse().unwrap(),
             timestamp: light.timestamp,
+            term: 0,
             state_root: light.state_root.parse().unwrap(),
             module_state_root: light.module_state_root.parse().unwrap(),
             tx_count: 0,

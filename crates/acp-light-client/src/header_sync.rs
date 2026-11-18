@@ -27,6 +27,8 @@ pub struct SyncState {
     pub height: u64,
     /// Timestamp authenticated by the finalized revision certificate, in Unix seconds.
     pub timestamp: u64,
+    /// Term of the device that proposed the revision; it never decreases along the chain.
+    pub term: u64,
     pub module_state_root: B256,
     pub block_hash: B256,
 }
@@ -322,6 +324,10 @@ fn observe_revision(
             previous.check(freshness)?;
             return Ok(previous.revision.clone());
         }
+        eyre::ensure!(
+            vera_domain::term_extends(previous.revision.term, observed.revision.term),
+            "finalized revision term precedes an observed revision's term"
+        );
     }
     let current = observed.revision.clone();
     *state = Some(observed);
@@ -374,6 +380,10 @@ async fn authenticate_header(
         verified.module_state_root == header.module_state_root,
         "header root differs from verified block"
     );
+    eyre::ensure!(
+        verified.term == header.term,
+        "header term differs from verified block"
+    );
     Ok(verified)
 }
 
@@ -410,6 +420,7 @@ mod tests {
             block_hash: Default::default(),
             parent_hash: Default::default(),
             timestamp: 1,
+            term: 0,
             state_root: Default::default(),
             module_state_root: Default::default(),
             tx_count: 0,
@@ -442,6 +453,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            term: 0,
             module_state_root: B256::repeat_byte(1),
             block_hash: B256::repeat_byte(2),
         };
@@ -474,5 +486,45 @@ mod tests {
         assert!(chain.accept_response(second.clone()).is_err());
         assert!(chain.fresh_state().is_err());
         assert_eq!(chain.state().unwrap(), second);
+    }
+
+    #[tokio::test]
+    async fn a_later_revision_cannot_lower_the_term() {
+        let chain = HeaderChain {
+            state: Arc::new(RwLock::new(None)),
+            freshness: FreshnessPolicy::default(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            _handle: tokio::spawn(std::future::pending()),
+        };
+        let first = SyncState {
+            height: 10,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            term: 2,
+            module_state_root: B256::repeat_byte(1),
+            block_hash: B256::repeat_byte(2),
+        };
+        chain.accept_response(first.clone()).unwrap();
+        let deposed = SyncState {
+            height: 11,
+            term: 1,
+            block_hash: B256::repeat_byte(3),
+            ..first.clone()
+        };
+        let error = chain.accept_response(deposed).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "finalized revision term precedes an observed revision's term"
+        );
+        let successor = SyncState {
+            height: 12,
+            term: 3,
+            block_hash: B256::repeat_byte(4),
+            ..first
+        };
+        chain.accept_response(successor.clone()).unwrap();
+        assert_eq!(chain.fresh_state().unwrap(), successor);
     }
 }

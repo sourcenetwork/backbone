@@ -112,6 +112,17 @@ ordered operations. It also checks issuance metadata and revision-based expiry a
 fresh authenticated state. This proves authorization at issuance; callers still
 need to bind any payload or ticket use and enforce later revocation semantics.
 
+Headers and responses carry the term of the device that proposed the revision.
+A header is published only when its term matches the certified block, and a later
+revision whose term is below an observed revision's term is refused.
+
+`ProofClient::fetch_and_verify_receipt` checks a submission's receipt against the
+revision's `vera/receipts/v2` commitment under configured trust. A refused native
+request carries its module and kind, which the commitment binds; the refusal message
+is the serving node's text. Receipt responses are limited to the light-block budget
+plus 8 MiB. An absent response does not show that a submission was refused or never
+accepted.
+
 `HeaderChain::state` is diagnostic and may return stale state. Use `fresh_state` for
 current state. `ProofClient` methods for explicitly requested historical revisions
 verify authenticity without applying current-read freshness bounds.

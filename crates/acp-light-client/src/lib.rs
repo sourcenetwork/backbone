@@ -18,13 +18,16 @@ pub use freshness::FreshnessPolicy;
 pub use header_sync::{HeaderChain, SyncState};
 pub use proof_client::ProofClient;
 pub use transport::{AcpTransport, HeaderStream, HttpWsTransport, TransportError};
-pub use types::{ConsensusPublicKey, GossipHeader, LightBlock, ModuleId, VerifiedRecord};
+pub use types::{
+    ConsensusPublicKey, ExecutionReceipt, GossipHeader, LightBlock, ModuleId, ReceiptResponse,
+    ReceiptResponseError, Refusal, RefusalKind, RefusingModule, VerifiedReceipt, VerifiedRecord,
+};
 pub use vera_modules::acp::types::RelationPair;
 pub use vera_permission::{
     AccessDecision, AccessRequest, Actor, DecisionRequest, Object, Operation, PermissionProof,
     RecordProof, RecordResponse, Timestamp, PERMISSION_LIMITS,
 };
-pub use verify::{verify_light_block, LightBlockError};
+pub use verify::{verify_finalized_block, verify_light_block, LightBlockError};
 
 use std::{sync::Arc, time::Duration};
 

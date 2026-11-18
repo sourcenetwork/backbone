@@ -2,13 +2,14 @@
 
 use std::sync::Arc;
 
+use alloy_primitives::B256;
 use commonware_codec::DecodeExt as _;
 use eyre::{ensure, WrapErr};
 
 use crate::header_sync::SyncState;
 use crate::rpc;
 use crate::transport::{AcpTransport, HttpWsTransport};
-use crate::types::{ConsensusPublicKey, LightBlock, ModuleId, VerifiedRecord};
+use crate::types::{ConsensusPublicKey, LightBlock, ModuleId, VerifiedReceipt, VerifiedRecord};
 use crate::verify;
 
 /// JSON-RPC client with an independently configured consensus trust anchor.
@@ -54,11 +55,12 @@ impl ProofClient {
             light.height == height,
             "light block height differs from request"
         );
-        let (_, module_state_root) = verify::verify_light_block(&light, &self.trusted_key)?;
+        let block = verify::verify_finalized_block(&light, &self.trusted_key)?;
         Ok(SyncState {
             height,
-            timestamp: light.timestamp,
-            module_state_root,
+            timestamp: block.timestamp,
+            term: block.term,
+            module_state_root: block.module_state_root,
             block_hash: light.block_hash.parse()?,
         })
     }
@@ -144,6 +146,26 @@ impl ProofClient {
         Ok((revision, record))
     }
 
+    /// Fetch the committed receipt of an exact submission and verify it against
+    /// the revision's receipt commitment and configured trust.
+    ///
+    /// `None` means the node returned no evidence; it does not show that the
+    /// submission was refused or never accepted. A refusal's module and kind are
+    /// committed; its message is the serving node's text.
+    pub async fn fetch_and_verify_receipt(
+        &self,
+        submission: B256,
+    ) -> eyre::Result<Option<VerifiedReceipt>> {
+        let Some(response) = rpc::receipt_proof(self.transport.as_ref(), submission).await? else {
+            return Ok(None);
+        };
+        let receipt = response.verify(submission, &self.trusted_key)?.clone();
+        Ok(Some(VerifiedReceipt {
+            receipt,
+            revision: revision_state(&response.revision)?,
+        }))
+    }
+
     /// Fetch and verify a native record and its finalized revision in one response.
     pub async fn fetch_and_verify_record(
         &self,
@@ -168,11 +190,14 @@ impl ProofClient {
     }
 }
 
+/// The state of a revision whose finality the caller has already verified.
 pub(crate) fn revision_state(light: &LightBlock) -> eyre::Result<SyncState> {
+    let block = verify::decode_block(light)?;
     Ok(SyncState {
-        height: light.height,
-        timestamp: light.timestamp,
-        module_state_root: light.module_state_root.parse()?,
+        height: block.height,
+        timestamp: block.timestamp,
+        term: block.term,
+        module_state_root: block.module_state_root,
         block_hash: light.block_hash.parse()?,
     })
 }
