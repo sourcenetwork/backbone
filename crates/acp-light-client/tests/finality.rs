@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use acp_light_client::{
-    AcpCache, AcpLightClient, AcpTransport, FreshnessPolicy, GossipHeader, HeaderStream,
-    LightBlock, ModuleId, ProofClient, RecordProof, TransportError,
+    AcpCache, AcpLightClient, AcpTransport, ConsensusPublicKey, FreshnessPolicy, GossipHeader,
+    HeaderStream, LightBlock, ModuleId, ProofClient, ReceiptResponse, RecordProof, TransportError,
 };
 use alloy_primitives::B256;
 use axum::{extract::State, routing::post, Json, Router};
@@ -40,6 +40,7 @@ struct Fixture {
     points: std::collections::BTreeMap<Vec<u8>, RecordProof>,
     policy_prefixes: std::collections::BTreeMap<Vec<u8>, vera_permission::PolicyPrefixProof>,
     permission: Option<vera_permission::PermissionProof>,
+    receipts: Option<ReceiptResponse>,
     delay: Duration,
 }
 
@@ -233,6 +234,45 @@ fn fixture_records_with_operations(
     .join()
     .unwrap();
 
+    let block = Block {
+        context: ConsensusContext {
+            round: Round::new(Epoch::zero(), View::new(height)),
+            leader: ed25519::PrivateKey::from_seed(seed).public_key(),
+            parent: (View::new(height - 1), ConsensusDigest::from([3; 32])),
+        },
+        parent: BlockId(B256::repeat_byte(3)),
+        height,
+        timestamp,
+        term: 0,
+        prevrandao: B256::ZERO,
+        randomness: None,
+        state_root: StateRoot(B256::repeat_byte(1)),
+        module_state_root: root,
+        txs: (0..operations)
+            .map(|index| vera_domain::Tx::new(index.to_be_bytes().to_vec().into()))
+            .collect(),
+        payload: None,
+        db_targets: DbTargets::default(),
+        native_targets: Some(Default::default()),
+        receipt_commitment: Some(B256::ZERO),
+    };
+    let (light, key) = certify(seed, &block);
+    Fixture {
+        light,
+        proof,
+        key,
+        root,
+        points,
+        policy_prefixes,
+        permission: None,
+        receipts: None,
+        delay: Duration::ZERO,
+    }
+}
+
+/// Finalize `block` under the single-validator deployment of `seed`, returning
+/// its light block and the deployment's consensus key.
+fn certify(seed: u64, block: &Block) -> (LightBlock, String) {
     let identity = ed25519::PrivateKey::from_seed(seed).public_key();
     let players = Set::from_iter_dedup([identity.clone()]);
     let (output, shares) =
@@ -246,46 +286,18 @@ fn fixture_records_with_operations(
     )
     .unwrap();
     let material = EpochMaterial::new(players, output.public().clone());
-    let round = Round::new(Epoch::zero(), View::new(height));
-    let block = Block {
-        context: ConsensusContext {
-            round,
-            leader: identity,
-            parent: (View::new(height - 1), ConsensusDigest::from([3; 32])),
-        },
-        parent: BlockId(B256::repeat_byte(3)),
-        height,
-        timestamp,
-        prevrandao: B256::ZERO,
-        randomness: None,
-        state_root: StateRoot(B256::repeat_byte(1)),
-        module_state_root: root,
-        txs: (0..operations)
-            .map(|index| vera_domain::Tx::new(index.to_be_bytes().to_vec().into()))
-            .collect(),
-        payload: None,
-        db_targets: DbTargets::default(),
-        native_targets: Some(Default::default()),
-        receipt_commitment: Some(B256::ZERO),
-    };
     let vote = Finalize::sign(
         &signer,
-        Proposal::new(round, View::new(height - 1), block.digest()),
+        Proposal::new(block.context.round, block.context.parent.0, block.digest()),
     )
     .unwrap();
     let votes = [vote];
     let finalization =
         Finalization::from_finalizes(&signer, non_empty![@votes.iter()], &Sequential).unwrap();
-    Fixture {
-        light: LightBlock::from_parts(&block, &finalization.encode(), &material.encode()),
-        proof,
+    (
+        LightBlock::from_parts(block, &finalization.encode(), &material.encode()),
         key,
-        root,
-        points,
-        policy_prefixes,
-        permission: None,
-        delay: Duration::ZERO,
-    }
+    )
 }
 
 fn respond(f: &Fixture, method: &str, params: &serde_json::Value) -> serde_json::Value {
@@ -321,6 +333,7 @@ fn respond(f: &Fixture, method: &str, params: &serde_json::Value) -> serde_json:
             })
             .unwrap()
         }
+        "vera_getReceiptProof" => serde_json::to_value(&f.receipts).unwrap(),
         method => panic!("unexpected RPC: {method}"),
     }
 }
@@ -416,6 +429,7 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
         block_hash: light.block_hash.parse().unwrap(),
         parent_hash: light.parent_hash.parse().unwrap(),
         timestamp: light.timestamp,
+        term: 0,
         state_root: light.state_root.parse().unwrap(),
         module_state_root: B256::repeat_byte(99),
         tx_count: 0,
@@ -486,6 +500,7 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
             block_hash: bad_time.block_hash.parse().unwrap(),
             // An unauthenticated notification cannot repair a signed stale timestamp.
             timestamp: light.timestamp,
+            term: 0,
             ..header.clone()
         })
         .await
@@ -557,6 +572,7 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
         height: HEIGHT + 1,
         block_hash: renewed.block_hash.parse().unwrap(),
         timestamp,
+        term: 0,
         module_state_root: renewed.module_state_root.parse().unwrap(),
         ..header
     })
@@ -745,6 +761,7 @@ async fn verify_permission_records(owner: &str) {
             block_hash: light.block_hash.parse().unwrap(),
             parent_hash: light.parent_hash.parse().unwrap(),
             timestamp: light.timestamp,
+            term: 0,
             state_root: light.state_root.parse().unwrap(),
             module_state_root: light.module_state_root.parse().unwrap(),
             tx_count: 0,
@@ -819,6 +836,7 @@ async fn oversized_header_frames_and_fragmented_messages_close_without_publishin
             block_hash: data.light.block_hash.parse().unwrap(),
             parent_hash: data.light.parent_hash.parse().unwrap(),
             timestamp: data.light.timestamp,
+            term: 0,
             state_root: data.light.state_root.parse().unwrap(),
             module_state_root: data.root,
             tx_count: 0,
@@ -1017,6 +1035,9 @@ async fn an_unreachable_node_is_reported_with_the_method_and_the_http_error() {
 #[path = "support/policy_liveness.rs"]
 mod policy_liveness;
 
+#[path = "support/receipts_and_terms.rs"]
+mod receipts_and_terms;
+
 /// The error a transport returns for a call to the named method.
 type Failure = fn(&'static str) -> TransportError;
 
@@ -1086,6 +1107,7 @@ async fn injected_transport_is_verified_like_a_network_endpoint() {
         block_hash: light.block_hash.parse().unwrap(),
         parent_hash: light.parent_hash.parse().unwrap(),
         timestamp: light.timestamp,
+        term: 0,
         state_root: light.state_root.parse().unwrap(),
         module_state_root: light.module_state_root.parse().unwrap(),
         tx_count: 0,
@@ -1151,6 +1173,7 @@ async fn injected_transport_errors_reach_the_caller_with_their_text_and_type() {
         block_hash: light.block_hash.parse().unwrap(),
         parent_hash: light.parent_hash.parse().unwrap(),
         timestamp: light.timestamp,
+        term: 0,
         state_root: light.state_root.parse().unwrap(),
         module_state_root: light.module_state_root.parse().unwrap(),
         tx_count: 0,

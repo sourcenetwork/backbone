@@ -2,14 +2,17 @@
 
 use std::time::Duration;
 
+use alloy_primitives::B256;
 use eyre::WrapErr;
 use serde::de::DeserializeOwned;
 
 use crate::transport::{AcpTransport, HttpWsTransport, TransportError};
-use crate::types::{LightBlock, ModuleId};
+use crate::types::{LightBlock, ModuleId, ReceiptResponse};
 
 /// Maximum light-block response, including hex-encoded block and consensus material.
 pub use vera_domain::LIGHT_BLOCK_RESPONSE_BYTES;
+/// Maximum receipt response, including finalization and every receipt of the revision.
+pub use vera_domain::RECEIPT_RESPONSE_BYTES;
 /// Maximum current permission response, including finalization and the RPC envelope.
 pub use vera_permission::PERMISSION_RESPONSE_BYTES;
 /// Maximum native record response, including finalization and the RPC envelope.
@@ -72,6 +75,28 @@ pub async fn get_current_permission_proof(
     minimum_height: u64,
 ) -> eyre::Result<vera_permission::PermissionResponse> {
     permission_proof(&http(client, rpc_url), policy, access, minimum_height).await
+}
+
+/// Fetch the finalized revision and complete receipts holding a submission, if the node has them.
+pub async fn get_receipt_proof(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    submission: B256,
+) -> eyre::Result<Option<ReceiptResponse>> {
+    receipt_proof(&http(client, rpc_url), submission).await
+}
+
+pub(crate) async fn receipt_proof(
+    transport: &dyn AcpTransport,
+    submission: B256,
+) -> eyre::Result<Option<ReceiptResponse>> {
+    fetch(
+        transport,
+        "vera_getReceiptProof",
+        serde_json::json!([submission]),
+        RECEIPT_RESPONSE_BYTES,
+    )
+    .await
 }
 
 pub(crate) async fn record_proof(
