@@ -116,6 +116,32 @@ Headers and responses carry the term of the device that proposed the revision.
 A header is published only when its term matches the certified block, and a later
 revision whose term is below an observed revision's term is refused.
 
+Every device of an account's deployment holds its consensus key, so the blocks of a
+device that was replaced verify like those of the device that replaced it. A term
+certificate, approved under the deployment's operator policy, says which device
+proposes from a term on and names the last block of the term before as its cut.
+`AcpLightClient::for_deployment` and `ProofClient::for_deployment` take the
+identifier of the deployment's genesis block, which the caller holds independently of
+the node. Such a client accepts a revision of a term above 0 only once the node's
+certificate of that term verifies, with the operator policy read from certified state
+(`ProofClient::verified_term`). A client built without the identifier refuses every
+term above 0.
+
+When the certificate is accepted, the revision the client had reached is dropped if
+the term voids it: a block above the cut, another block at the cut's height, or a
+block below the cut unless the node shows the same block at that height. The client
+then goes on from the new term's blocks, which may be at a lower height, and
+`HeaderChain::voided` reports the dropped revision with the term that voided it.
+Whatever a caller decided from that revision rests on state the deployment does not
+have. A header of a later term is read even when its height is at or below the
+client's. A read cannot move the client below its height, because it asks for a
+revision at or above it; it fails until a header of the new term arrives.
+
+The operator policy is read from the node that serves the certificate. A device that
+holds the consensus key and forges state can therefore also forge the policy. The
+check tells a client which of two honest devices to follow and what a switch voided;
+it does not protect against a stolen device.
+
 `ProofClient::fetch_and_verify_receipt` checks a submission's receipt against the
 revision's `vera/receipts/v2` commitment under configured trust. A refused native
 request carries its module and kind, which the commitment binds; the refusal message

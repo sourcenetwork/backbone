@@ -10,9 +10,11 @@ use std::sync::Arc;
 use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tracing::{debug, warn};
 
+use vera_domain::TermCertificate;
+
 use crate::{
-    freshness::ObservedState,
     proof_client::ProofClient,
+    term::{self, observe_revision, Tracked, Voided},
     transport::{AcpTransport, HeaderStream, HttpWsTransport, TransportError},
     types::GossipHeader,
     FreshnessPolicy,
@@ -39,7 +41,8 @@ pub struct SyncState {
 /// authenticates the requested light blocks, and updates the latest finalized
 /// `(height, module_state_root)`.
 pub struct HeaderChain {
-    state: Arc<RwLock<Option<ObservedState>>>,
+    state: Arc<RwLock<Tracked>>,
+    proof_client: ProofClient,
     freshness: FreshnessPolicy,
     notify: Arc<tokio::sync::Notify>,
     _handle: tokio::task::JoinHandle<()>,
@@ -74,17 +77,18 @@ impl HeaderChain {
             !freshness.max_age.is_zero(),
             "maximum revision age must be positive"
         );
-        let state = Arc::new(RwLock::new(None));
+        let state = Arc::new(RwLock::new(Tracked::default()));
         let notify = Arc::new(tokio::sync::Notify::new());
 
         let state_clone = state.clone();
         let notify_clone = notify.clone();
+        let header_client = proof_client.clone();
 
         let handle = tokio::spawn(async move {
             loop {
                 if let Err(e) = run_header_loop(
                     transport.as_ref(),
-                    &proof_client,
+                    &header_client,
                     &state_clone,
                     &notify_clone,
                     freshness,
@@ -99,6 +103,7 @@ impl HeaderChain {
 
         Ok(Self {
             state,
+            proof_client,
             freshness,
             notify,
             _handle: handle,
@@ -107,13 +112,28 @@ impl HeaderChain {
 
     /// Last authenticated state for diagnostics; it may be stale.
     pub fn state(&self) -> Option<SyncState> {
-        self.state.read().as_ref().map(|s| s.revision.clone())
+        self.state.read().head.as_ref().map(|s| s.revision.clone())
+    }
+
+    /// Certificate of the newest term this client verified, or `None` while
+    /// every accepted revision is in term 0.
+    pub fn term_certificate(&self) -> Option<Arc<TermCertificate>> {
+        self.state.read().certificate.clone()
+    }
+
+    /// The last accepted revision that a later term voided, if any.
+    ///
+    /// Each term voids at most one tracked revision, so a caller that
+    /// remembers the term it last handled sees every report once.
+    pub fn voided(&self) -> Option<Voided> {
+        self.state.read().voided.clone()
     }
 
     /// Current authenticated state within the configured age and clock-skew bounds.
     pub fn fresh_state(&self) -> eyre::Result<SyncState> {
         let guard = self.state.read();
         let state = guard
+            .head
             .as_ref()
             .ok_or_else(|| eyre::eyre!("no verified finalized state available"))?;
         state.check(self.freshness)?;
@@ -121,8 +141,12 @@ impl HeaderChain {
     }
 
     /// Publish an independently verified response revision without regressing header state.
-    pub(crate) fn accept_response(&self, revision: SyncState) -> eyre::Result<SyncState> {
+    ///
+    /// A revision of a term above the one held is accepted only once that
+    /// term's certificate verifies; see [`crate::term`].
+    pub(crate) async fn accept_response(&self, revision: SyncState) -> eyre::Result<SyncState> {
         let root = revision.module_state_root;
+        term::certify(&self.proof_client, &self.state, &revision).await?;
         let current = observe_revision(&self.state, &self.notify, self.freshness, revision)?;
         eyre::ensure!(
             current.module_state_root == root,
@@ -133,13 +157,18 @@ impl HeaderChain {
 
     /// Latest authenticated height for diagnostics, or 0 if not yet synced.
     pub fn latest_height(&self) -> u64 {
-        self.state.read().as_ref().map_or(0, |s| s.revision.height)
+        self.state
+            .read()
+            .head
+            .as_ref()
+            .map_or(0, |s| s.revision.height)
     }
 
     /// Latest finalized module state root.
     pub fn latest_module_state_root(&self) -> Option<B256> {
         self.state
             .read()
+            .head
             .as_ref()
             .map(|s| s.revision.module_state_root)
     }
@@ -205,24 +234,31 @@ impl Drop for HeaderChain {
 async fn run_header_loop(
     transport: &dyn AcpTransport,
     proof_client: &ProofClient,
-    state: &RwLock<Option<ObservedState>>,
+    state: &RwLock<Tracked>,
     notify: &tokio::sync::Notify,
     freshness: FreshnessPolicy,
 ) -> eyre::Result<()> {
     let mut headers = transport.subscribe_headers().await?;
     while let Some(header) = headers.next().await {
         let header = header?;
-        if state
-            .read()
-            .as_ref()
-            .is_some_and(|prev| header.height <= prev.revision.height)
-        {
+        // A header of a later term is read even below the head: the term may void the head.
+        let known = {
+            let tracked = state.read();
+            header.term <= tracked.certified_term()
+                && tracked
+                    .head
+                    .as_ref()
+                    .is_some_and(|prev| header.height <= prev.revision.height)
+        };
+        if known {
             continue;
         }
-        match authenticate_header(proof_client, &header)
-            .await
-            .and_then(|verified| observe_revision(state, notify, freshness, verified))
-        {
+        let accepted = async {
+            let verified = authenticate_header(proof_client, &header).await?;
+            term::certify(proof_client, state, &verified).await?;
+            observe_revision(state, notify, freshness, verified)
+        };
+        match accepted.await {
             Ok(verified) => {
                 debug!(height = verified.height, "verified finalized revision");
             }
@@ -301,38 +337,6 @@ pub(crate) async fn websocket_headers(ws_url: &str) -> Result<HeaderStream, Tran
 
 fn websocket_error(error: tokio_tungstenite::tungstenite::Error) -> TransportError {
     TransportError::other(format!("websocket error: {error}"))
-}
-
-fn observe_revision(
-    state: &RwLock<Option<ObservedState>>,
-    notify: &tokio::sync::Notify,
-    freshness: FreshnessPolicy,
-    revision: SyncState,
-) -> eyre::Result<SyncState> {
-    let observed = ObservedState::new(revision)?;
-    observed.check(freshness)?;
-    let mut state = state.write();
-    if let Some(previous) = state.as_ref() {
-        if observed.revision.height <= previous.revision.height {
-            if observed.revision.height == previous.revision.height {
-                eyre::ensure!(
-                    observed.revision == previous.revision,
-                    "conflicting finalized revision at the same height"
-                );
-            }
-            // Repeated certificates cannot reset the monotonic age of a cached revision.
-            previous.check(freshness)?;
-            return Ok(previous.revision.clone());
-        }
-        eyre::ensure!(
-            vera_domain::term_extends(previous.revision.term, observed.revision.term),
-            "finalized revision term precedes an observed revision's term"
-        );
-    }
-    let current = observed.revision.clone();
-    *state = Some(observed);
-    notify.notify_waiters();
-    Ok(current)
 }
 
 fn subscription_id(msg: &serde_json::Value) -> Result<serde_json::Value, TransportError> {
@@ -439,92 +443,93 @@ mod tests {
     use super::*;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    #[tokio::test]
-    async fn responses_and_delayed_headers_cannot_regress_or_renew_state() {
-        let chain = HeaderChain {
-            state: Arc::new(RwLock::new(None)),
+    /// A client of a node nothing answers for, under a well-formed consensus key.
+    fn proof_client() -> ProofClient {
+        use commonware_codec::Encode as _;
+        use commonware_cryptography::{
+            bls12381::{
+                dkg::feldman_desmedt::deal,
+                primitives::{sharing::Mode, variant::MinSig},
+            },
+            ed25519, Signer as _,
+        };
+        use commonware_utils::{ordered::Set, N3f1, TestRng};
+
+        let players = Set::from_iter_dedup([ed25519::PrivateKey::from_seed(1).public_key()]);
+        let (output, _) =
+            deal::<MinSig, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, players).unwrap();
+        let key = hex::encode(output.public().public().encode());
+        ProofClient::new("http://127.0.0.1:1", &key).unwrap()
+    }
+
+    fn chain() -> HeaderChain {
+        HeaderChain {
+            state: Arc::new(RwLock::new(Tracked::default())),
+            proof_client: proof_client(),
             freshness: FreshnessPolicy::default(),
             notify: Arc::new(tokio::sync::Notify::new()),
             _handle: tokio::spawn(std::future::pending()),
-        };
-        let first = SyncState {
-            height: 10,
+        }
+    }
+
+    fn revision(height: u64, term: u64) -> SyncState {
+        SyncState {
+            height,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
-            term: 0,
+            term,
             module_state_root: B256::repeat_byte(1),
             block_hash: B256::repeat_byte(2),
-        };
-        chain.accept_response(first.clone()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_and_delayed_headers_cannot_regress_or_renew_state() {
+        let chain = chain();
+        let first = revision(10, 0);
+        chain.accept_response(first.clone()).await.unwrap();
         let second = SyncState {
             height: 11,
             module_state_root: B256::repeat_byte(3),
             block_hash: B256::repeat_byte(4),
             ..first.clone()
         };
-        chain.accept_response(second.clone()).unwrap();
+        chain.accept_response(second.clone()).await.unwrap();
         let delayed =
             observe_revision(&chain.state, &chain.notify, chain.freshness, first.clone()).unwrap();
         assert_eq!(delayed, second);
-        assert!(chain.accept_response(first).is_err());
+        assert!(chain.accept_response(first).await.is_err());
         let conflicting = SyncState {
             block_hash: B256::repeat_byte(9),
             ..second.clone()
         };
-        assert!(chain.accept_response(conflicting).is_err());
+        assert!(chain.accept_response(conflicting).await.is_err());
         let stale = SyncState {
             height: 12,
             timestamp: second.timestamp - 60,
             ..second.clone()
         };
-        assert!(chain.accept_response(stale).is_err());
+        assert!(chain.accept_response(stale).await.is_err());
         assert_eq!(chain.fresh_state().unwrap(), second);
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(31)).await;
-        assert!(chain.accept_response(second.clone()).is_err());
+        assert!(chain.accept_response(second.clone()).await.is_err());
         assert!(chain.fresh_state().is_err());
         assert_eq!(chain.state().unwrap(), second);
     }
 
     #[tokio::test]
-    async fn a_later_revision_cannot_lower_the_term() {
-        let chain = HeaderChain {
-            state: Arc::new(RwLock::new(None)),
-            freshness: FreshnessPolicy::default(),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            _handle: tokio::spawn(std::future::pending()),
-        };
-        let first = SyncState {
-            height: 10,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            term: 2,
-            module_state_root: B256::repeat_byte(1),
-            block_hash: B256::repeat_byte(2),
-        };
-        chain.accept_response(first.clone()).unwrap();
-        let deposed = SyncState {
-            height: 11,
-            term: 1,
-            block_hash: B256::repeat_byte(3),
-            ..first.clone()
-        };
-        let error = chain.accept_response(deposed).unwrap_err();
+    async fn a_term_cannot_be_checked_without_the_deployment_identifier() {
+        let chain = chain();
+        chain.accept_response(revision(10, 0)).await.unwrap();
+        let error = chain.accept_response(revision(11, 1)).await.unwrap_err();
         assert_eq!(
             error.to_string(),
-            "finalized revision term precedes an observed revision's term"
+            "term 1 cannot be checked: no deployment identifier is configured"
         );
-        let successor = SyncState {
-            height: 12,
-            term: 3,
-            block_hash: B256::repeat_byte(4),
-            ..first
-        };
-        chain.accept_response(successor.clone()).unwrap();
-        assert_eq!(chain.fresh_state().unwrap(), successor);
+        assert_eq!(chain.state().unwrap().height, 10);
+        assert!(chain.term_certificate().is_none() && chain.voided().is_none());
     }
 }

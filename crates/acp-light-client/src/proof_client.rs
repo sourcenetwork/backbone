@@ -5,6 +5,8 @@ use std::sync::Arc;
 use alloy_primitives::B256;
 use commonware_codec::DecodeExt as _;
 use eyre::{ensure, WrapErr};
+use vera_domain::TermCertificate;
+use vera_modules::vera::administration;
 
 use crate::header_sync::SyncState;
 use crate::rpc;
@@ -17,6 +19,7 @@ use crate::verify;
 pub struct ProofClient {
     transport: Arc<dyn AcpTransport>,
     trusted_key: ConsensusPublicKey,
+    genesis: Option<B256>,
 }
 
 impl ProofClient {
@@ -26,6 +29,7 @@ impl ProofClient {
         Ok(Self {
             transport: Arc::new(HttpWsTransport::calls_only(rpc_url)?),
             trusted_key,
+            genesis: None,
         })
     }
 
@@ -37,7 +41,57 @@ impl ProofClient {
         Ok(Self {
             transport,
             trusted_key: decode_trusted_key(trusted_key_hex)?,
+            genesis: None,
         })
+    }
+
+    /// Name the deployment whose term certificates this client accepts.
+    ///
+    /// `genesis_id` is the identifier of the deployment's genesis block and,
+    /// like the consensus key, must not come from the node. Without it a
+    /// revision of any term above 0 is refused.
+    #[must_use]
+    pub fn for_deployment(mut self, genesis_id: B256) -> Self {
+        self.genesis = Some(genesis_id);
+        self
+    }
+
+    /// Fetch the node's term certificate and verify that it starts `term`
+    /// under the operator policy in certified state at `minimum_height` or later.
+    ///
+    /// The certificate names the device that proposes from `term` on and the
+    /// last block of the term before. The policy is read from the state of the
+    /// node that serves the certificate, so this does not protect against a
+    /// device that holds the deployment's consensus key and forges that state;
+    /// nothing a client verifies does.
+    pub async fn verified_term(
+        &self,
+        term: u64,
+        minimum_height: u64,
+    ) -> eyre::Result<TermCertificate> {
+        let genesis = self.genesis.ok_or_else(|| {
+            eyre::eyre!("term {term} cannot be checked: no deployment identifier is configured")
+        })?;
+        let certificate = rpc::term_certificate(self.transport.as_ref())
+            .await?
+            .ok_or_else(|| eyre::eyre!("node holds no certificate of term {term}"))?;
+        ensure!(
+            certificate.change.term == term,
+            "node holds the certificate of term {}, not of term {term}",
+            certificate.change.term
+        );
+        let response = self
+            .fetch_and_verify_record(ModuleId::Vera, administration::STATE_KEY, minimum_height)
+            .await?;
+        let record = response
+            .record
+            .value
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("operator authority is not configured"))?;
+        let state = administration::AdministrationState::decode(record.as_ref())
+            .map_err(|error| eyre::eyre!("invalid administration record: {error}"))?;
+        vera_permission::verify_term_certificate(&certificate, &genesis, &state.policy)?;
+        Ok(certificate)
     }
 
     /// Fetch a light block without verifying it.

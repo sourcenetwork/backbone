@@ -39,3 +39,5 @@ vera-backend = { git = "https://github.com/sourcenetwork/vera.rs", rev = "886f48
 commonware-glue = "=2026.10.0"
 commonware-runtime = "=2026.10.0"
 tempfile = "3"
+k256 = { version = "0.13", features = ["ecdsa"] }
+borsh = "1"

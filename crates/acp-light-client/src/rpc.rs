@@ -86,6 +86,21 @@ pub async fn get_receipt_proof(
     receipt_proof(&http(client, rpc_url), submission).await
 }
 
+/// Maximum term certificate response: one approval for each of the most operators a policy holds.
+pub const TERM_CERTIFICATE_RESPONSE_BYTES: usize = 32 << 10;
+
+pub(crate) async fn term_certificate(
+    transport: &dyn AcpTransport,
+) -> eyre::Result<Option<vera_domain::TermCertificate>> {
+    fetch(
+        transport,
+        "vera_getTermCertificate",
+        serde_json::json!([]),
+        TERM_CERTIFICATE_RESPONSE_BYTES,
+    )
+    .await
+}
+
 pub(crate) async fn receipt_proof(
     transport: &dyn AcpTransport,
     submission: B256,

@@ -1038,6 +1038,9 @@ mod policy_liveness;
 #[path = "support/receipts_and_terms.rs"]
 mod receipts_and_terms;
 
+#[path = "support/term_certificates.rs"]
+mod term_certificates;
+
 /// The error a transport returns for a call to the named method.
 type Failure = fn(&'static str) -> TransportError;
 

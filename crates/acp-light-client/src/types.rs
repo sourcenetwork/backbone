@@ -6,7 +6,7 @@ use alloy_primitives::B256;
 
 pub use vera_domain::{
     ConsensusPublicKey, ExecutionReceipt, GossipHeader, LightBlock, ModuleId, ReceiptResponse,
-    ReceiptResponseError, Refusal, RefusalKind, RefusingModule,
+    ReceiptResponseError, Refusal, RefusalKind, RefusingModule, TermCertificate,
 };
 
 /// A value authenticated against one finalized module root.
