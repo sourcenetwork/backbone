@@ -28,7 +28,7 @@ for attempt in 1 2; do
     mkdir "$attempt_dir/clusters" "$attempt_dir/orbis-clusters"
     # Preserve both statuses: a failed evidence writer must never allow a retry.
     set +e
-    VERA_E2E_DIR="$attempt_dir/clusters" ORBIS_NATIVE_E2E_DIR="$attempt_dir/orbis-clusters" \
+    VERA_E2E_DIR="$attempt_dir/clusters" ORBIS_VERA_E2E_DIR="$attempt_dir/orbis-clusters" \
         "$@" 2>&1 | tee "$attempt_dir/command.log"
     statuses=("${PIPESTATUS[@]}")
     set -e

@@ -81,7 +81,7 @@ if args[args.index("-p") + 1] == "verad":
     event = "build vera"
 else:
     features = args[args.index("--features") + 1]
-    expected_prefix = "integration-test,native,redb,iroh," if command == "test" else "native,redb,iroh,"
+    expected_prefix = "integration-test,vera,redb,iroh," if command == "test" else "vera,redb,iroh,"
     assert features.startswith(expected_prefix), features
     curve = features.removeprefix(expected_prefix)
     assert curve in ("bls12-381", "jubjub"), features
@@ -97,8 +97,8 @@ else:
         print("cosmrs v0.21.1" if os.environ["MOCK_FORBIDDEN"] == curve else "orbis-node v0.1.0")
     else:
         assert command == "test" and "--locked" in args
-        assert os.environ["ORBIS_NATIVE_VERA_IMAGE"].endswith("-vera:local")
-        assert os.environ["ORBIS_NATIVE_IMAGE"].endswith("-" + curve + ":local")
+        assert os.environ["ORBIS_VERA_IMAGE"].endswith("-vera:local")
+        assert os.environ["ORBIS_VERA_NODE_IMAGE"].endswith("-" + curve + ":local")
         assert "--lib" in args
         staged = Path(os.environ["ORBIS_NODE_BINARY"])
         assert staged.parts[-3:] == ("bin", curve, "orbis-node"), staged
@@ -119,7 +119,7 @@ else:
             assert "--nocapture" in args and os.environ["NATIVE_STACK_CURVE"] == curve
             expected = curve + "-" + scenario.replace("::", "--")
             assert Path(os.environ["VERA_E2E_DIR"]).parts[-3:] == (expected, "attempt-1", "clusters")
-            retained = Path(os.environ["ORBIS_NATIVE_E2E_DIR"])
+            retained = Path(os.environ["ORBIS_VERA_E2E_DIR"])
             assert retained.parts[-3:] == (expected, "attempt-1", "orbis-clusters")
             assert retained.is_dir()
             event = "run " + curve + " " + scenario

@@ -94,20 +94,20 @@ cargo +1.99.1 build --release --locked --manifest-path "$WORK/vera/Cargo.toml" \
     -p verad --bin verad 2>&1 | tee "$RUN/build-verad.log"
 cp "$CARGO_TARGET_DIR/release/verad" "$WORK/bin/verad"
 export VERAD_BINARY="$WORK/bin/verad"
-ORBIS_NATIVE_VERA_IMAGE="backbone-native-$$-vera:local"
+ORBIS_VERA_IMAGE="backbone-native-$$-vera:local"
 docker build --file "$ROOT/.github/scripts/native-runtime.Dockerfile" \
-    --build-arg EXECUTABLE=verad --tag "$ORBIS_NATIVE_VERA_IMAGE" "$WORK/bin"
-built_images+=("$ORBIS_NATIVE_VERA_IMAGE")
-export ORBIS_NATIVE_VERA_IMAGE
-docker image inspect --format '{{.Id}}' "$ORBIS_NATIVE_VERA_IMAGE" > "$RUN/vera-image-id.txt"
+    --build-arg EXECUTABLE=verad --tag "$ORBIS_VERA_IMAGE" "$WORK/bin"
+built_images+=("$ORBIS_VERA_IMAGE")
+export ORBIS_VERA_IMAGE
+docker image inspect --format '{{.Id}}' "$ORBIS_VERA_IMAGE" > "$RUN/vera-image-id.txt"
 # Exercise this PR's proof client, including through Defra and Orbis consumers.
 patch="patch.'https://github.com/sourcenetwork/backbone.git'.acp-light-client.path='$ROOT/crates/acp-light-client'"
 for curve in bls12-381 jubjub; do
     native=(--manifest-path "$WORK/orbis/Cargo.toml" --config "$patch" -p orbis-node
-        --no-default-features --features "native,redb,iroh,$curve")
+        --no-default-features --features "vera,redb,iroh,$curve")
     native_test=(--manifest-path "$WORK/orbis/Cargo.toml" --config "$patch" -p orbis-node
-        --no-default-features --features "integration-test,native,redb,iroh,$curve")
-    echo "curve=$curve profile=release orbis_features=native,redb,iroh,$curve default_features=false" \
+        --no-default-features --features "integration-test,vera,redb,iroh,$curve")
+    echo "curve=$curve profile=release orbis_features=vera,redb,iroh,$curve default_features=false" \
         | tee "$RUN/provenance-$curve.log"
     # The local override changes the disposable lockfile. Stage each curve's
     # production binary before test dev-dependencies can enable extra features.
@@ -122,12 +122,12 @@ for curve in bls12-381 jubjub; do
         echo "Native $curve node includes Cosmos transport dependencies" >&2
         exit 1
     fi
-    ORBIS_NATIVE_IMAGE="backbone-native-$$-$curve:local"
+    ORBIS_VERA_NODE_IMAGE="backbone-native-$$-$curve:local"
     docker build --file "$ROOT/.github/scripts/native-runtime.Dockerfile" \
-        --build-arg EXECUTABLE=orbis-node --tag "$ORBIS_NATIVE_IMAGE" "$WORK/bin/$curve"
-    built_images+=("$ORBIS_NATIVE_IMAGE")
-    export ORBIS_NATIVE_IMAGE
-    docker image inspect --format '{{.Id}}' "$ORBIS_NATIVE_IMAGE" > "$RUN/orbis-image-id-$curve.txt"
+        --build-arg EXECUTABLE=orbis-node --tag "$ORBIS_VERA_NODE_IMAGE" "$WORK/bin/$curve"
+    built_images+=("$ORBIS_VERA_NODE_IMAGE")
+    export ORBIS_VERA_NODE_IMAGE
+    docker image inspect --format '{{.Id}}' "$ORBIS_VERA_NODE_IMAGE" > "$RUN/orbis-image-id-$curve.txt"
     shasum -a 256 "$VERAD_BINARY" "$ORBIS_NODE_BINARY" "$WORK/vera/Cargo.lock" \
         "$WORK/orbis/Cargo.lock" | tee -a "$RUN/provenance-$curve.log"
 
