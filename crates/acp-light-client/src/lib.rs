@@ -9,6 +9,7 @@ mod freshness;
 pub mod header_sync;
 pub mod proof_client;
 pub mod rpc;
+mod term;
 pub mod transport;
 pub mod types;
 pub mod verify;
@@ -17,10 +18,12 @@ pub use cache::AcpCache;
 pub use freshness::FreshnessPolicy;
 pub use header_sync::{HeaderChain, SyncState};
 pub use proof_client::ProofClient;
+pub use term::Voided;
 pub use transport::{AcpTransport, HeaderStream, HttpWsTransport, TransportError};
 pub use types::{
     ConsensusPublicKey, ExecutionReceipt, GossipHeader, LightBlock, ModuleId, ReceiptResponse,
-    ReceiptResponseError, Refusal, RefusalKind, RefusingModule, VerifiedReceipt, VerifiedRecord,
+    ReceiptResponseError, Refusal, RefusalKind, RefusingModule, TermCertificate, VerifiedReceipt,
+    VerifiedRecord,
 };
 pub use vera_modules::acp::types::RelationPair;
 pub use vera_permission::{
@@ -91,6 +94,9 @@ impl AcpLightClient {
     ///
     /// Verification does not depend on the transport: every response and header
     /// is checked against `trusted_key_hex`. Must be called inside a Tokio runtime.
+    ///
+    /// This client follows a deployment whose active device never changes: it
+    /// refuses a revision of any term above 0. See [`Self::for_deployment`].
     pub fn with_transport(
         transport: Arc<dyn AcpTransport>,
         trusted_key_hex: &str,
@@ -98,6 +104,36 @@ impl AcpLightClient {
         freshness: FreshnessPolicy,
     ) -> eyre::Result<Self> {
         let proof_client = ProofClient::with_transport(transport.clone(), trusted_key_hex)?;
+        Self::start(transport, proof_client, staleness_threshold, freshness)
+    }
+
+    /// Create a client of the deployment whose genesis block is `genesis_id`,
+    /// which may switch its active device.
+    ///
+    /// A revision of a term above 0 is accepted once the certificate of its
+    /// term verifies under the operator policy in certified state. When that
+    /// term voids the revision this client had accepted, the revision is
+    /// dropped and reported by [`HeaderChain::voided`], and the client goes on
+    /// from the new term's blocks, which may be at a lower height.
+    /// `genesis_id`, like the consensus key, must not come from the node.
+    pub fn for_deployment(
+        transport: Arc<dyn AcpTransport>,
+        trusted_key_hex: &str,
+        genesis_id: B256,
+        staleness_threshold: u64,
+        freshness: FreshnessPolicy,
+    ) -> eyre::Result<Self> {
+        let proof_client = ProofClient::with_transport(transport.clone(), trusted_key_hex)?
+            .for_deployment(genesis_id);
+        Self::start(transport, proof_client, staleness_threshold, freshness)
+    }
+
+    fn start(
+        transport: Arc<dyn AcpTransport>,
+        proof_client: ProofClient,
+        staleness_threshold: u64,
+        freshness: FreshnessPolicy,
+    ) -> eyre::Result<Self> {
         let header_chain = HeaderChain::start(transport, proof_client.clone(), freshness)?;
         let cache = AcpCache::new(staleness_threshold);
 
@@ -131,7 +167,7 @@ impl AcpLightClient {
             .proof_client
             .verify_current_permission(policy, request, minimum)
             .await?;
-        self.header_chain.accept_response(revision)?;
+        self.header_chain.accept_response(revision).await?;
         Ok(allowed)
     }
 
@@ -146,7 +182,7 @@ impl AcpLightClient {
             .proof_client
             .read_current_object_owner(policy, object, minimum)
             .await?;
-        self.header_chain.accept_response(revision)?;
+        self.header_chain.accept_response(revision).await?;
         Ok(owner)
     }
 
@@ -164,7 +200,7 @@ impl AcpLightClient {
             .proof_client
             .read_current_relationship(policy_id, &key, minimum)
             .await?;
-        self.header_chain.accept_response(revision)?;
+        self.header_chain.accept_response(revision).await?;
         Ok(record)
     }
 
@@ -219,7 +255,7 @@ impl AcpLightClient {
             .fetch_and_verify_record(ModuleId::Acp, &key, sync.height)
             .await?;
         let revision = proof_client::revision_state(&response.revision)?;
-        self.header_chain.accept_response(revision.clone())?;
+        self.header_chain.accept_response(revision.clone()).await?;
         let proof = response.record;
         let value = proof.value.as_ref().map(|v| Arc::<[u8]>::from(v.as_ref()));
         self.cache.insert(
