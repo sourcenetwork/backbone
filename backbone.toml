@@ -13,17 +13,17 @@ cargo_package = "cli"
 [components.orbis-node]
 prefix = "ORBIS"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "099929f6f594ca9bb5b5c0198845bf06f75df9ab"
+ref = "f28f6965754a2968ad53350673a6cfb3284b19a1"
 cargo_package = "orbis-node"
 
 [components.cli-tool]
 prefix = "ORBIS_CLI"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "099929f6f594ca9bb5b5c0198845bf06f75df9ab"
+ref = "f28f6965754a2968ad53350673a6cfb3284b19a1"
 cargo_package = "cli-tool"
 
 [components.verad]
 prefix = "VERAD"
 repo = "https://github.com/sourcenetwork/vera.rs"
-ref = "886f484bbbe2b25ce581066b03f52a5032ecee11"
+ref = "e703d117afc9638777ab1607f03b84632254f2cc"
 cargo_package = "verad"
