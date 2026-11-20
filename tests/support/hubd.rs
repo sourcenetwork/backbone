@@ -104,11 +104,20 @@ impl HubdCli {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    /// Create a policy under a random nonce, so creating one definition
+    /// again yields another policy rather than `PolicyAlreadyExists`.
     pub fn create_policy(&self, yaml: &str) -> eyre::Result<String> {
+        self.create_policy_with_nonce(yaml, &rand::random())
+    }
+
+    /// Create a policy under `nonce`; the policy id binds the definition,
+    /// the signer and the nonce.
+    pub fn create_policy_with_nonce(&self, yaml: &str, nonce: &[u8; 32]) -> eyre::Result<String> {
         let before: Vec<String> =
             serde_json::from_str(&self.exec(&["acp", "list-policies"])?).unwrap_or_default();
 
-        self.exec(&["acp", "create-policy", yaml])?;
+        let nonce = hex::encode(nonce);
+        self.exec(&["acp", "create-policy", yaml, "--nonce", &nonce])?;
 
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {

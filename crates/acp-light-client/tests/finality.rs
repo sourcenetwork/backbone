@@ -644,7 +644,7 @@ async fn provider_actor_permissions_reject_missing_evidence_and_stale_state() {
 async fn verify_permission_records(owner: &str) {
     use vera_modules::{
         acp::{
-            types::{PolicyCmd, PolicyMarshalingType},
+            types::{PolicyCmd, PolicyMarshalingType, PolicyNonce},
             AcpModule,
         },
         kv_store::ModuleKvStore,
@@ -660,6 +660,7 @@ async fn verify_permission_records(owner: &str) {
             &owner,
             "name: documents\nresources:\n  - name: file\n    permissions:\n      - name: read\n",
             PolicyMarshalingType::ShortYaml,
+            PolicyNonce::default(),
         )
         .unwrap()
         .policy

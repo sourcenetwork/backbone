@@ -2,7 +2,7 @@ use super::*;
 use vera_modules::{
     acp::{
         keys,
-        types::{Object, PolicyCmd, PolicyMarshalingType},
+        types::{Object, PolicyCmd, PolicyMarshalingType, PolicyNonce},
         AcpModule,
     },
     kv_store::ModuleKvStore,
@@ -17,6 +17,7 @@ async fn retained_relationships_do_not_restore_retired_policy_ownership() {
             &owner,
             "name: documents\nresources:\n  - name: file\n",
             PolicyMarshalingType::ShortYaml,
+            PolicyNonce::default(),
         )
         .unwrap()
         .policy
@@ -179,7 +180,12 @@ resources:
         let mut module = AcpModule::new();
         let owner = "did:key:owner".parse().unwrap();
         let policy = module
-            .create_policy(&owner, SCHEMA, PolicyMarshalingType::ShortYaml)
+            .create_policy(
+                &owner,
+                SCHEMA,
+                PolicyMarshalingType::ShortYaml,
+                PolicyNonce::default(),
+            )
             .unwrap();
         let id = &policy.policy.id;
         let object = Object {
