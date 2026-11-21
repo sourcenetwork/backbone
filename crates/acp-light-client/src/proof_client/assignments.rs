@@ -11,13 +11,13 @@ use crate::transport::TransportError;
 #[derive(Debug, thiserror::Error)]
 pub enum AssignmentReadError {
     /// The proof service could not answer the request.
-    #[error(transparent)]
+    #[error("assignment proof transport: {0}")]
     Transport(#[from] TransportError),
     /// The response did not contain valid JSON.
-    #[error(transparent)]
+    #[error("assignment proof encoding: {0}")]
     Encoding(#[from] serde_json::Error),
     /// The evidence failed verification or exceeded its budget.
-    #[error(transparent)]
+    #[error("assignment proof verification: {0}")]
     Proof(#[from] vera_permission::PermissionError),
     /// The policy is absent or does not contain the requested relation.
     #[error("{0}")]
@@ -159,5 +159,26 @@ impl ProofClient {
             RECORD_PROOF_BYTES,
         )?;
         Ok(evidence)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn transport_failure_remains_available_as_an_error_source() {
+        let error = AssignmentReadError::Transport(TransportError::Rpc {
+            method: "vera_getCurrentPolicyPrefixProof",
+            code: -32002,
+            message: "busy".into(),
+        });
+        assert!(matches!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<TransportError>()),
+            Some(TransportError::Rpc { code: -32002, .. })
+        ));
     }
 }
