@@ -587,7 +587,16 @@ impl AcpTransport for DelayedAssignmentTransport {
 }
 
 #[tokio::test]
-async fn assignment_read_retries_if_the_tracked_revision_advances() {
+async fn assignment_read_preserves_its_revision_when_unchanged_state_advances() {
+    assignment_read_during_revision_change(false).await;
+}
+
+#[tokio::test]
+async fn assignment_read_retries_when_the_state_changes() {
+    assignment_read_during_revision_change(true).await;
+}
+
+async fn assignment_read_during_revision_change(change_state: bool) {
     let mut module = AcpModule::new();
     let issuer = "did:key:issuer".parse().unwrap();
     let subject = "did:key:subject".parse().unwrap();
@@ -620,8 +629,12 @@ async fn assignment_read_retries_if_the_tracked_revision_advances() {
         .unwrap();
     let records = module.store().prefix_scan(b"");
     let initial = fixture_records(42, records.clone());
-    let next = fixture_records_at(42, records, initial.light.timestamp + 1, HEIGHT + 1);
-    assert_eq!(initial.root, next.root);
+    let mut next_records = records;
+    if change_state {
+        next_records.push((b"unrelated".to_vec(), b"changed".to_vec()));
+    }
+    let next = fixture_records_at(42, next_records, initial.light.timestamp + 1, HEIGHT + 1);
+    assert_eq!(initial.root != next.root, change_state);
     let first_light = initial.light.clone();
     let next_light = next.light.clone();
     let trust = initial.key.clone();
@@ -678,8 +691,19 @@ async fn assignment_read_retries_if_the_tracked_revision_advances() {
         .await
         .unwrap();
     transport.release.notify_one();
-    assert!(matches!(
-        read.await,
-        Err(acp_light_client::AssignmentReadError::Overtaken)
-    ));
+    let outcome = read.await;
+    if change_state {
+        assert!(matches!(
+            outcome,
+            Err(acp_light_client::AssignmentReadError::Overtaken)
+        ));
+    } else {
+        let (revision, evidence) = outcome.unwrap();
+        assert_eq!(revision.height, HEIGHT);
+        assert_eq!(evidence.revision.height, HEIGHT);
+    }
+    assert_eq!(
+        client.header_chain().fresh_state().unwrap().height,
+        HEIGHT + 1
+    );
 }

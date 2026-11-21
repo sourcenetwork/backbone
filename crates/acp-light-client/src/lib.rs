@@ -216,7 +216,7 @@ impl AcpLightClient {
                 return Err(AssignmentReadError::Revision(error.to_string()));
             }
         };
-        if accepted != revision {
+        if accepted.term != revision.term {
             return Err(AssignmentReadError::Overtaken);
         }
         Ok((revision, evidence))
