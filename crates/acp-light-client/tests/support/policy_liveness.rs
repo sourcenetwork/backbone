@@ -475,3 +475,82 @@ async fn connect_current(server: &Server) -> (AcpLightClient, tokio::task::JoinH
         .unwrap();
     (client, task)
 }
+
+#[tokio::test]
+async fn assignments_are_bound_to_the_tracked_finalized_root() {
+    let mut module = AcpModule::new();
+    let issuer = "did:key:issuer".parse().unwrap();
+    let subject = "did:key:subject".parse().unwrap();
+    let policy = module.create_policy(
+        &issuer,
+        "name: assignments\nresources:\n  - name: host_specs\n    relations:\n      - name: assigned\n        types: [actor]\n",
+        PolicyMarshalingType::ShortYaml,
+        PolicyNonce::default(),
+    ).unwrap();
+    let id = &policy.policy.id;
+    let object = Object {
+        resource: "host_specs".into(),
+        id: "revision-1".into(),
+    };
+    module
+        .direct_policy_cmd(&issuer, id, PolicyCmd::RegisterObject(object))
+        .unwrap();
+    module
+        .direct_policy_cmd(
+            &issuer,
+            id,
+            PolicyCmd::SetRelationship(
+                serde_json::from_value(serde_json::json!({
+                    "resource": "host_specs", "object_id": "revision-1", "relation": "assigned",
+                    "subject": { "Entity": subject },
+                }))
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    let fixture = fixture_records(42, module.store().prefix_scan(b""));
+    let server = Server::start(fixture).await;
+    let (client, headers) = connect_current(&server).await;
+    let subject = vera_permission::Actor(subject);
+    let issuer = vera_permission::Actor(issuer);
+    let selector = acp_light_client::AssignmentSelector {
+        resource: "host_specs",
+        relation: "assigned",
+        subject: &subject,
+        issuer: &issuer,
+    };
+    let (revision, evidence) = client
+        .read_certified_assignments(id, &selector)
+        .await
+        .unwrap();
+    let records = evidence
+        .proof
+        .verify_assignments(
+            revision.module_state_root,
+            id,
+            &selector,
+            vera_permission::RECORD_PROOF_BYTES,
+        )
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].relationship.object_id, "revision-1");
+    assert_eq!(revision.height, evidence.revision.height);
+    let generation = policy
+        .relations
+        .generation("host_specs", "assigned")
+        .unwrap();
+    let prefix = keys::relationship_target_prefix(id, generation);
+    server
+        .fixture
+        .write()
+        .policy_prefixes
+        .get_mut(&prefix)
+        .unwrap()
+        .prefix
+        .roots[0] = B256::repeat_byte(9);
+    assert!(matches!(
+        client.read_certified_assignments(id, &selector).await,
+        Err(acp_light_client::AssignmentReadError::Proof(_))
+    ));
+    headers.abort();
+}

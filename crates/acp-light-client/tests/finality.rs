@@ -123,6 +123,10 @@ fn fixture_records_with_operations(
                         };
                         let mut prefixes = vec![
                             key.clone(),
+                            vera_modules::acp::keys::relationship_target_prefix(
+                                &record.policy_id,
+                                record.generations.target,
+                            ),
                             vera_permission::object_owner_prefix(&record.policy_id, &object)
                                 .unwrap(),
                             vera_modules::acp::keys::relationship_policy_prefix(&record.policy_id),

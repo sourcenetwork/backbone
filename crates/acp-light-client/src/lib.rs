@@ -17,7 +17,7 @@ pub mod verify;
 pub use cache::AcpCache;
 pub use freshness::FreshnessPolicy;
 pub use header_sync::{HeaderChain, SyncState};
-pub use proof_client::ProofClient;
+pub use proof_client::{AssignmentReadError, ProofClient};
 pub use term::Voided;
 pub use transport::{AcpTransport, HeaderStream, HttpWsTransport, TransportError};
 pub use types::{
@@ -27,8 +27,8 @@ pub use types::{
 };
 pub use vera_modules::acp::types::RelationPair;
 pub use vera_permission::{
-    AccessDecision, AccessRequest, Actor, DecisionRequest, Object, Operation, PermissionProof,
-    RecordProof, RecordResponse, Timestamp, PERMISSION_LIMITS,
+    AccessDecision, AccessRequest, Actor, AssignmentSelector, DecisionRequest, Object, Operation,
+    PermissionProof, RecordProof, RecordResponse, Timestamp, PERMISSION_LIMITS,
 };
 pub use verify::{verify_finalized_block, verify_light_block, LightBlockError};
 
@@ -184,6 +184,34 @@ impl AcpLightClient {
             .await?;
         self.header_chain.accept_response(revision).await?;
         Ok(owner)
+    }
+
+    /// Read complete direct assignment evidence at a fresh active revision.
+    pub async fn read_certified_assignments(
+        &self,
+        policy: &str,
+        selector: &AssignmentSelector<'_>,
+    ) -> Result<(SyncState, vera_permission::PolicyPrefixResponse), AssignmentReadError> {
+        let minimum = self
+            .header_chain
+            .fresh_state()
+            .map_err(|error| AssignmentReadError::Revision(error.to_string()))?
+            .height;
+        let evidence = self
+            .proof_client
+            .assignment_evidence(policy, selector, minimum)
+            .await?;
+        let revision = proof_client::revision_state(&evidence.revision)
+            .map_err(|error| AssignmentReadError::Revision(error.to_string()))?;
+        let accepted = self
+            .header_chain
+            .accept_response(revision.clone())
+            .await
+            .map_err(|error| AssignmentReadError::Revision(error.to_string()))?;
+        if accepted != revision {
+            return Err(AssignmentReadError::Overtaken);
+        }
+        Ok((revision, evidence))
     }
 
     /// Read an exact generation-qualified relationship at a fresh certified revision.
