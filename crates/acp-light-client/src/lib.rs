@@ -203,11 +203,19 @@ impl AcpLightClient {
             .await?;
         let revision = proof_client::revision_state(&evidence.revision)
             .map_err(|error| AssignmentReadError::Revision(error.to_string()))?;
-        let accepted = self
-            .header_chain
-            .accept_response(revision.clone())
-            .await
-            .map_err(|error| AssignmentReadError::Revision(error.to_string()))?;
+        let accepted = match self.header_chain.accept_response(revision.clone()).await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                if self
+                    .header_chain
+                    .fresh_state()
+                    .is_ok_and(|current| current != revision)
+                {
+                    return Err(AssignmentReadError::Overtaken);
+                }
+                return Err(AssignmentReadError::Revision(error.to_string()));
+            }
+        };
         if accepted != revision {
             return Err(AssignmentReadError::Overtaken);
         }
