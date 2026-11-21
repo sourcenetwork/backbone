@@ -554,3 +554,132 @@ async fn assignments_are_bound_to_the_tracked_finalized_root() {
     ));
     headers.abort();
 }
+
+struct DelayedAssignmentTransport {
+    inner: FixtureTransport,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl AcpTransport for DelayedAssignmentTransport {
+    fn call(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+        max_bytes: usize,
+    ) -> futures::future::BoxFuture<'_, Result<serde_json::Value, TransportError>> {
+        let call = self.inner.call(method, params, max_bytes);
+        if method != "vera_getCurrentPolicyPrefixProof" {
+            return call;
+        }
+        Box::pin(async move {
+            self.started.notify_one();
+            self.release.notified().await;
+            call.await
+        })
+    }
+
+    fn subscribe_headers(
+        &self,
+    ) -> futures::future::BoxFuture<'_, Result<HeaderStream, TransportError>> {
+        self.inner.subscribe_headers()
+    }
+}
+
+#[tokio::test]
+async fn assignment_read_retries_if_the_tracked_revision_advances() {
+    let mut module = AcpModule::new();
+    let issuer = "did:key:issuer".parse().unwrap();
+    let subject = "did:key:subject".parse().unwrap();
+    let policy = module.create_policy(
+        &issuer,
+        "name: assignments\nresources:\n  - name: host_specs\n    relations:\n      - name: assigned\n        types: [actor]\n",
+        PolicyMarshalingType::ShortYaml,
+        PolicyNonce::default(),
+    ).unwrap();
+    let id = &policy.policy.id;
+    let object = Object {
+        resource: "host_specs".into(),
+        id: "revision-1".into(),
+    };
+    module
+        .direct_policy_cmd(&issuer, id, PolicyCmd::RegisterObject(object))
+        .unwrap();
+    module
+        .direct_policy_cmd(
+            &issuer,
+            id,
+            PolicyCmd::SetRelationship(
+                serde_json::from_value(serde_json::json!({
+                    "resource": "host_specs", "object_id": "revision-1", "relation": "assigned",
+                    "subject": { "Entity": subject },
+                }))
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    let records = module.store().prefix_scan(b"");
+    let initial = fixture_records(42, records.clone());
+    let next = fixture_records_at(42, records, initial.light.timestamp + 1, HEIGHT + 1);
+    assert_eq!(initial.root, next.root);
+    let first_light = initial.light.clone();
+    let next_light = next.light.clone();
+    let trust = initial.key.clone();
+    let fixture = Arc::new(RwLock::new(initial));
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let transport = Arc::new(DelayedAssignmentTransport {
+        inner: FixtureTransport {
+            fixture: fixture.clone(),
+            headers: parking_lot::Mutex::new(Some(receiver)),
+            failure: parking_lot::Mutex::new(None),
+        },
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let client =
+        AcpLightClient::with_transport(transport.clone(), &trust, 10, FreshnessPolicy::default())
+            .unwrap();
+    let header = |light: &LightBlock| GossipHeader {
+        chain_id: 9001,
+        height: light.height,
+        block_hash: light.block_hash.parse().unwrap(),
+        parent_hash: light.parent_hash.parse().unwrap(),
+        timestamp: light.timestamp,
+        term: 0,
+        state_root: light.state_root.parse().unwrap(),
+        module_state_root: light.module_state_root.parse().unwrap(),
+        tx_count: 0,
+        publisher_index: 0,
+        signature: vec![],
+    };
+    sender.send(header(&first_light)).unwrap();
+    client
+        .wait_for_height(HEIGHT, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let subject = vera_permission::Actor(subject);
+    let issuer = vera_permission::Actor(issuer);
+    let selector = acp_light_client::AssignmentSelector {
+        resource: "host_specs",
+        relation: "assigned",
+        subject: &subject,
+        issuer: &issuer,
+    };
+    let read = client.read_certified_assignments(id, &selector);
+    tokio::pin!(read);
+    tokio::select! {
+        _ = transport.started.notified() => {},
+        result = &mut read => panic!("read completed before the barrier: {result:?}"),
+    }
+    *fixture.write() = next;
+    sender.send(header(&next_light)).unwrap();
+    client
+        .wait_for_height(HEIGHT + 1, Duration::from_secs(5))
+        .await
+        .unwrap();
+    transport.release.notify_one();
+    assert!(matches!(
+        read.await,
+        Err(acp_light_client::AssignmentReadError::Overtaken)
+    ));
+}
