@@ -1,5 +1,8 @@
 //! Fetch state proofs against finality authenticated by a configured consensus key.
 
+mod assignments;
+pub use assignments::AssignmentReadError;
+
 use std::sync::Arc;
 
 use alloy_primitives::B256;
