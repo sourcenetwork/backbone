@@ -475,3 +475,235 @@ async fn connect_current(server: &Server) -> (AcpLightClient, tokio::task::JoinH
         .unwrap();
     (client, task)
 }
+
+#[tokio::test]
+async fn assignments_are_bound_to_the_tracked_finalized_root() {
+    let mut module = AcpModule::new();
+    let issuer = "did:key:issuer".parse().unwrap();
+    let subject = "did:key:subject".parse().unwrap();
+    let policy = module.create_policy(
+        &issuer,
+        "name: assignments\nresources:\n  - name: host_specs\n    relations:\n      - name: assigned\n        types: [actor]\n",
+        PolicyMarshalingType::ShortYaml,
+        PolicyNonce::default(),
+    ).unwrap();
+    let id = &policy.policy.id;
+    let object = Object {
+        resource: "host_specs".into(),
+        id: "revision-1".into(),
+    };
+    module
+        .direct_policy_cmd(&issuer, id, PolicyCmd::RegisterObject(object))
+        .unwrap();
+    module
+        .direct_policy_cmd(
+            &issuer,
+            id,
+            PolicyCmd::SetRelationship(
+                serde_json::from_value(serde_json::json!({
+                    "resource": "host_specs", "object_id": "revision-1", "relation": "assigned",
+                    "subject": { "Entity": subject },
+                }))
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    let fixture = fixture_records(42, module.store().prefix_scan(b""));
+    let server = Server::start(fixture).await;
+    let (client, headers) = connect_current(&server).await;
+    let subject = vera_permission::Actor(subject);
+    let issuer = vera_permission::Actor(issuer);
+    let selector = acp_light_client::AssignmentSelector {
+        resource: "host_specs",
+        relation: "assigned",
+        subject: &subject,
+        issuer: &issuer,
+    };
+    let (revision, evidence) = client
+        .read_certified_assignments(id, &selector)
+        .await
+        .unwrap();
+    let records = evidence
+        .proof
+        .verify_assignments(
+            revision.module_state_root,
+            id,
+            &selector,
+            vera_permission::RECORD_PROOF_BYTES,
+        )
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].relationship.object_id, "revision-1");
+    assert_eq!(revision.height, evidence.revision.height);
+    let generation = policy
+        .relations
+        .generation("host_specs", "assigned")
+        .unwrap();
+    let prefix = keys::relationship_target_prefix(id, generation);
+    server
+        .fixture
+        .write()
+        .policy_prefixes
+        .get_mut(&prefix)
+        .unwrap()
+        .prefix
+        .roots[0] = B256::repeat_byte(9);
+    assert!(matches!(
+        client.read_certified_assignments(id, &selector).await,
+        Err(acp_light_client::AssignmentReadError::Proof(_))
+    ));
+    headers.abort();
+}
+
+struct DelayedAssignmentTransport {
+    inner: FixtureTransport,
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl AcpTransport for DelayedAssignmentTransport {
+    fn call(
+        &self,
+        method: &'static str,
+        params: serde_json::Value,
+        max_bytes: usize,
+    ) -> futures::future::BoxFuture<'_, Result<serde_json::Value, TransportError>> {
+        let call = self.inner.call(method, params, max_bytes);
+        if method != "vera_getCurrentPolicyPrefixProof" {
+            return call;
+        }
+        Box::pin(async move {
+            self.started.notify_one();
+            self.release.notified().await;
+            call.await
+        })
+    }
+
+    fn subscribe_headers(
+        &self,
+    ) -> futures::future::BoxFuture<'_, Result<HeaderStream, TransportError>> {
+        self.inner.subscribe_headers()
+    }
+}
+
+#[tokio::test]
+async fn assignment_read_preserves_its_revision_when_unchanged_state_advances() {
+    assignment_read_during_revision_change(false).await;
+}
+
+#[tokio::test]
+async fn assignment_read_retries_when_the_state_changes() {
+    assignment_read_during_revision_change(true).await;
+}
+
+async fn assignment_read_during_revision_change(change_state: bool) {
+    let mut module = AcpModule::new();
+    let issuer = "did:key:issuer".parse().unwrap();
+    let subject = "did:key:subject".parse().unwrap();
+    let policy = module.create_policy(
+        &issuer,
+        "name: assignments\nresources:\n  - name: host_specs\n    relations:\n      - name: assigned\n        types: [actor]\n",
+        PolicyMarshalingType::ShortYaml,
+        PolicyNonce::default(),
+    ).unwrap();
+    let id = &policy.policy.id;
+    let object = Object {
+        resource: "host_specs".into(),
+        id: "revision-1".into(),
+    };
+    module
+        .direct_policy_cmd(&issuer, id, PolicyCmd::RegisterObject(object))
+        .unwrap();
+    module
+        .direct_policy_cmd(
+            &issuer,
+            id,
+            PolicyCmd::SetRelationship(
+                serde_json::from_value(serde_json::json!({
+                    "resource": "host_specs", "object_id": "revision-1", "relation": "assigned",
+                    "subject": { "Entity": subject },
+                }))
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    let records = module.store().prefix_scan(b"");
+    let initial = fixture_records(42, records.clone());
+    let mut next_records = records;
+    if change_state {
+        next_records.push((b"unrelated".to_vec(), b"changed".to_vec()));
+    }
+    let next = fixture_records_at(42, next_records, initial.light.timestamp + 1, HEIGHT + 1);
+    assert_eq!(initial.root != next.root, change_state);
+    let first_light = initial.light.clone();
+    let next_light = next.light.clone();
+    let trust = initial.key.clone();
+    let fixture = Arc::new(RwLock::new(initial));
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let transport = Arc::new(DelayedAssignmentTransport {
+        inner: FixtureTransport {
+            fixture: fixture.clone(),
+            headers: parking_lot::Mutex::new(Some(receiver)),
+            failure: parking_lot::Mutex::new(None),
+        },
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let client =
+        AcpLightClient::with_transport(transport.clone(), &trust, 10, FreshnessPolicy::default())
+            .unwrap();
+    let header = |light: &LightBlock| GossipHeader {
+        chain_id: 9001,
+        height: light.height,
+        block_hash: light.block_hash.parse().unwrap(),
+        parent_hash: light.parent_hash.parse().unwrap(),
+        timestamp: light.timestamp,
+        term: 0,
+        state_root: light.state_root.parse().unwrap(),
+        module_state_root: light.module_state_root.parse().unwrap(),
+        tx_count: 0,
+        publisher_index: 0,
+        signature: vec![],
+    };
+    sender.send(header(&first_light)).unwrap();
+    client
+        .wait_for_height(HEIGHT, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let subject = vera_permission::Actor(subject);
+    let issuer = vera_permission::Actor(issuer);
+    let selector = acp_light_client::AssignmentSelector {
+        resource: "host_specs",
+        relation: "assigned",
+        subject: &subject,
+        issuer: &issuer,
+    };
+    let read = client.read_certified_assignments(id, &selector);
+    tokio::pin!(read);
+    tokio::select! {
+        _ = transport.started.notified() => {},
+        result = &mut read => panic!("read completed before the barrier: {result:?}"),
+    }
+    *fixture.write() = next;
+    sender.send(header(&next_light)).unwrap();
+    client
+        .wait_for_height(HEIGHT + 1, Duration::from_secs(5))
+        .await
+        .unwrap();
+    transport.release.notify_one();
+    let outcome = read.await;
+    if change_state {
+        assert!(matches!(
+            outcome,
+            Err(acp_light_client::AssignmentReadError::Overtaken)
+        ));
+    } else {
+        let (revision, evidence) = outcome.unwrap();
+        assert_eq!(revision.height, HEIGHT);
+        assert_eq!(evidence.revision.height, HEIGHT);
+    }
+    assert_eq!(
+        client.header_chain().fresh_state().unwrap().height,
+        HEIGHT + 1
+    );
+}
