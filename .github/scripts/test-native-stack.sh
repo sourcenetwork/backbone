@@ -74,7 +74,16 @@ check_fixture_pin() {
         return 1
     fi
 }
-check_fixture_pin vera.rs "$vera_ref"
+if [[ $(cat "$WORK/orbis/docker/VERA_REF") != "$vera_ref" ]]; then
+    echo "Orbis fixture selects a different Vera daemon" >&2
+    exit 1
+fi
+vera_sdk_ref=$(cargo +1.99.1 metadata --frozen --no-deps --format-version 1 \
+    --manifest-path "$ROOT/crates/acp-light-client/Cargo.toml" | \
+    jq -er '.packages[] | select(.name == "acp-light-client") | .dependencies[]
+        | select(.name == "vera-domain") | .source
+        | capture("^git\\+https://github\\.com/sourcenetwork/vera\\.rs[?]rev=(?<rev>[0-9a-f]{40})$").rev')
+check_fixture_pin vera.rs "$vera_sdk_ref"
 check_fixture_pin defradb.rs "$defra_ref"
 
 export RUST_LOG=info,vera_node::tx_gossip=trace
@@ -84,7 +93,7 @@ export VERA_E2E_KEEP=1
 unset ORBIS_LOCAL_STORAGE_KDF_M_COST_KIB ORBIS_LOCAL_STORAGE_KDF_T_COST
 {
     echo "backbone=$(git -C "$ROOT" rev-parse HEAD)"
-    echo "vera=$vera_ref orbis=$orbis_ref defra=$defra_ref"
+    echo "vera=$vera_ref vera_sdk=$vera_sdk_ref orbis=$orbis_ref defra=$defra_ref"
     echo "profile=release curves=bls12-381,jubjub default_features=false"
     echo "kdf=production-defaults (262144 KiB, 3 iterations)"
     rustc +1.99.1 --version --verbose
