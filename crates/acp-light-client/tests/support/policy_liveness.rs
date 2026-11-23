@@ -483,32 +483,51 @@ async fn assignments_are_bound_to_the_tracked_finalized_root() {
     let subject = "did:key:subject".parse().unwrap();
     let policy = module.create_policy(
         &issuer,
-        "name: assignments\nresources:\n  - name: host_specs\n    relations:\n      - name: assigned\n        types: [actor]\n",
+        "name: assignments\nresources:\n  - name: host_specs\n    relations:\n      - name: assigned\n        types: [actor]\n  - name: observations\n    relations:\n      - name: reader\n        types: [actor]\n",
         PolicyMarshalingType::ShortYaml,
         PolicyNonce::default(),
     ).unwrap();
     let id = &policy.policy.id;
-    let object = Object {
-        resource: "host_specs".into(),
-        id: "revision-1".into(),
+    let mut grant = |resource: &str, object_id: &str, relation: &str| {
+        let object = Object {
+            resource: resource.into(),
+            id: object_id.into(),
+        };
+        module
+            .direct_policy_cmd(&issuer, id, PolicyCmd::RegisterObject(object))
+            .unwrap();
+        let relationship = serde_json::from_value(serde_json::json!({
+            "resource": resource, "object_id": object_id, "relation": relation,
+            "subject": { "Entity": subject },
+        }))
+        .unwrap();
+        module
+            .direct_policy_cmd(&issuer, id, PolicyCmd::SetRelationship(relationship))
+            .unwrap();
     };
-    module
-        .direct_policy_cmd(&issuer, id, PolicyCmd::RegisterObject(object))
+    grant("host_specs", "revision-1", "assigned");
+    for i in 0..10_000 {
+        grant("observations", &format!("report-{i}"), "reader");
+    }
+    let generation = policy
+        .relations
+        .generation("host_specs", "assigned")
         .unwrap();
-    module
-        .direct_policy_cmd(
-            &issuer,
-            id,
-            PolicyCmd::SetRelationship(
-                serde_json::from_value(serde_json::json!({
-                    "resource": "host_specs", "object_id": "revision-1", "relation": "assigned",
-                    "subject": { "Entity": subject },
-                }))
-                .unwrap(),
-            ),
+    let prefix = keys::relationship_target_prefix(id, generation);
+    let at = |module: &AcpModule, height| {
+        build_fixture(
+            42,
+            module.store().prefix_scan(b""),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            height,
+            0,
+            Some((id.clone(), prefix.clone())),
         )
-        .unwrap();
-    let fixture = fixture_records(42, module.store().prefix_scan(b""));
+    };
+    let fixture = at(&module, HEIGHT);
     let server = Server::start(fixture).await;
     let (client, headers) = connect_current(&server).await;
     let subject = vera_permission::Actor(subject);
@@ -535,11 +554,6 @@ async fn assignments_are_bound_to_the_tracked_finalized_root() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].relationship.object_id, "revision-1");
     assert_eq!(revision.height, evidence.revision.height);
-    let generation = policy
-        .relations
-        .generation("host_specs", "assigned")
-        .unwrap();
-    let prefix = keys::relationship_target_prefix(id, generation);
     server
         .fixture
         .write()
@@ -552,6 +566,30 @@ async fn assignments_are_bound_to_the_tracked_finalized_root() {
         client.read_certified_assignments(id, &selector).await,
         Err(acp_light_client::AssignmentReadError::Proof(_))
     ));
+    module
+        .direct_policy_cmd(
+            &issuer.0,
+            id,
+            PolicyCmd::DeleteRelationship(records[0].relationship.clone()),
+        )
+        .unwrap();
+    *server.fixture.write() = at(&module, HEIGHT + 1);
+    let (after, withdrawal) = client
+        .read_certified_assignments(id, &selector)
+        .await
+        .unwrap();
+    assert_eq!(after.height, HEIGHT + 1);
+    assert_ne!(after.module_state_root, revision.module_state_root);
+    assert!(withdrawal
+        .proof
+        .verify_assignments(
+            after.module_state_root,
+            id,
+            &selector,
+            vera_permission::RECORD_PROOF_BYTES
+        )
+        .unwrap()
+        .is_empty());
     headers.abort();
 }
 
