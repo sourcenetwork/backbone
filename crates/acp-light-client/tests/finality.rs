@@ -25,8 +25,8 @@ use parking_lot::RwLock;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use vera_domain::{
-    Block, BlockId, ConsensusContext, ConsensusDigest, DbTargets, EpochMaterial,
-    LightConsensusScheme, StateRoot, LIGHT_BLOCK_NAMESPACE,
+    Ancestry, Block, BlockId, ConsensusContext, ConsensusDigest, EpochMaterial,
+    LightConsensusScheme, LIGHT_BLOCK_NAMESPACE,
 };
 
 const HEIGHT: u64 = 10;
@@ -260,19 +260,16 @@ fn build_fixture(
         },
         parent: BlockId(B256::repeat_byte(3)),
         height,
+        ancestry: ancestry(height),
         timestamp,
         term: 0,
-        prevrandao: B256::ZERO,
-        randomness: None,
-        state_root: StateRoot(B256::repeat_byte(1)),
         module_state_root: root,
         txs: (0..operations)
             .map(|index| vera_domain::Tx::new(index.to_be_bytes().to_vec().into()))
             .collect(),
         payload: None,
-        db_targets: DbTargets::default(),
-        native_targets: Some(Default::default()),
-        receipt_commitment: Some(B256::ZERO),
+        native_targets: Default::default(),
+        receipt_commitment: B256::ZERO,
     };
     let (light, key) = certify(seed, &block);
     Fixture {
@@ -286,6 +283,13 @@ fn build_fixture(
         receipts: None,
         delay: Duration::ZERO,
     }
+}
+
+/// An ancestry that fits a block at `height`; the light client checks the
+/// block's certificate, not the chain the ancestry commits to.
+fn ancestry(height: u64) -> Ancestry {
+    let peak = ConsensusDigest::from([0x5a; 32]);
+    Ancestry::from_peaks(vec![peak; height.count_ones() as usize])
 }
 
 /// Finalize `block` under the single-validator deployment of `seed`, returning
@@ -448,7 +452,6 @@ async fn forged_header_cannot_publish_a_root_or_seed_the_cache() {
         parent_hash: light.parent_hash.parse().unwrap(),
         timestamp: light.timestamp,
         term: 0,
-        state_root: light.state_root.parse().unwrap(),
         module_state_root: B256::repeat_byte(99),
         tx_count: 0,
         publisher_index: 0,
@@ -781,7 +784,6 @@ async fn verify_permission_records(owner: &str) {
             parent_hash: light.parent_hash.parse().unwrap(),
             timestamp: light.timestamp,
             term: 0,
-            state_root: light.state_root.parse().unwrap(),
             module_state_root: light.module_state_root.parse().unwrap(),
             tx_count: 0,
             publisher_index: 0,
@@ -856,7 +858,6 @@ async fn oversized_header_frames_and_fragmented_messages_close_without_publishin
             parent_hash: data.light.parent_hash.parse().unwrap(),
             timestamp: data.light.timestamp,
             term: 0,
-            state_root: data.light.state_root.parse().unwrap(),
             module_state_root: data.root,
             tx_count: 0,
             publisher_index: 0,
@@ -947,6 +948,10 @@ async fn epoch_end_reproposal_preserves_requested_state_and_timestamp() {
     let mut child = parent.clone();
     child.parent = parent.id();
     child.height += 1;
+    child.ancestry = parent
+        .ancestry
+        .extended(parent.height, &parent.id())
+        .unwrap();
     child.timestamp += 60;
     child.module_state_root = B256::repeat_byte(99);
     child.context.parent = (parent.context.round.view(), parent.digest());
@@ -1131,7 +1136,6 @@ async fn injected_transport_is_verified_like_a_network_endpoint() {
         parent_hash: light.parent_hash.parse().unwrap(),
         timestamp: light.timestamp,
         term: 0,
-        state_root: light.state_root.parse().unwrap(),
         module_state_root: light.module_state_root.parse().unwrap(),
         tx_count: 0,
         publisher_index: 0,
@@ -1197,7 +1201,6 @@ async fn injected_transport_errors_reach_the_caller_with_their_text_and_type() {
         parent_hash: light.parent_hash.parse().unwrap(),
         timestamp: light.timestamp,
         term: 0,
-        state_root: light.state_root.parse().unwrap(),
         module_state_root: light.module_state_root.parse().unwrap(),
         tx_count: 0,
         publisher_index: 0,

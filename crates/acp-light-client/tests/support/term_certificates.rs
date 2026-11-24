@@ -115,17 +115,14 @@ fn certified(root: B256, height: u64, term: u64, history: u8) -> (LightBlock, St
         },
         parent: BlockId(B256::repeat_byte(history)),
         height,
+        ancestry: ancestry(height),
         timestamp,
         term,
-        prevrandao: B256::ZERO,
-        randomness: None,
-        state_root: StateRoot(B256::repeat_byte(1)),
         module_state_root: root,
         txs: vec![],
         payload: None,
-        db_targets: DbTargets::default(),
-        native_targets: Some(Default::default()),
-        receipt_commitment: Some(B256::ZERO),
+        native_targets: Default::default(),
+        receipt_commitment: B256::ZERO,
     };
     certify(SEED, &block)
 }
@@ -138,7 +135,6 @@ fn header(light: &LightBlock, term: u64) -> GossipHeader {
         parent_hash: light.parent_hash.parse().unwrap(),
         timestamp: light.timestamp,
         term,
-        state_root: light.state_root.parse().unwrap(),
         module_state_root: light.module_state_root.parse().unwrap(),
         tx_count: 0,
         publisher_index: 0,

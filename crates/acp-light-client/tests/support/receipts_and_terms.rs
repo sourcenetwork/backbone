@@ -11,18 +11,18 @@ fn submission(byte: u8) -> B256 {
 
 fn receipts() -> Vec<ExecutionReceipt> {
     vec![
-        ExecutionReceipt::new(submission(1), true, 21_000, 21_000, vec![], None),
-        ExecutionReceipt::new(submission(2), false, 50_000, 71_000, vec![], None).with_refusal(
-            Some(Refusal::new(
+        ExecutionReceipt::new(submission(1), true, 21_000, 21_000, vec![]),
+        ExecutionReceipt::new(submission(2), false, 50_000, 71_000, vec![]).with_refusal(Some(
+            Refusal::new(
                 RefusingModule::Acp,
                 RefusalKind::Unauthorized,
                 "actor may not edit the policy",
-            )),
-        ),
+            ),
+        )),
     ]
 }
 
-/// A fixture whose block carries `TERM` and commits `committed` under the v2 receipt encoding,
+/// A fixture whose block carries `TERM` and commits `committed` under the v3 receipt encoding,
 /// while the node serves `served`.
 fn receipt_fixture(committed: &[ExecutionReceipt], served: Vec<ExecutionReceipt>) -> Fixture {
     let mut fixture = fixture(42);
@@ -39,7 +39,7 @@ fn receipt_fixture(committed: &[ExecutionReceipt], served: Vec<ExecutionReceipt>
         .iter()
         .map(|receipt| vera_domain::Tx::new(receipt.tx_hash.to_vec().into()))
         .collect();
-    block.receipt_commitment = Some(vera_domain::receipt_commitment(GAS_LIMIT, committed));
+    block.receipt_commitment = vera_domain::receipt_commitment(GAS_LIMIT, committed);
     let (light, _) = certify(42, &block);
     fixture.receipts = Some(ReceiptResponse {
         revision: light.clone(),
@@ -51,7 +51,7 @@ fn receipt_fixture(committed: &[ExecutionReceipt], served: Vec<ExecutionReceipt>
 }
 
 #[tokio::test]
-async fn a_refused_receipt_is_verified_against_the_v2_commitment() {
+async fn a_refused_receipt_is_verified_against_the_v3_commitment() {
     let server = Server::start(receipt_fixture(&receipts(), receipts())).await;
     let client = server.client();
 

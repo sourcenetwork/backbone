@@ -360,7 +360,7 @@ async fn exact_response_limit_is_accepted_and_stalled_bodies_time_out() {
         "result": {
             "revision": {
                 "block_hash": "", "parent_hash": "", "height": 1, "timestamp": 0,
-                "state_root": "", "module_state_root": "", "epoch": 0, "view": 1,
+                "module_state_root": "", "epoch": 0, "view": 1,
                 "parent_view": 0, "block": "", "finalization": "", "epoch_material": ""
             },
             "proof": { "reads": [] }

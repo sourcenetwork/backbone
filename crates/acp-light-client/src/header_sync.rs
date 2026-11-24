@@ -425,7 +425,6 @@ mod tests {
             parent_hash: Default::default(),
             timestamp: 1,
             term: 0,
-            state_root: Default::default(),
             module_state_root: Default::default(),
             tx_count: 0,
             publisher_index: 0,
