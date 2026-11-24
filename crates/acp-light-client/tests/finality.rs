@@ -62,15 +62,16 @@ fn fixture_records_at(
     timestamp: u64,
     height: u64,
 ) -> Fixture {
-    fixture_records_with_operations(seed, records, timestamp, height, 0)
+    build_fixture(seed, records, timestamp, height, 0, None)
 }
 
-fn fixture_records_with_operations(
+fn build_fixture(
     seed: u64,
     records: Vec<(Vec<u8>, Vec<u8>)>,
     timestamp: u64,
     height: u64,
     operations: usize,
+    assignment_prefix: Option<(String, Vec<u8>)>,
 ) -> Fixture {
     let (root, points, proof, policy_prefixes) = std::thread::spawn(move || {
         use commonware_glue::stateful::db::DatabaseSet;
@@ -105,6 +106,21 @@ fn fixture_records_with_operations(
                 let root = vera_modules::module_state::combine_module_roots(&roots);
                 let mut points = std::collections::BTreeMap::new();
                 let mut policy_prefixes = std::collections::BTreeMap::new();
+                let proof = native::record_proof_at([&a, &b, &h, &n], root, ModuleId::Acp, KEY)
+                    .await
+                    .unwrap();
+                if let Some((policy, prefix)) = assignment_prefix {
+                    let proof_for_prefix =
+                        native::policy_prefix_proof_at([&a, &b, &h, &n], root, &policy, &prefix)
+                            .await
+                            .unwrap();
+                    points.insert(
+                        vera_modules::acp::keys::policy_key(&policy),
+                        proof_for_prefix.policy.clone(),
+                    );
+                    policy_prefixes.insert(prefix, proof_for_prefix);
+                    return (root, points, proof, policy_prefixes);
+                }
                 for (key, value) in records {
                     if key.starts_with(vera_modules::acp::keys::RELATIONSHIP_PREFIX) {
                         let record: vera_modules::acp::types::RelationshipRecord =
@@ -228,9 +244,7 @@ fn fixture_records_with_operations(
                             .unwrap();
                     points.insert(key, proof);
                 }
-                let proof = native::record_proof_at([&a, &b, &h, &n], root, ModuleId::Acp, KEY)
-                    .await
-                    .unwrap();
+
                 (root, points, proof, policy_prefixes)
             },
         )
@@ -993,12 +1007,13 @@ async fn epoch_end_reproposal_preserves_requested_state_and_timestamp() {
 #[tokio::test]
 async fn current_protocol_revision_count_is_verified_and_bounded() {
     for operations in [256, 257] {
-        let data = fixture_records_with_operations(
+        let data = build_fixture(
             42,
             vec![(KEY.to_vec(), b"allowed".to_vec())],
             1_700_000_000,
             HEIGHT,
             operations,
+            None,
         );
         let expected_root = data.root;
         let server = Server::start(data).await;

@@ -7,23 +7,23 @@
 [components.defra]
 prefix = "DEFRA"
 repo = "https://github.com/sourcenetwork/defradb.rs"
-ref = "b758f89a532d8d8add94911e0c580bfcf8804cff"
+ref = "7c6e16dc43a8c1928a16ec1c2d196b3b6a5369fc"
 cargo_package = "cli"
 
 [components.orbis-node]
 prefix = "ORBIS"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "b6d5040921c650866dbb9641498691f67b15675d"
+ref = "bdbdbd7982bab3076d3fe6a7f05f9e7f31fe0c54"
 cargo_package = "orbis-node"
 
 [components.cli-tool]
 prefix = "ORBIS_CLI"
 repo = "https://github.com/sourcenetwork/orbis-rs"
-ref = "b6d5040921c650866dbb9641498691f67b15675d"
+ref = "bdbdbd7982bab3076d3fe6a7f05f9e7f31fe0c54"
 cargo_package = "cli-tool"
 
 [components.verad]
 prefix = "VERAD"
 repo = "https://github.com/sourcenetwork/vera.rs"
-ref = "177783a896068e26d4223c0a0835199870f88d3c"
+ref = "f69d1b3747b65e3b3ff601958e856c574ac127e4"
 cargo_package = "verad"

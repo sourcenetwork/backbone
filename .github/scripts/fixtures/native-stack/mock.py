@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 from pathlib import Path
 import sys
@@ -18,10 +19,12 @@ if tool == "git":
             (repo / "Cargo.toml").write_text("[workspace]\n")
             (repo / "Cargo.lock").write_text("# fixture lockfile\n")
             if repo.name == "orbis":
+                (repo / "docker").mkdir()
+                (repo / "docker/VERA_REF").write_text("1" * 40 + "\n")
                 manifest = repo / "bin/orbis-node/Cargo.toml"
                 manifest.parent.mkdir(parents=True)
                 (repo / "Cargo.toml").write_text(
-                    'vera = { git = "https://github.com/sourcenetwork/vera.rs", rev = "' + "1" * 40 + '" }\n'
+                    'vera = { git = "https://github.com/sourcenetwork/vera.rs", rev = "' + "5" * 40 + '" }\n'
                 )
                 manifest.write_text(
                     'defra = { git = "https://github.com/sourcenetwork/defradb.rs", rev = "' + "3" * 40 + '" }\n'
@@ -62,6 +65,13 @@ if tool == "docker":
     sys.exit(0)
 assert tool == "cargo" and args.pop(0) == "+1.99.1", (tool, args)
 command = args.pop(0)
+if command == "metadata":
+    assert "--no-deps" in args and "--frozen" in args
+    assert args[-1].endswith("/crates/acp-light-client/Cargo.toml")
+    print(json.dumps({"packages": [{"name": "acp-light-client", "dependencies": [
+        {"name": "vera-domain", "source": "git+https://github.com/sourcenetwork/vera.rs?rev=" + "5" * 40}
+    ]}]}))
+    sys.exit(0)
 for variable in os.environ:
     assert not variable.startswith("CARGO_PROFILE_"), variable
     assert not (variable.startswith("CARGO_TARGET_") and variable.endswith("_RUSTFLAGS")), variable
