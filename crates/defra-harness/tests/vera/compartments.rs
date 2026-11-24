@@ -1,10 +1,9 @@
 use std::time::Duration;
 
-use defra_harness::node::{DefraNode, RustNode};
 use defra_harness::{
     generate_identity, interaction_schema_with_policy, peak_schema_with_policy,
-    secret_schema_with_policy, tweet_schema_with_policy, workout_schema_with_policy, TestCluster,
-    HIKING_ACP_POLICY, SECRET_ACP_POLICY, XARCHIVE_ACP_POLICY,
+    secret_schema_with_policy, tweet_schema_with_policy, workout_schema_with_policy, BinarySource,
+    TestCluster, HIKING_ACP_POLICY, SECRET_ACP_POLICY, XARCHIVE_ACP_POLICY,
 };
 
 /// Helper to add a policy and return the policy ID.
@@ -32,13 +31,12 @@ fn add_policy(node: &defra_harness::DefraClient, policy: &str, identity: &str) -
 /// The node is started with Jack's identity so Vera transactions work.
 #[tokio::test]
 async fn rust_vera_compartments() {
-    let binary = RustNode::from_workspace().binary_path().to_path_buf();
-    RustNode::build().expect("build rust binary");
+    let binary = super::vera_binary();
     let jack = generate_identity(&binary).expect("Jack identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
-        .skip_build()
+        .with_rust_binary(BinarySource::Path(binary.clone()))
         .with_vera()
         .with_identity(&jack.private_key_hex)
         .build()
@@ -53,7 +51,7 @@ async fn rust_vera_compartments() {
     let vanessa = generate_identity(&binary).expect("Vanessa identity");
     let outsider = generate_identity(&binary).expect("Outsider identity");
 
-    // Create policies on Vera (one at a time to avoid account sequence issues)
+    // Create policies on Vera one at a time
     let xarchive_policy_id = add_policy(&node, XARCHIVE_ACP_POLICY, &jack.private_key_hex);
     tokio::time::sleep(Duration::from_secs(2)).await;
     let hiking_policy_id = add_policy(&node, HIKING_ACP_POLICY, &jack.private_key_hex);
@@ -91,11 +89,11 @@ async fn rust_vera_compartments() {
     // --- Scenario 1: Owner creates and owns ---
     let tweet_data = node
         .query_with_identity(
-            r#"mutation { create_Tweet(input: {text: "Hello world", likes: 42, archived: false}) { _docID text } }"#,
+            r#"mutation { add_Tweet(input: {text: "Hello world", likes: 42, archived: false}) { _docID text } }"#,
             &jack.private_key_hex,
         )
         .expect("Jack create Tweet");
-    let tweet_id = tweet_data["create_Tweet"][0]["_docID"]
+    let tweet_id = tweet_data["add_Tweet"][0]["_docID"]
         .as_str()
         .expect("tweet _docID");
 
@@ -136,11 +134,11 @@ async fn rust_vera_compartments() {
     // --- Scenario 3: Cross-compartment isolation ---
     let workout_data = node
         .query_with_identity(
-            r#"mutation { create_Workout(input: {activity: "Trail Run", duration_min: 45}) { _docID } }"#,
+            r#"mutation { add_Workout(input: {activity: "Trail Run", duration_min: 45}) { _docID } }"#,
             &jack.private_key_hex,
         )
         .expect("Jack create Workout");
-    let workout_id = workout_data["create_Workout"][0]["_docID"]
+    let workout_id = workout_data["add_Workout"][0]["_docID"]
         .as_str()
         .expect("workout _docID");
 
@@ -182,11 +180,11 @@ async fn rust_vera_compartments() {
     // --- Scenario 5: Owner-only secrets ---
     let secret_data = node
         .query_with_identity(
-            r#"mutation { create_Secret(input: {content: "Top Secret", classification: "eyes-only"}) { _docID } }"#,
+            r#"mutation { add_Secret(input: {content: "Top Secret", classification: "eyes-only"}) { _docID } }"#,
             &jack.private_key_hex,
         )
         .expect("Jack create Secret");
-    let _secret_id = secret_data["create_Secret"][0]["_docID"]
+    let _secret_id = secret_data["add_Secret"][0]["_docID"]
         .as_str()
         .expect("secret _docID");
 

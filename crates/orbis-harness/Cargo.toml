@@ -26,6 +26,7 @@ ed25519-dalek = "2"
 tokio-tungstenite = "0.26"
 
 [dev-dependencies]
+vera-support = { path = "../vera-support" }
 crypto = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/integration-testing", default-features = false, features = ["bls12-381"] }
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

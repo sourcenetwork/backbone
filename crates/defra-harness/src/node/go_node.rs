@@ -142,12 +142,7 @@ impl DefraNode for GoNode {
 
         if let Some(ref acp_type) = config.acp_document_type {
             args.push("--document-acp-type".to_string());
-            // Go still exposes the legacy selector.
-            args.push(if acp_type == "vera" {
-                "source-hub".to_string()
-            } else {
-                acp_type.clone()
-            });
+            args.push(acp_type.clone());
         }
 
         if config.nac_enabled {

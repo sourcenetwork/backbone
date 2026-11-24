@@ -15,6 +15,7 @@ members = [
     "crates/orbis-harness",
     "crates/acp-light-client",
     "crates/soak",
+    "crates/vera-support",
 ]
 
 [workspace.package]
@@ -41,6 +42,10 @@ commonware-codec = "=2026.10.0"
 commonware-consensus = "=2026.10.0"
 commonware-cryptography = "=2026.10.0"
 commonware-utils = "=2026.10.0"
+vera-client = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
+vera-domain = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
+vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
+vera-modules = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
 
 # ── Full-stack integration tests ──────────────────────────────────────────────
 
@@ -56,9 +61,8 @@ path = "tests/vera_light_client.rs"
 orbis-harness = { path = "crates/orbis-harness" }
 defra-harness = { path = "crates/defra-harness" }
 acp-light-client = { path = "crates/acp-light-client" }
-vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
-vera-client = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
-vera-modules = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
+vera-support = { path = "crates/vera-support" }
+vera-harness.workspace = true
 commonware-codec.workspace = true
 test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }

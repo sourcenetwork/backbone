@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use defra_harness::node::RustNode;
 use defra_harness::sse::{open_acp_events_sse, wait_for_acp_invalidation};
-use defra_harness::{DefraClient, NodeKind};
+use defra_harness::{DefraClient, NodeKind, VeraNodeConfig, VERA_ACP_DOCUMENT_TYPE};
 use orbis_harness::cli::signer_did_for_pk;
 use orbis_harness::cli::types::RingPayload;
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
@@ -30,9 +30,8 @@ use support::full_stack::{
     wait_for_dkg_post, wait_for_orbis_health, wait_for_orbis_node_identities,
     wait_for_orbis_node_infos, wait_for_tx_receipt,
 };
-use support::vera::{AcpRelationshipTx, AcpRelationshipTxKind, VeraAccount, ADMIN_KEY};
-use vera_harness::cluster::{ConsensusPreset, GenesisBuilder, TestCluster};
 use vera_harness::observe::ClusterAssertions;
+use vera_support::{AcpRelationshipTx, AcpRelationshipTxKind, VeraDeployment};
 
 const ACME_POLICY_YAML: &str = r#"
 name: acme-training-policy
@@ -212,35 +211,18 @@ async fn secure_training_data_compartments() {
     // Step 1a. Start Vera single node (bulletin + ACP)
     let t = Instant::now();
     eprintln!("[backbone] Step 1a: Starting Vera node...");
-    let vera_chain_id: u64 = 9003;
-    let vera_cluster = TestCluster::builder()
-        .nodes(1)
-        .chain_id(vera_chain_id)
-        .genesis(GenesisBuilder::devnet())
-        .preset(ConsensusPreset::Normal)
-        .build()
+    let vera = VeraDeployment::start(42, 9003)
         .await
-        .expect("Vera node should start");
-
-    let vera_rpc_url = vera_cluster.node(0).rpc_url();
-    let vera_ws_url = vera_cluster.node(0).ws_url();
+        .expect("Vera deployment should start");
+    let vera_chain_id = vera.deployment_id();
+    let vera_rpc_url = vera.rpc_url();
+    let vera_ws_url = vera.ws_url();
+    let vera_cluster = vera.cluster();
 
     // Step 2. Start Orbis ring (T=2, N=3) with Vera for bulletin + ACP
     let ring_spawn_start = Instant::now();
     eprintln!("[backbone] Step 2: Starting Orbis ring (3 nodes, threshold 2)...");
-    let vera_ready = async {
-        vera_cluster
-            .wait_ready(Duration::from_secs(30))
-            .await
-            .expect("Vera node should become healthy");
-
-        let vera_state = vera_cluster.observe(Duration::from_millis(200));
-        vera_state
-            .wait_for_height(3, Duration::from_secs(30))
-            .await
-            .expect("Vera should reach height 3");
-        t.elapsed().as_secs_f64()
-    };
+    let vera_ready = async { t.elapsed().as_secs_f64() };
     let ring_start = async {
         let ring = OrbisRing::builder()
             .nodes(3)
@@ -259,7 +241,8 @@ async fn secure_training_data_compartments() {
     };
     let (vera_ready_secs, (ring_spawn_secs, ring)) = tokio::join!(vera_ready, ring_start);
     let ring = ring.expect("ring should start");
-    let vera_account = VeraAccount::connect(&vera_rpc_url, vera_chain_id, &ADMIN_KEY)
+    let vera_account = vera
+        .admin()
         .await
         .expect("connect the administering account");
     eprintln!("[backbone] Vera node ready in {:.2}s", vera_ready_secs);
@@ -525,8 +508,8 @@ async fn secure_training_data_compartments() {
     );
     acme_defra_config.p2p_enabled = true;
     acme_defra_config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", acme_defra_ports[1]));
-    acme_defra_config.vera_rs_address = Some(vera_cluster.node(0).rpc_url());
-    acme_defra_config.acp_document_type = Some("verars".to_string());
+    acme_defra_config.vera = Some(VeraNodeConfig::from(&vera));
+    acme_defra_config.acp_document_type = Some(VERA_ACP_DOCUMENT_TYPE.to_string());
     acme_defra_config.identity = Some(acme_defra_svc.private_key_hex.clone());
     acme_defra_config.keyring = KeyringBackend::File {
         path: acme_keyring_path,
@@ -565,8 +548,8 @@ async fn secure_training_data_compartments() {
     platform_defra_config.p2p_enabled = true;
     platform_defra_config.p2p_addr =
         Some(format!("/ip4/127.0.0.1/tcp/{}", platform_defra_ports[1]));
-    platform_defra_config.vera_rs_address = Some(vera_cluster.node(0).rpc_url());
-    platform_defra_config.acp_document_type = Some("verars".to_string());
+    platform_defra_config.vera = Some(VeraNodeConfig::from(&vera));
+    platform_defra_config.acp_document_type = Some(VERA_ACP_DOCUMENT_TYPE.to_string());
     platform_defra_config.identity = Some(platform_defra_svc.private_key_hex.clone());
     platform_defra_config.keyring = KeyringBackend::File {
         path: platform_keyring_path,
@@ -862,8 +845,8 @@ async fn secure_training_data_compartments() {
     );
     globex_defra_config.p2p_enabled = true;
     globex_defra_config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", globex_defra_ports[1]));
-    globex_defra_config.vera_rs_address = Some(vera_cluster.node(0).rpc_url());
-    globex_defra_config.acp_document_type = Some("verars".to_string());
+    globex_defra_config.vera = Some(VeraNodeConfig::from(&vera));
+    globex_defra_config.acp_document_type = Some(VERA_ACP_DOCUMENT_TYPE.to_string());
     globex_defra_config.identity = Some(globex_defra_svc.private_key_hex.clone());
     globex_defra_config.keyring = KeyringBackend::File {
         path: globex_keyring_path,
@@ -1407,7 +1390,7 @@ async fn secure_training_data_compartments() {
         .expect("Vera cluster should have no unexpected errors");
     eprintln!("[backbone] Vera cluster health: no unexpected errors");
 
-    drop(vera_cluster);
+    drop(vera);
     drop(platform_defra);
     drop(globex_defra);
     drop(acme_defra);

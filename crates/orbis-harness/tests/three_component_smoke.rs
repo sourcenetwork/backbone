@@ -100,8 +100,11 @@ async fn three_component_smoke() {
     );
     config.p2p_enabled = true;
     config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", ports[1]));
-    config.vera = Some(VeraConfig::from(&vera));
-    config.acp_document_type = Some("vera".to_string());
+    let native_vera = vera_support::VeraDeployment::start(42, 9003)
+        .await
+        .expect("native Vera deployment should start");
+    config.vera = Some(defra_harness::VeraNodeConfig::from(&native_vera));
+    config.acp_document_type = Some(defra_harness::VERA_ACP_DOCUMENT_TYPE.to_string());
     config.identity = Some(defra_key.clone());
     config.keyring = KeyringBackend::File {
         path: keyring_path,

@@ -10,8 +10,8 @@ mod support;
 
 use acp_light_client::AcpLightClient;
 use commonware_codec::Encode as _;
-use support::vera::{VeraAccount, ADMIN_KEY};
 use vera_harness::cluster::{ConsensusPreset, GenesisBuilder, KeySet, TestCluster};
+use vera_support::{VeraAccount, ADMIN_KEY};
 
 const POLICY_YAML: &str = "\
 name: light-client-test-policy

@@ -12,7 +12,7 @@ use vera_harness::observe::ClusterState;
 
 use alloy_primitives::B256;
 
-use super::vera::VeraAccount;
+use vera_support::VeraAccount;
 
 pub struct OrbisNodeIdentity {
     pub address: String,

@@ -1,7 +1,12 @@
 use std::time::Duration;
 
-use defra_harness::node::{DefraNode, RustNode};
-use defra_harness::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
+use defra_harness::{
+    generate_identity, users_schema_with_policy, BinarySource, TestCluster, USER_ACP_POLICY,
+};
+
+/// How long a verified state stands without a newer one
+/// (`acp_light_client::FreshnessPolicy::default().max_age`).
+const FRESHNESS_LIMIT: Duration = Duration::from_secs(30);
 
 /// Circuit breaker fail-closed: when Vera becomes unreachable after
 /// initial setup, ACP-protected queries deny ALL access (including owner).
@@ -9,18 +14,18 @@ use defra_harness::{generate_identity, users_schema_with_policy, TestCluster, US
 /// Sequence:
 /// 1. Start cluster with Vera, create policy + protected doc
 /// 2. Verify Jack (owner) can read during normal operation
-/// 3. Stop the Vera process (simulates network partition)
-/// 4. Verify Jack is DENIED (node can't verify ACP -> fail-closed)
+/// 3. Stop the Vera deployment (simulates network partition)
+/// 4. Once the node's newest verified state is older than the light
+///    client's freshness limit, verify Jack is DENIED (fail-closed)
 /// 5. Verify anonymous is also denied
 #[tokio::test]
 async fn rust_circuit_breaker_trip_recovery() {
-    let binary = RustNode::from_workspace().binary_path().to_path_buf();
-    RustNode::build().expect("build rust binary");
+    let binary = super::vera_binary();
     let jack = generate_identity(&binary).expect("Jack identity");
 
     let mut cluster = TestCluster::builder()
         .rust_nodes(1)
-        .skip_build()
+        .with_rust_binary(BinarySource::Path(binary.clone()))
         .with_vera()
         .with_identity(&jack.private_key_hex)
         .build()
@@ -43,7 +48,7 @@ async fn rust_circuit_breaker_trip_recovery() {
         .expect("add schema");
 
     node.query_with_identity(
-        r#"mutation { create_User(input: {name: "Jack", age: 30}) { _docID } }"#,
+        r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
         &jack.private_key_hex,
     )
     .expect("create doc");
@@ -58,14 +63,16 @@ async fn rust_circuit_breaker_trip_recovery() {
         "Jack should see 1 doc during normal operation"
     );
 
-    // Phase 2: Stop Vera — kill the devnet process
+    // Phase 2: Stop Vera — kill every validator
     cluster.stop_vera().expect("failed to stop Vera");
 
-    // Give time for connections to notice the shutdown
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Decisions stand while the newest verified state is fresh; wait until
+    // the state the node holds is older than the freshness limit.
+    tokio::time::sleep(FRESHNESS_LIMIT + Duration::from_secs(5)).await;
 
     // Phase 3: Fail-closed — even the owner is denied when Vera is unreachable.
-    // The node cannot verify ACP permissions without Vera, so it denies all access.
+    // The node cannot verify ACP permissions without fresh evidence, so it
+    // denies all access.
     let jack_after_stop = node
         .query_with_identity("query { User { _docID name } }", &jack.private_key_hex)
         .expect("Jack read after Vera stop");
@@ -95,14 +102,13 @@ async fn rust_circuit_breaker_trip_recovery() {
 /// level (unit tests cover expiry in policy_cache.rs).
 #[tokio::test]
 async fn rust_policy_cache_ttl_expiry() {
-    let binary = RustNode::from_workspace().binary_path().to_path_buf();
-    RustNode::build().expect("build rust binary");
+    let binary = super::vera_binary();
     let alice = generate_identity(&binary).expect("Alice identity");
     let bob = generate_identity(&binary).expect("Bob identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
-        .skip_build()
+        .with_rust_binary(BinarySource::Path(binary.clone()))
         .with_vera()
         .with_identity(&alice.private_key_hex)
         .build()
@@ -127,11 +133,11 @@ async fn rust_policy_cache_ttl_expiry() {
     // Create a doc — registers on-chain, caches locally
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Alice", age: 25}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Alice", age: 25}) { _docID } }"#,
             &alice.private_key_hex,
         )
         .expect("create doc");
-    let doc_id = data["create_User"][0]["_docID"].as_str().expect("_docID");
+    let doc_id = data["add_User"][0]["_docID"].as_str().expect("_docID");
 
     // Multiple rapid ACP operations — all should use cached policy
     for i in 0..5 {
@@ -172,91 +178,4 @@ async fn rust_policy_cache_ttl_expiry() {
         0,
         "Bob should see 0 docs after revoke"
     );
-}
-
-/// Go runtime variant — circuit breaker behavior
-#[tokio::test]
-#[ignore = "Go node with Vera not yet supported"]
-async fn go_circuit_breaker_trip_recovery() {
-    let binary = RustNode::from_workspace().binary_path().to_path_buf();
-    RustNode::build().expect("build rust binary");
-    let jack = generate_identity(&binary).expect("Jack identity");
-
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_vera()
-        .with_identity(&jack.private_key_hex)
-        .build()
-        .await
-        .expect("build cluster");
-
-    let node = cluster.client(0);
-
-    let policy_result = node
-        .acp_policy_add(USER_ACP_POLICY, &jack.private_key_hex)
-        .expect("add policy");
-    let policy_id = policy_result["PolicyID"]
-        .as_str()
-        .or_else(|| policy_result["policyID"].as_str())
-        .expect("PolicyID");
-
-    let schema = users_schema_with_policy(policy_id);
-    node.schema_add_with_identity(&schema, &jack.private_key_hex)
-        .expect("add schema");
-
-    node.query_with_identity(
-        r#"mutation { create_User(input: {name: "Jack", age: 30}) { _docID } }"#,
-        &jack.private_key_hex,
-    )
-    .expect("create doc");
-
-    let jack_read = node
-        .query_with_identity("query { User { _docID name } }", &jack.private_key_hex)
-        .expect("Jack read");
-    assert_eq!(jack_read["User"].as_array().unwrap().len(), 1);
-}
-
-/// Go runtime variant — policy cache behavior
-#[tokio::test]
-#[ignore = "Go node with Vera not yet supported"]
-async fn go_policy_cache_ttl_expiry() {
-    let binary = RustNode::from_workspace().binary_path().to_path_buf();
-    RustNode::build().expect("build rust binary");
-    let alice = generate_identity(&binary).expect("Alice identity");
-
-    let cluster = TestCluster::builder()
-        .go_nodes(1)
-        .with_vera()
-        .with_identity(&alice.private_key_hex)
-        .build()
-        .await
-        .expect("build cluster");
-
-    let node = cluster.client(0);
-
-    let policy_result = node
-        .acp_policy_add(USER_ACP_POLICY, &alice.private_key_hex)
-        .expect("add policy");
-    let policy_id = policy_result["PolicyID"]
-        .as_str()
-        .or_else(|| policy_result["policyID"].as_str())
-        .expect("PolicyID");
-
-    let schema = users_schema_with_policy(policy_id);
-    node.schema_add_with_identity(&schema, &alice.private_key_hex)
-        .expect("add schema");
-
-    node.query_with_identity(
-        r#"mutation { create_User(input: {name: "Alice", age: 25}) { _docID } }"#,
-        &alice.private_key_hex,
-    )
-    .expect("create doc");
-
-    // Multiple rapid queries — should use cached policy
-    for i in 0..5 {
-        let result = node
-            .query_with_identity("query { User { _docID name } }", &alice.private_key_hex)
-            .unwrap_or_else(|_| panic!("query iteration {}", i));
-        assert_eq!(result["User"].as_array().unwrap().len(), 1);
-    }
 }

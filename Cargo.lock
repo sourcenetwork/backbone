@@ -693,9 +693,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "vera-client",
  "vera-harness 0.2.0",
- "vera-modules",
+ "vera-support",
 ]
 
 [[package]]
@@ -2021,7 +2020,7 @@ dependencies = [
  "test-infra",
  "tokio",
  "tracing",
- "vera-harness 0.1.0",
+ "vera-support",
 ]
 
 [[package]]
@@ -4122,6 +4121,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vera-harness 0.1.0",
+ "vera-support",
 ]
 
 [[package]]
@@ -7102,6 +7102,23 @@ dependencies = [
  "vera-domain",
  "vera-modules",
  "vera-zanzibar",
+]
+
+[[package]]
+name = "vera-support"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "commonware-codec",
+ "eyre",
+ "hex",
+ "serde_json",
+ "tokio",
+ "vera-client",
+ "vera-domain",
+ "vera-harness 0.2.0",
+ "vera-modules",
 ]
 
 [[package]]
