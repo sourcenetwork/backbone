@@ -12,6 +12,8 @@ vera-support = { path = "../vera-support" }
 vera-client.workspace = true
 vera-crypto.workspace = true
 vera-domain.workspace = true
+vera-modules.workspace = true
+alloy-sol-types = "1"
 cli-tool.workspace = true
 crypto.workspace = true
 proto.workspace = true

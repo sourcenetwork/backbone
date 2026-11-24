@@ -35,6 +35,10 @@ const SECRET: &[u8] = b"Hello from StoreSecret!";
 const MANUAL_SECRET: &[u8] = b"Hello from manual path!";
 const DERIVATION: &[u8] = b"test_derivation";
 const RETRY_DEADLINE: Duration = Duration::from_secs(90);
+/// How long a submission still in flight after a store gets to reach Vera.
+const SETTLE: Duration = Duration::from_secs(5);
+/// Blocks that must finalize after the pause before a sequence is read.
+const SETTLE_BLOCKS: u64 = 2;
 
 fn prepare(
     plaintext: &[u8],
@@ -116,6 +120,33 @@ async fn pre(fixture: &DkgFixture, object_id: &str, derivation: Option<Vec<u8>>)
     }
 }
 
+/// The committed native sequence of the node's Vera submitter.
+async fn sequence(fixture: &DkgFixture, submitter: &str) -> u64 {
+    fixture
+        .vera
+        .client()
+        .get_native_nonce(submitter)
+        .await
+        .expect("read the node's native sequence")
+}
+
+/// The submitter's sequence after a pause and a few more finalized blocks,
+/// so a submission still in flight from a store is counted.
+async fn settled_sequence(fixture: &DkgFixture, submitter: &str) -> u64 {
+    tokio::time::sleep(SETTLE).await;
+    let client = fixture.vera.client();
+    let target = client.block_number().await.expect("Vera height") + SETTLE_BLOCKS;
+    let deadline = tokio::time::Instant::now() + RETRY_DEADLINE;
+    while client.block_number().await.expect("Vera height") < target {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Vera did not finalize {SETTLE_BLOCKS} more blocks in time"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    sequence(fixture, submitter).await
+}
+
 async fn stored_document(fixture: &DkgFixture, object_id: &str) -> EncryptedDocument {
     fixture
         .admin
@@ -185,7 +216,19 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     let prepared = prepare(SECRET, &fixture, &policy_id, None);
     let prepared_derived = prepare(SECRET, &fixture, &policy_id, Some(DERIVATION.to_vec()));
 
+    // The node that serves the requests submits each document to Vera with
+    // its own native signer.
+    let submitter = admin
+        .node_submitter_did(&fixture.node_infos[0].node_key)
+        .await
+        .expect("find node0's Vera submitter");
+    let sequence_before = sequence(&fixture, &submitter).await;
     let stored = store(&fixture, &prepared, true).await;
+    let sequence_after = settled_sequence(&fixture, &submitter).await;
+    assert!(
+        sequence_after > sequence_before,
+        "Sequence should increment after store ({sequence_before} -> {sequence_after})"
+    );
     let object_id_service = stored.object_id.clone();
     assert!(
         !object_id_service.is_empty(),
@@ -264,8 +307,11 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     // ================================================================
     // Idempotent store
     // ================================================================
+    let seq_before = sequence(&fixture, &submitter).await;
     let duplicate = store(&fixture, &prepared, true).await;
+    let seq_after = settled_sequence(&fixture, &submitter).await;
     assert_eq!(object_id_service, duplicate.object_id, "Same object_id");
+    assert_eq!(seq_before, seq_after, "No submission for duplicate store");
     assert_eq!(
         stored_document(&fixture, &object_id_service).await,
         service_document,

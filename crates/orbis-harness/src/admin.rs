@@ -5,9 +5,10 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use alloy_sol_types::SolCall as _;
 use eyre::{eyre, Result, WrapErr};
 use vera_client::nodes::{
-    encode_node_request, sign_node_request, NodeCommand, NodeRequest, NodeTarget,
+    encode_node_request, sign_node_request, NodeCommand, NodeRequest, NodeTarget, SignedNodeRequest,
 };
 use vera_client::rings::{
     encode_ring_command, ReportingConfig, RingCommand, RingConfig, RingState,
@@ -18,7 +19,8 @@ use vera_client::threshold_objects::{
 use vera_client::{
     create_scoped_bearer_token, DelegationScope, Secp256k1SigningKey, VeraClient, VERA_ADDRESS,
 };
-use vera_domain::ConsensusPublicKey;
+use vera_domain::{ConsensusPublicKey, NativeTx};
+use vera_modules::vera::abi::IVera;
 use vera_support::{VeraAccount, VeraDeployment};
 
 /// The secret of the controller that manages every node of a test ring.
@@ -265,6 +267,44 @@ impl RingAdmin {
             .await
             .wrap_err("store key derivation")?;
         Ok(id)
+    }
+
+    /// The DID whose native requests carry `node_key`'s own submissions: the
+    /// signer of the node's registration, found in the certified blocks.
+    pub async fn node_submitter_did(&self, node_key: &str) -> Result<String> {
+        let head = self.client.block_number().await?;
+        for height in 1..=head {
+            let light = self
+                .client
+                .read_finalized_revision(height, &self.trusted)
+                .await?;
+            let block = vera_domain::verify_finalized_block(&light, &self.trusted)
+                .map_err(|e| eyre!("block {height}: {e}"))?;
+            for tx in &block.txs {
+                let Ok(native) = NativeTx::decode_wire(&tx.bytes) else {
+                    continue;
+                };
+                if native.target != VERA_ADDRESS {
+                    continue;
+                }
+                let Ok(call) = IVera::applyNodeRequestCall::abi_decode(&native.calldata) else {
+                    continue;
+                };
+                let Ok(signed) = serde_json::from_slice::<SignedNodeRequest>(&call.request) else {
+                    continue;
+                };
+                if signed.request.node_key == node_key
+                    && matches!(signed.request.command, NodeCommand::Register(_))
+                {
+                    return Ok(vera_crypto::bls::did_from_compressed_pubkey(
+                        native.bls_pubkey.as_slice(),
+                    )?);
+                }
+            }
+        }
+        Err(eyre!(
+            "no registration of node {node_key} up to block {head}"
+        ))
     }
 
     /// The certified document stored under `id`, if any.
