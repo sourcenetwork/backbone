@@ -177,10 +177,13 @@ pub enum KeyringBackend {
 pub struct OrbisSignerConfig {
     /// gRPC endpoint of an Orbis node (e.g. `"http://127.0.0.1:8081"`).
     pub endpoint: String,
-    /// Ring ID to sign with (from DKG bulletin post).
-    pub ring_id: String,
-    /// Derivation label (e.g. `"x-archive"`) for derived key signing.
-    pub derivation: String,
+    /// Id of the key derivation registered on Vera that the node signs with.
+    pub derivation_id: String,
+    /// The derived BLS public key (hex), provisioned independently of the ring.
+    pub public_key: String,
+    /// Hex Ed25519 key (seed followed by public key) the node authenticates
+    /// to the ring with; the ring accepts only EdDSA tokens.
+    pub identity: String,
 }
 
 /// The `--document-acp-type` selector of DefraDB's native Vera provider.

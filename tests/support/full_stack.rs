@@ -1,73 +1,13 @@
 #![allow(dead_code)]
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use defra_harness::DefraClient;
-use orbis_harness::cli::types::NodeInfoResult;
-use orbis_harness::defradb::identity::DefraHttpClient;
-use orbis_harness::{OrbisCliClient, OrbisRing};
-use vera_harness::observe::ClusterState;
-
 use alloy_primitives::B256;
-
+use defra_harness::DefraClient;
+use orbis_harness::defradb::identity::DefraHttpClient;
+use vera_harness::observe::ClusterState;
 use vera_support::VeraAccount;
-
-pub struct OrbisNodeIdentity {
-    pub address: String,
-    pub signer_did: String,
-}
-
-pub async fn wait_for_dkg_post(
-    vera_account: &VeraAccount,
-    namespace: &str,
-    timeout: Duration,
-) -> eyre::Result<(String, Vec<u8>)> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if let Ok(posts) = vera_account.list_posts(namespace).await {
-            if let Some(arr) = posts.as_array() {
-                for post in arr {
-                    let payload_bytes = match post.get("payload") {
-                        Some(serde_json::Value::Array(byte_arr)) => {
-                            let bytes: Vec<u8> = byte_arr
-                                .iter()
-                                .filter_map(|v| v.as_u64().map(|n| n as u8))
-                                .collect();
-                            if bytes.is_empty() {
-                                continue;
-                            }
-                            bytes
-                        }
-                        Some(serde_json::Value::String(s)) if !s.is_empty() => {
-                            hex::decode(s).unwrap_or_else(|_| s.as_bytes().to_vec())
-                        }
-                        _ => continue,
-                    };
-
-                    let post_id = post
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    return Ok((post_id, payload_bytes));
-                }
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            if let Ok(posts) = vera_account.list_posts(namespace).await {
-                eprintln!("[backbone]   FINAL list-posts output: {}", posts);
-            }
-            return Err(eyre::eyre!(
-                "timeout waiting for DKG post in namespace '{}'",
-                namespace
-            ));
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-}
 
 pub fn bls_did_key_from_hex(public_key_hex: &str) -> String {
     let bytes =
@@ -125,106 +65,6 @@ pub async fn configure_replication_link(
 
 pub fn graphql_string_literal(value: &str) -> String {
     serde_json::to_string(value).expect("serialize GraphQL string literal")
-}
-
-pub async fn wait_for_orbis_node_identities(
-    ring: &OrbisRing,
-    timeout: Duration,
-) -> eyre::Result<Vec<OrbisNodeIdentity>> {
-    let mut tasks = tokio::task::JoinSet::new();
-    for (index, node) in ring.nodes().iter().enumerate() {
-        let data_dir = node.data_dir().join("data");
-        tasks.spawn(async move {
-            (
-                index,
-                wait_for_orbis_node_identity(index, data_dir, timeout).await,
-            )
-        });
-    }
-
-    let mut identities = (0..ring.node_count()).map(|_| None).collect::<Vec<_>>();
-    while let Some(result) = tasks.join_next().await {
-        let (index, identity) =
-            result.map_err(|e| eyre::eyre!("join wait_for_orbis_node_identity: {}", e))?;
-        identities[index] = Some(identity?);
-    }
-
-    identities
-        .into_iter()
-        .enumerate()
-        .map(|(index, identity)| {
-            identity.ok_or_else(|| eyre::eyre!("missing orbis node identity for node{}", index))
-        })
-        .collect()
-}
-
-pub async fn wait_for_orbis_node_infos(
-    grpc_addrs: Vec<String>,
-    timeout: Duration,
-) -> eyre::Result<Vec<NodeInfoResult>> {
-    let cli = OrbisCliClient::new()?;
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    loop {
-        let mut infos = Vec::with_capacity(grpc_addrs.len());
-        let mut all_ready = true;
-        for addr in &grpc_addrs {
-            match cli.query_node_info(addr) {
-                Ok(info) if !info.peer_id.is_empty() && !info.p2p_address.is_empty() => {
-                    infos.push(info);
-                }
-                _ => {
-                    all_ready = false;
-                    break;
-                }
-            }
-        }
-        if all_ready {
-            return Ok(infos);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let not_ready = grpc_addrs
-                .iter()
-                .enumerate()
-                .filter_map(|(index, addr)| match cli.query_node_info(addr) {
-                    Ok(info) if !info.peer_id.is_empty() && !info.p2p_address.is_empty() => None,
-                    _ => Some(index),
-                })
-                .collect::<Vec<_>>();
-            return Err(eyre::eyre!(
-                "timeout ({:?}) waiting for {} orbis nodes to report info. Not ready nodes: {:?}",
-                timeout,
-                grpc_addrs.len(),
-                not_ready
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-pub async fn wait_for_orbis_health(grpc_addrs: Vec<String>, timeout: Duration) -> eyre::Result<()> {
-    let cli = OrbisCliClient::new()?;
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    loop {
-        if grpc_addrs.iter().all(|addr| cli.is_healthy(addr)) {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            let unhealthy = grpc_addrs
-                .iter()
-                .enumerate()
-                .filter_map(|(index, addr)| (!cli.is_healthy(addr)).then_some(index))
-                .collect::<Vec<_>>();
-            return Err(eyre::eyre!(
-                "timeout ({:?}) waiting for {} orbis nodes to become healthy. Unhealthy nodes: {:?}",
-                timeout,
-                grpc_addrs.len(),
-                unhealthy
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }
 
 pub fn extract_doc_ids(body: &serde_json::Value, pointer: &str, label: &str) -> Vec<String> {
@@ -630,51 +470,4 @@ async fn wait_for_event_count(
 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-async fn wait_for_orbis_node_identity(
-    index: usize,
-    data_dir: PathBuf,
-    timeout: Duration,
-) -> eyre::Result<OrbisNodeIdentity> {
-    let pk_path = data_dir.join("public_key.txt");
-    let signer_pk_path = data_dir.join("signer_pubkey.txt");
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    loop {
-        let addr_ok = std::fs::read_to_string(&pk_path)
-            .ok()
-            .filter(|s| !s.trim().is_empty() && s.trim().starts_with("0x"));
-        let pubkey_ok = std::fs::read_to_string(&signer_pk_path)
-            .ok()
-            .filter(|s| !s.trim().is_empty());
-        if let (Some(address), Some(pubkey_hex)) = (addr_ok, pubkey_ok) {
-            return Ok(OrbisNodeIdentity {
-                address: address.trim().to_string(),
-                signer_did: secp256k1_did_from_compressed_pubkey_hex(pubkey_hex.trim()),
-            });
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(eyre::eyre!(
-                "node{} did not write public_key.txt + signer_pubkey.txt within {:?}",
-                index,
-                timeout
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
-fn secp256k1_did_from_compressed_pubkey_hex(pubkey_hex: &str) -> String {
-    let pubkey_bytes = hex::decode(pubkey_hex).expect("decode pubkey hex");
-    assert_eq!(
-        pubkey_bytes.len(),
-        33,
-        "expected 33-byte compressed secp256k1 pubkey"
-    );
-    let mut codec_bytes = Vec::with_capacity(2 + 33);
-    codec_bytes.extend_from_slice(&[0xe7, 0x01]);
-    codec_bytes.extend_from_slice(&pubkey_bytes);
-    let encoded = bs58::encode(&codec_bytes).into_string();
-    format!("did:key:z{}", encoded)
 }

@@ -130,10 +130,12 @@ impl DefraNode for RustNode {
                 "orbis".into(),
                 "--signer-orbis-endpoint".into(),
                 signer.endpoint.clone(),
-                "--signer-orbis-ring-id".into(),
-                signer.ring_id.clone(),
-                "--signer-orbis-derivation".into(),
-                signer.derivation.clone(),
+                "--signer-orbis-derivation-id".into(),
+                signer.derivation_id.clone(),
+                "--signer-orbis-public-key".into(),
+                signer.public_key.clone(),
+                "--signer-orbis-identity".into(),
+                signer.identity.clone(),
             ]);
         } else if !config.signing_enabled {
             args.push("--no-signing".to_string());

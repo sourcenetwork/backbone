@@ -14,21 +14,19 @@ use std::time::{Duration, Instant};
 use defra_harness::node::RustNode;
 use defra_harness::sse::{open_acp_events_sse, wait_for_acp_invalidation};
 use defra_harness::{DefraClient, NodeKind, VeraNodeConfig, VERA_ACP_DOCUMENT_TYPE};
-use orbis_harness::cli::signer_did_for_pk;
-use orbis_harness::cli::types::RingPayload;
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
 use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
-    generate_identity_keys, generate_run_id, start_node, KeyringBackend, NodeConfig,
-    OrbisCliClient, OrbisSignerConfig, VeraRsNodeConfig,
+    derived_public_key, ed25519_identity_hex, generate_identity_keys, generate_run_id,
+    signer_did_for_pk, start_node, KeyringBackend, NodeConfig, OrbisSignerConfig, OrbisVeraConfig,
+    RingAdmin, RING_POLICY_YAML,
 };
 
 use support::full_stack::{
     assert_doc_ids_match, bls_did_key_from_hex, configure_replication_link, extract_doc_ids,
     graphql_string_literal, is_acp_denied, is_write_acp_denied, poll_query_count,
     poll_query_denied, poll_replicated_doc_ids, poll_write_denied, wait_for_block_finality,
-    wait_for_dkg_post, wait_for_orbis_health, wait_for_orbis_node_identities,
-    wait_for_orbis_node_infos, wait_for_tx_receipt,
+    wait_for_tx_receipt,
 };
 use vera_harness::observe::ClusterAssertions;
 use vera_support::{AcpRelationshipTx, AcpRelationshipTxKind, VeraDeployment};
@@ -79,18 +77,16 @@ resources:
         expr: owner
 "#;
 
-const RING_SIGNING_POLICY_YAML: &str = r#"
-name: ring-signing-policy
-resources:
-  - name: ring
-    relations:
-      - name: signer
-        types:
-          - actor
-    permissions:
-      - name: sign
-        expr: signer
-"#;
+/// The resource and permission a compartment's signing key is bound to.
+const SIGN_RESOURCE: &str = "key";
+const SIGN_PERMISSION: &str = "sign";
+
+/// A compartment's signing key: its derivation registered on Vera and the
+/// public key the ring signs with under it.
+struct Compartment {
+    derivation_id: String,
+    public_key: String,
+}
 
 struct ServiceIdentity {
     label: String,
@@ -126,7 +122,6 @@ impl ServiceIdentity {
     }
 }
 
-const BULLETIN_RING_NAMESPACE: &str = "orbis";
 const FAILURE_LOG_TAIL_LINES: usize = 120;
 
 struct FailureLogDumper {
@@ -208,128 +203,73 @@ async fn secure_training_data_compartments() {
     let test_start = Instant::now();
     let orbis_operator_keys = generate_identity_keys(&run_id, 3);
 
-    // Step 1a. Start Vera single node (bulletin + ACP)
+    // Step 1. Start Vera and the Orbis ring (T=2, N=3) configured for it
     let t = Instant::now();
-    eprintln!("[backbone] Step 1a: Starting Vera node...");
+    eprintln!("[backbone] Step 1: Starting Vera and the Orbis ring...");
     let vera = VeraDeployment::start(42, 9003)
         .await
         .expect("Vera deployment should start");
-    let vera_chain_id = vera.deployment_id();
-    let vera_rpc_url = vera.rpc_url();
-    let vera_ws_url = vera.ws_url();
-    let vera_cluster = vera.cluster();
-
-    // Step 2. Start Orbis ring (T=2, N=3) with Vera for bulletin + ACP
-    let ring_spawn_start = Instant::now();
-    eprintln!("[backbone] Step 2: Starting Orbis ring (3 nodes, threshold 2)...");
-    let vera_ready = async { t.elapsed().as_secs_f64() };
-    let ring_start = async {
-        let ring = OrbisRing::builder()
-            .nodes(3)
-            .threshold(2)
-            .log_level("info")
-            .base_dir(run_dir.path())
-            .identity_keys(orbis_operator_keys.clone())
-            .vera_rs_config(VeraRsNodeConfig {
-                rpc_url: vera_rpc_url.clone(),
-                ws_url: vera_ws_url.clone(),
-                chain_id: vera_chain_id,
-            })
-            .build()
-            .await;
-        (ring_spawn_start.elapsed().as_secs_f64(), ring)
-    };
-    let (vera_ready_secs, (ring_spawn_secs, ring)) = tokio::join!(vera_ready, ring_start);
-    let ring = ring.expect("ring should start");
-    let vera_account = vera
-        .admin()
+    let admin = RingAdmin::new(&vera)
         .await
-        .expect("connect the administering account");
-    eprintln!("[backbone] Vera node ready in {:.2}s", vera_ready_secs);
+        .expect("connect the ring administrator");
+    let vera_account = admin.account();
+    let vera_state = vera.cluster().observe(Duration::from_millis(200));
+    let ring = OrbisRing::builder()
+        .nodes(3)
+        .threshold(2)
+        .log_level("info")
+        .base_dir(run_dir.path())
+        .identity_keys(orbis_operator_keys.clone())
+        .vera(OrbisVeraConfig::from(&vera))
+        .controller_key(admin.controller_key_hex())
+        .build()
+        .await
+        .expect("ring should start");
+    let node_infos = ring
+        .wait_ready(Duration::from_secs(90))
+        .await
+        .expect("all orbis nodes should become ready");
     eprintln!(
-        "[backbone]   Orbis ring processes spawned in {:.2}s",
-        ring_spawn_secs
-    );
-    let vera_state = vera_cluster.observe(Duration::from_millis(200));
-
-    let ring_health_task = tokio::spawn(wait_for_orbis_health(
-        ring.grpc_addrs(),
-        Duration::from_secs(60),
-    ));
-    let node_identities = wait_for_orbis_node_identities(&ring, Duration::from_secs(15))
-        .await
-        .expect("orbis nodes should write addresses + signer pubkeys");
-
-    // Step 2a. Collect the orbis nodes' signer DIDs
-    let mut node_signer_dids = Vec::with_capacity(ring.node_count());
-    for (i, identity) in node_identities.iter().enumerate() {
-        eprintln!(
-            "[backbone]   Orbis node{}: {} (DID: {}...)",
-            i,
-            identity.address,
-            &identity.signer_did[..40.min(identity.signer_did.len())]
-        );
-        node_signer_dids.push(identity.signer_did.clone());
-    }
-
-    // Step 2b. Wait for basic node health.
-    ring_health_task
-        .await
-        .expect("orbis ring health task should join")
-        .expect("all nodes should become healthy");
-
-    let node_infos = wait_for_orbis_node_infos(ring.grpc_addrs(), Duration::from_secs(60))
-        .await
-        .expect("all nodes should report info");
-
-    eprintln!(
-        "[backbone]   Orbis nodes healthy in {:.2}s",
-        ring_spawn_start.elapsed().as_secs_f64()
+        "[backbone]   Vera and {} Orbis nodes ready in {:.2}s",
+        node_infos.len(),
+        t.elapsed().as_secs_f64()
     );
 
-    // Step 3. Register bulletin namespace + add collaborators
-    let orbis_cli = OrbisCliClient::new().expect("resolve cli-tool binary");
-    eprintln!("[backbone] Step 3: Registering bulletin namespace on Vera...");
-    vera_account
-        .register_namespace(BULLETIN_RING_NAMESPACE)
+    // Step 2. Authorize the nodes for the ring policy and create the ring
+    let ring_policy_id = vera_account
+        .create_policy(RING_POLICY_YAML)
         .await
-        .expect("register ring namespace on Vera");
-
-    for (i, did) in node_signer_dids.iter().enumerate() {
-        eprintln!(
-            "[backbone]   Adding collaborator for node{}: {}...",
-            i,
-            &did[..40.min(did.len())]
-        );
-        vera_account
-            .add_collaborator(BULLETIN_RING_NAMESPACE, did)
+        .expect("create ring ACP policy");
+    eprintln!("[backbone] Step 2: ring_policy_id = {}", ring_policy_id);
+    for info in &node_infos {
+        admin
+            .authorize_node(
+                &info.node_key,
+                &info.p2p_address,
+                &ring_policy_id,
+                Duration::from_secs(60),
+            )
             .await
-            .unwrap_or_else(|e| panic!("add collaborator for node{}: {}", i, e));
+            .expect("authorize orbis node");
     }
+    let node_keys: Vec<String> = node_infos
+        .iter()
+        .map(|info| info.node_key.clone())
+        .collect();
+    let ring_id = admin
+        .create_ring(&ring_policy_id, &node_keys, ring.threshold())
+        .await
+        .expect("create ring");
 
-    // Step 3a. Run DKG ceremony
-    let peer_ids: Vec<String> = node_infos.iter().map(|n| n.p2p_address.clone()).collect();
-
-    eprintln!("[backbone] Step 3a: Running DKG...");
-    let _dkg_result = orbis_cli
-        .do_dkg(&ring.node(0).grpc_addr(), ring.threshold(), &peer_ids)
-        .expect("DKG should succeed");
-
-    // Step 3b. Poll for DKG post on Vera
-    eprintln!("[backbone] Step 3b: Polling for DKG post on Vera...");
-    let (ring_id, post_payload) = wait_for_dkg_post(
-        &vera_account,
-        BULLETIN_RING_NAMESPACE,
-        Duration::from_secs(120),
-    )
-    .await
-    .expect("DKG post on Vera");
-
-    // Step 3c. Read RingPayload from Vera bulletin
-    let ring_payload: RingPayload =
-        serde_json::from_slice(&post_payload).expect("parse RingPayload");
-    let ring_pk_hex = ring_payload.ring_pk;
-
+    // Step 3. Run the DKG ceremony and read the ring key from Vera
+    eprintln!("[backbone] Step 3: Running DKG...");
+    cli_tool::do_dkg(ring.node(0).grpc_addr(), ring_id.clone())
+        .await
+        .expect("DKG should start");
+    let ring_pk_hex = admin
+        .wait_for_ring_key(&ring_id, Duration::from_secs(240))
+        .await
+        .expect("DKG should finalize");
     eprintln!(
         "[backbone] Ring ready in {:.2}s. PK: {}..., ID: {}...",
         t.elapsed().as_secs_f64(),
@@ -337,64 +277,53 @@ async fn secure_training_data_compartments() {
         &ring_id[..16.min(ring_id.len())],
     );
 
-    // Step 4. Create ring signing policy + register ring object
+    // Steps 4-7. Register a signing key for each compartment and derive its DID
     let t = Instant::now();
-    eprintln!("[backbone] Step 4: Creating ring signing ACP policy...");
-    let ring_policy_id = vera_account
-        .create_policy(RING_SIGNING_POLICY_YAML)
-        .await
-        .expect("create ring signing ACP policy");
-    eprintln!("[backbone]   ring_policy_id = {}", ring_policy_id);
-
-    vera_account
-        .register_object(&ring_policy_id, "ring", &ring_id)
-        .await
-        .expect("register ring object");
-
-    // Step 5. Derive PLATFORM_DID from ring
-    let platform_derived = orbis_cli
-        .derive_public_key(
-            &ring.node(0).grpc_addr(),
-            &ring_id,
-            &hex::encode(b"platform"),
+    let mut compartments = Vec::new();
+    for (step, label) in [(5, "platform"), (6, "acme-corp"), (7, "globex-inc")] {
+        let derivation_id = admin
+            .register_key_derivation(
+                &ring_id,
+                label,
+                &ring_policy_id,
+                SIGN_RESOURCE,
+                SIGN_PERMISSION,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("register {label} key derivation: {e}"));
+        vera_account
+            .register_object(&ring_policy_id, SIGN_RESOURCE, &derivation_id)
+            .await
+            .unwrap_or_else(|e| panic!("register {label} key derivation object: {e}"));
+        let public_key = derived_public_key(
+            &ring_pk_hex,
+            label,
+            &ring_policy_id,
+            SIGN_RESOURCE,
+            SIGN_PERMISSION,
         )
-        .expect("derive platform public key");
-    let platform_did = bls_did_key_from_hex(&platform_derived.derived_public_key);
-    eprintln!("[backbone] Step 5: PLATFORM_DID: {}", platform_did);
-
-    // Step 6. Derive ACME_DID from ring
-    let acme_derived = orbis_cli
-        .derive_public_key(
-            &ring.node(0).grpc_addr(),
-            &ring_id,
-            &hex::encode(b"acme-corp"),
-        )
-        .expect("derive acme-corp public key");
-    let acme_did = bls_did_key_from_hex(&acme_derived.derived_public_key);
-    eprintln!("[backbone] Step 6: ACME_DID: {}", acme_did);
-
-    // Step 7. Derive GLOBEX_DID from ring
-    let globex_derived = orbis_cli
-        .derive_public_key(
-            &ring.node(0).grpc_addr(),
-            &ring_id,
-            &hex::encode(b"globex-inc"),
-        )
-        .expect("derive globex-inc public key");
-    let globex_did = bls_did_key_from_hex(&globex_derived.derived_public_key);
-    eprintln!("[backbone] Step 7: GLOBEX_DID: {}", globex_did);
+        .unwrap_or_else(|e| panic!("derive {label} public key: {e}"));
+        let did = bls_did_key_from_hex(&public_key);
+        eprintln!("[backbone] Step {}: {} DID: {}", step, label, did);
+        compartments.push(Compartment {
+            derivation_id,
+            public_key,
+        });
+    }
+    let [platform_key, acme_key, globex_key] =
+        <[Compartment; 3]>::try_from(compartments).unwrap_or_else(|_| panic!("three compartments"));
 
     // Step 8. Verify all 3 derived keys are distinct
     assert_ne!(
-        platform_derived.derived_public_key, acme_derived.derived_public_key,
+        platform_key.public_key, acme_key.public_key,
         "platform and acme keys must differ"
     );
     assert_ne!(
-        acme_derived.derived_public_key, globex_derived.derived_public_key,
+        acme_key.public_key, globex_key.public_key,
         "acme and globex keys must differ"
     );
     assert_ne!(
-        platform_derived.derived_public_key, globex_derived.derived_public_key,
+        platform_key.public_key, globex_key.public_key,
         "platform and globex keys must differ"
     );
     eprintln!("[backbone] Step 8: Verified 3 unique BLS did:key identities from same ring");
@@ -419,44 +348,25 @@ async fn secure_training_data_compartments() {
         platform_defra_svc.label,
     );
 
-    // Step 10. Authorize DefraDB service accounts as ring signers
-    let acme_defra_signer_did = signer_did_for_pk(&acme_defra_svc.private_key_hex);
-    vera_account
-        .set_relationship(
-            &ring_policy_id,
-            "ring",
-            &ring_id,
-            "signer",
-            &acme_defra_signer_did,
-        )
-        .await
-        .expect("grant acme_defra_svc signer on ring");
-
-    let globex_defra_signer_did = signer_did_for_pk(&globex_defra_svc.private_key_hex);
-    vera_account
-        .set_relationship(
-            &ring_policy_id,
-            "ring",
-            &ring_id,
-            "signer",
-            &globex_defra_signer_did,
-        )
-        .await
-        .expect("grant globex_defra_svc signer on ring");
-
-    let platform_defra_signer_did = signer_did_for_pk(&platform_defra_svc.private_key_hex);
-    vera_account
-        .set_relationship(
-            &ring_policy_id,
-            "ring",
-            &ring_id,
-            "signer",
-            &platform_defra_signer_did,
-        )
-        .await
-        .expect("grant platform_defra_svc signer on ring");
+    // Step 10. Authorize each DefraDB service account to sign with its compartment's key
+    for (svc, key) in [
+        (&acme_defra_svc, &acme_key),
+        (&globex_defra_svc, &globex_key),
+        (&platform_defra_svc, &platform_key),
+    ] {
+        vera_account
+            .set_relationship(
+                &ring_policy_id,
+                SIGN_RESOURCE,
+                &key.derivation_id,
+                "signer",
+                &signer_did_for_pk(&svc.private_key_hex),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("grant {} signer on its key: {}", svc.label, e));
+    }
     eprintln!(
-        "[backbone] Steps 4-10: Policy + identities setup in {:.2}s",
+        "[backbone] Steps 4-10: Keys + identities setup in {:.2}s",
         t.elapsed().as_secs_f64()
     );
 
@@ -517,8 +427,9 @@ async fn secure_training_data_compartments() {
     };
     acme_defra_config.orbis_signer = Some(OrbisSignerConfig {
         endpoint: ring.node(0).grpc_addr(),
-        ring_id: ring_id.clone(),
-        derivation: "acme-corp".to_string(),
+        derivation_id: acme_key.derivation_id.clone(),
+        public_key: acme_key.public_key.clone(),
+        identity: ed25519_identity_hex(&acme_defra_svc.private_key_hex),
     });
 
     let acme_defra = start_node(&acme_defra_node, acme_defra_config, Duration::from_secs(30))
@@ -557,8 +468,9 @@ async fn secure_training_data_compartments() {
     };
     platform_defra_config.orbis_signer = Some(OrbisSignerConfig {
         endpoint: ring.node(0).grpc_addr(),
-        ring_id: ring_id.clone(),
-        derivation: "platform".to_string(),
+        derivation_id: platform_key.derivation_id.clone(),
+        public_key: platform_key.public_key.clone(),
+        identity: ed25519_identity_hex(&platform_defra_svc.private_key_hex),
     });
 
     let platform_defra = start_node(
@@ -749,7 +661,7 @@ async fn secure_training_data_compartments() {
     for doc_id in &acme_doc_ids {
         eprintln!("[backbone]   grant reader on {}", doc_id);
     }
-    wait_for_tx_receipt(&vera_account, grant_tx_hash, "Step 16c")
+    wait_for_tx_receipt(vera_account, grant_tx_hash, "Step 16c")
         .await
         .unwrap_or_else(|e| panic!("wait for Step 16c grant receipt: {}", e));
     eprintln!(
@@ -854,8 +766,9 @@ async fn secure_training_data_compartments() {
     };
     globex_defra_config.orbis_signer = Some(OrbisSignerConfig {
         endpoint: ring.node(0).grpc_addr(),
-        ring_id: ring_id.clone(),
-        derivation: "globex-inc".to_string(),
+        derivation_id: globex_key.derivation_id.clone(),
+        public_key: globex_key.public_key.clone(),
+        identity: ed25519_identity_hex(&globex_defra_svc.private_key_hex),
     });
 
     let globex_defra = start_node(
@@ -1087,7 +1000,7 @@ async fn secure_training_data_compartments() {
         submit_start.elapsed().as_secs_f64()
     );
     eprintln!("[backbone]   Step 25 batch tx={}", audit_grant_hash);
-    wait_for_tx_receipt(&vera_account, audit_grant_hash, "Step 25")
+    wait_for_tx_receipt(vera_account, audit_grant_hash, "Step 25")
         .await
         .unwrap_or_else(|e| panic!("wait for Step 25 audit grant receipt: {}", e));
     eprintln!(
@@ -1219,7 +1132,7 @@ async fn secure_training_data_compartments() {
         submit_start.elapsed().as_secs_f64()
     );
     eprintln!("[backbone]   Step 29 batch tx={}", revoke_tx_hash);
-    wait_for_tx_receipt(&vera_account, revoke_tx_hash, "Step 29")
+    wait_for_tx_receipt(vera_account, revoke_tx_hash, "Step 29")
         .await
         .unwrap_or_else(|e| panic!("wait for Step 29 revoke receipt: {}", e));
     eprintln!(

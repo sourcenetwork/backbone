@@ -4,14 +4,7 @@ use std::time::Duration;
 
 use super::health::{self, HealthCheckConfig};
 use super::node::OrbisNode;
-use vera_harness::VeraConfig;
-
-/// Configuration for connecting orbis nodes to a vera.rs cluster.
-pub struct VeraRsNodeConfig {
-    pub rpc_url: String,
-    pub ws_url: String,
-    pub chain_id: u64,
-}
+use crate::vera::OrbisVeraConfig;
 
 /// A running Orbis ring with managed node processes.
 ///
@@ -57,27 +50,30 @@ impl OrbisRing {
         self.nodes.iter().map(|n| n.grpc_addr()).collect()
     }
 
-    /// Wait for all nodes' gRPC endpoints to become responsive.
-    pub async fn wait_ready(&self, timeout: Duration) -> eyre::Result<()> {
+    /// Wait until every node reports itself ready and return what each reports.
+    pub async fn wait_ready(
+        &self,
+        timeout: Duration,
+    ) -> eyre::Result<Vec<cli_tool::NodeInfoResult>> {
         let config = HealthCheckConfig {
             poll_interval: Duration::from_millis(100),
             timeout,
         };
-        health::wait_all_healthy(&self.grpc_addrs(), &config).await
+        health::wait_all_ready(&self.grpc_addrs(), &config).await
     }
 }
 
 /// Builder for `OrbisRing`.
 ///
-/// Requires `base_dir` and `identity_keys` to be set.
+/// Requires `base_dir`, `identity_keys`, `vera` and `controller_key` to be set.
 pub struct OrbisRingBuilder {
     node_count: usize,
     threshold: u32,
     log_level: String,
     base_dir: Option<PathBuf>,
     identity_keys: Option<Vec<String>>,
-    vera_config: Option<VeraConfig>,
-    vera_rs_config: Option<VeraRsNodeConfig>,
+    vera: Option<OrbisVeraConfig>,
+    controller_key: Option<String>,
 }
 
 impl fmt::Debug for OrbisRingBuilder {
@@ -88,8 +84,8 @@ impl fmt::Debug for OrbisRingBuilder {
             .field("log_level", &self.log_level)
             .field("has_base_dir", &self.base_dir.is_some())
             .field("has_identity_keys", &self.identity_keys.is_some())
-            .field("has_vera_config", &self.vera_config.is_some())
-            .field("has_vera_rs_config", &self.vera_rs_config.is_some())
+            .field("vera", &self.vera)
+            .field("controller_key", &self.controller_key)
             .finish()
     }
 }
@@ -102,8 +98,8 @@ impl Default for OrbisRingBuilder {
             log_level: "info".to_string(),
             base_dir: None,
             identity_keys: None,
-            vera_config: None,
-            vera_rs_config: None,
+            vera: None,
+            controller_key: None,
         }
     }
 }
@@ -139,15 +135,17 @@ impl OrbisRingBuilder {
         self
     }
 
+    /// The Vera deployment every node authorizes against and posts to.
     #[must_use]
-    pub fn vera_config(mut self, config: VeraConfig) -> Self {
-        self.vera_config = Some(config);
+    pub fn vera(mut self, config: OrbisVeraConfig) -> Self {
+        self.vera = Some(config);
         self
     }
 
+    /// The compressed secp256k1 key that manages every node's registration.
     #[must_use]
-    pub fn vera_rs_config(mut self, config: VeraRsNodeConfig) -> Self {
-        self.vera_rs_config = Some(config);
+    pub fn controller_key(mut self, key: impl Into<String>) -> Self {
+        self.controller_key = Some(key.into());
         self
     }
 
@@ -158,19 +156,8 @@ impl OrbisRingBuilder {
     pub async fn build(self) -> eyre::Result<OrbisRing> {
         let n = self.node_count;
 
-        let mut resolver = if self.vera_rs_config.is_some() {
-            test_infra::BinaryResolver::new("ORBIS", "orbis-node")
-                .cargo_package("orbis-node")
-                .cargo_features(&[
-                    "bls12-381",
-                    "redb",
-                    "bulletin-hubrs",
-                    "iroh",
-                    "authz-sourcehub",
-                ])
-        } else {
-            test_infra::BinaryResolver::new("ORBIS", "orbis-node").cargo_package("orbis-node")
-        };
+        let mut resolver =
+            test_infra::BinaryResolver::new("ORBIS", "orbis-node").cargo_package("orbis-node");
         // orbis-rs has `path = "../backbone/..."` deps — symlink backbone
         // into the temp build dir so cargo can resolve them.
         if let Some(root) = test_infra::find_project_root() {
@@ -194,7 +181,16 @@ impl OrbisRingBuilder {
             ));
         }
 
-        let grpc_ports = test_infra::allocate_ports(n)?;
+        let vera = self
+            .vera
+            .ok_or_else(|| eyre::eyre!("OrbisRingBuilder: vera is required"))?;
+        let controller_key = self
+            .controller_key
+            .ok_or_else(|| eyre::eyre!("OrbisRingBuilder: controller_key is required"))?;
+        let services_config = serde_json::to_vec(&vera.services_config())?;
+
+        let ports = test_infra::allocate_ports(2 * n)?;
+        let (grpc_ports, p2p_ports) = ports.split_at(n);
         let mut nodes = Vec::with_capacity(n);
 
         for i in 0..n {
@@ -207,40 +203,28 @@ impl OrbisRingBuilder {
             let secret_hex = &identity_keys[i];
             let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| self.log_level.clone());
 
-            let mut args_owned = vec![
+            let services_path = node_dir.join("services.json");
+            std::fs::write(&services_path, &services_config)?;
+            let args_owned = vec![
+                "--services-config".to_string(),
+                services_path.display().to_string(),
                 "--addr".to_string(),
                 format!("127.0.0.1:{}", grpc_ports[i]),
                 "--log-level".to_string(),
                 self.log_level.clone(),
-                "--data-dir".to_string(),
-                data_dir.to_str().unwrap_or("data").to_string(),
+                "--runtime-base-path".to_string(),
+                data_dir.display().to_string(),
+                "--node-controller-key".to_string(),
+                controller_key.clone(),
+                // Every peer is a local process: routes are the bound loopback
+                // addresses, without relays or discovery.
+                "--network-private-routes-only".to_string(),
+                "--network-bind-addr".to_string(),
+                format!("127.0.0.1:{}", p2p_ports[i]),
+                // Refresh only when a test asks for it.
+                "--reshare-interval-secs".to_string(),
+                "0".to_string(),
             ];
-
-            if let Some(ref vera) = self.vera_rs_config {
-                // vera.rs mode: bulletin via native requests, ACP via light client.
-                // No --authz-grpc: DefraDB's SignRequest proto has no ACP fields,
-                // so orbis skips authz (logs warning, signs anyway).
-                args_owned.extend([
-                    "--hub-rpc".to_string(),
-                    vera.rpc_url.clone(),
-                    "--hub-ws".to_string(),
-                    vera.ws_url.clone(),
-                    "--hub-chain-id".to_string(),
-                    vera.chain_id.to_string(),
-                ]);
-            } else if let Some(ref sh) = self.vera_config {
-                // Legacy Vera mode: all services via Vera
-                args_owned.extend([
-                    "--authz-grpc".to_string(),
-                    sh.grpc_url.clone(),
-                    "--bulletin-grpc".to_string(),
-                    sh.grpc_url.clone(),
-                    "--chain-rpc".to_string(),
-                    sh.comet_rpc_url.clone(),
-                    "--chain-rest".to_string(),
-                    sh.lcd_url.clone(),
-                ]);
-            }
 
             let envs_owned = [
                 (

@@ -1,25 +1,26 @@
-//! Orbis ring builder, DKG fixtures, and event subscriptions.
+//! Orbis rings on a native Vera deployment for integration tests.
 //!
-//! Provides everything needed to start, configure, and orchestrate Orbis
-//! DKG rings in integration tests:
-//! - `OrbisRingBuilder` — multi-node ring setup with threshold configuration
-//! - `DkgFixture` — complete Vera + Orbis ring setup with DKG ceremony
-//! - Event-based synchronization — WebSocket subscriptions for DKG completion
-//! - CLI wrappers — `OrbisCliClient` and `VeraCliClient` for binary-only integration
+//! - `OrbisRingBuilder` starts orbis-node processes configured for a
+//!   `VeraDeployment`
+//! - `RingAdmin` registers nodes, creates rings and stores documents through
+//!   native Vera requests
+//! - `DkgFixture` runs a deployment, a ring and its key generation
 
-pub mod cli;
+pub mod admin;
 pub mod defradb;
+mod did;
 pub mod fixture;
 pub mod ring;
+pub mod vera;
 
-pub use cli::{BulletinEventSubscription, OrbisCliClient, VeraCliClient};
+pub use admin::{RingAdmin, RING_POLICY_YAML};
 pub use defra_harness::node::RustNode;
 pub use defra_harness::{start_node, KeyringBackend, NodeConfig, OrbisSignerConfig, RunningNode};
 pub use defradb::identity::DefraHttpClient;
+pub use did::{derived_public_key, ed25519_identity_hex, signer_did_for_pk};
 pub use fixture::DkgFixture;
-pub use ring::{OrbisNode, OrbisRing, OrbisRingBuilder, VeraRsNodeConfig};
-pub use vera_harness::{allocate_vera_ports, vera_address};
-pub use vera_harness::{VeraConfig, VeraNode, VeraPorts};
+pub use ring::{OrbisNode, OrbisRing, OrbisRingBuilder};
+pub use vera::OrbisVeraConfig;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

@@ -46,6 +46,12 @@ vera-client = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539
 vera-domain = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
 vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
 vera-modules = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
+vera-crypto = { git = "https://github.com/sourcenetwork/vera.rs", rev = "2393539068539f30c84eae86101ad7c345024a99" }
+# Orbis at the revision `backbone.toml` builds its binaries from.
+bulletin = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "8ea841adfa8bae0bbf1cdb3a2c130c165373512a", default-features = false }
+cli-tool = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "8ea841adfa8bae0bbf1cdb3a2c130c165373512a" }
+crypto = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "8ea841adfa8bae0bbf1cdb3a2c130c165373512a", default-features = false, features = ["bls12-381"] }
+proto = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "8ea841adfa8bae0bbf1cdb3a2c130c165373512a" }
 
 # ── Full-stack integration tests ──────────────────────────────────────────────
 
@@ -63,6 +69,7 @@ defra-harness = { path = "crates/defra-harness" }
 acp-light-client = { path = "crates/acp-light-client" }
 vera-support = { path = "crates/vera-support" }
 vera-harness.workspace = true
+cli-tool.workspace = true
 commonware-codec.workspace = true
 test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }

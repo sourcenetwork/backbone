@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use alloy_primitives::B256;
+use alloy_primitives::{Address, Bytes, B256};
 use alloy_sol_types::SolCall as _;
 use vera_client::{
     parse_policy_id, predict_policy_id, random_policy_nonce, BlsSigner, PolicyMarshalingType,
@@ -206,10 +206,27 @@ impl VeraAccount {
             })
             .collect::<eyre::Result<Vec<_>>>()?;
         let calldata = IAcp::batchCallsCall { calls }.abi_encode();
+        self.send(ACP_ADDRESS, calldata.into()).await
+    }
+
+    /// Sign `calldata` to the module at `target`, submit it and wait for a
+    /// successful receipt.
+    pub async fn submit(
+        &self,
+        target: Address,
+        calldata: Bytes,
+    ) -> eyre::Result<TransactionReceipt> {
+        let submission = self.send(target, calldata).await?;
+        self.wait_for_success(submission).await
+    }
+
+    /// Sign `calldata` at the account's next sequence and submit it; the
+    /// sequence advances once the node admits the request.
+    async fn send(&self, target: Address, calldata: Bytes) -> eyre::Result<B256> {
         let sequence = self.signer.nonce();
-        let wire =
-            self.signer
-                .sign_native_tx_with_sequence(ACP_ADDRESS, calldata.into(), sequence)?;
+        let wire = self
+            .signer
+            .sign_native_tx_with_sequence(target, calldata, sequence)?;
         let submission = self.client.send_native_tx(&wire).await?;
         self.signer.set_next_sequence(sequence + 1);
         Ok(submission)
