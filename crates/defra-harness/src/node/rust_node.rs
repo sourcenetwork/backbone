@@ -137,6 +137,12 @@ impl DefraNode for RustNode {
                 "--signer-orbis-identity".into(),
                 signer.identity.clone(),
             ]);
+            // An Orbis ring signs with BLS, which Go peers cannot verify;
+            // the clusters that sign through a ring are Rust-only.
+            envs.push((
+                "DEFRA_ALLOW_NON_GO_VERIFIABLE_SIGNING".to_string(),
+                "1".to_string(),
+            ));
         } else if !config.signing_enabled {
             args.push("--no-signing".to_string());
         }

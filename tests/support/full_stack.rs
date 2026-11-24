@@ -39,13 +39,10 @@ pub async fn wait_for_block_finality(vera_state: &ClusterState, label: &str) {
 
 pub async fn configure_replication_link(
     source: &DefraClient,
-    source_api_url: &str,
     dest: &DefraClient,
     collections: &[&str],
     label: &str,
 ) {
-    let (replicator_sse, replicator_events) =
-        defra_harness::open_events_sse(source_api_url, "replicator_completed").await;
     let dest_addr = p2p_addr(dest, label);
     source
         .p2p_connect(&[&dest_addr])
@@ -59,8 +56,41 @@ pub async fn configure_replication_link(
     source
         .p2p_replicator_set(collections, &dest_addr)
         .unwrap_or_else(|e| panic!("{}: set replicator: {}", label, e));
-    wait_for_event_count(&replicator_events, 1, Duration::from_secs(15), label).await;
-    replicator_sse.abort();
+    wait_for_replicator(source, &dest_addr, Duration::from_secs(15), label).await;
+}
+
+/// Wait until `source` lists a replicator to the peer of `dest_addr`.
+async fn wait_for_replicator(
+    source: &DefraClient,
+    dest_addr: &str,
+    timeout: Duration,
+    label: &str,
+) {
+    let peer_id = dest_addr.rsplit('/').next().unwrap_or(dest_addr);
+    let t = Instant::now();
+    loop {
+        let listed = source.p2p_replicator_list();
+        if let Ok(ref replicators) = listed {
+            if replicators.to_string().contains(peer_id) {
+                eprintln!(
+                    "[backbone]   {} replication setup ready in {:.2}s",
+                    label,
+                    t.elapsed().as_secs_f64()
+                );
+                return;
+            }
+        }
+        if t.elapsed() > timeout {
+            panic!(
+                "{}: no replicator to {} within {}s (replicators: {:?})",
+                label,
+                peer_id,
+                timeout.as_secs(),
+                listed
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 pub fn graphql_string_literal(value: &str) -> String {
@@ -70,7 +100,7 @@ pub fn graphql_string_literal(value: &str) -> String {
 pub fn extract_doc_ids(body: &serde_json::Value, pointer: &str, label: &str) -> Vec<String> {
     body.pointer(pointer)
         .and_then(|value| value.as_array())
-        .unwrap_or_else(|| panic!("{}: expected array at {}", label, pointer))
+        .unwrap_or_else(|| panic!("{}: expected array at {}: {}", label, pointer, body))
         .iter()
         .enumerate()
         .map(|(index, value)| {
