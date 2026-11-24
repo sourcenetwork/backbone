@@ -126,7 +126,7 @@ impl DefraHttpClient {
 
     /// Add a schema (SDL string) to DefraDB.
     pub async fn schema_add(&self, sdl: &str) -> Result<()> {
-        let url = format!("{}/api/v0/schema", self.base_url);
+        let url = format!("{}/api/v0/collections", self.base_url);
         let resp = self
             .http
             .post(&url)

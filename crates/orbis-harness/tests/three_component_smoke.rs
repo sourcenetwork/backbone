@@ -97,15 +97,16 @@ async fn three_component_smoke() {
     let http = reqwest::Client::new();
 
     let schema_resp = http
-        .post(format!("{}/api/v0/schema", defra.api_url))
+        .post(format!("{}/api/v0/collections", defra.api_url))
         .header("Content-Type", "text/plain")
         .body(SIMPLE_SCHEMA)
         .send()
         .await
         .expect("schema add request");
+    let schema_status = schema_resp.status();
     assert!(
-        schema_resp.status().is_success(),
-        "schema add failed: {}",
+        schema_status.is_success(),
+        "schema add failed ({schema_status}): {}",
         schema_resp.text().await.unwrap_or_default()
     );
     eprintln!("[smoke] Schema added: Note {{ title, body }}");
