@@ -641,7 +641,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "authn"
 version = "0.0.1"
-source = "git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1#b1514f261e41ad59c287256ba124c272585adeb1"
+source = "git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15#a95dadda8cb232be66b33e5caf038eb5c3495a15"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -660,7 +660,7 @@ dependencies = [
 [[package]]
 name = "authz"
 version = "0.0.1"
-source = "git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1#b1514f261e41ad59c287256ba124c272585adeb1"
+source = "git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15#a95dadda8cb232be66b33e5caf038eb5c3495a15"
 dependencies = [
  "async-trait",
  "common",
@@ -989,14 +989,14 @@ dependencies = [
 [[package]]
 name = "bulletin"
 version = "0.0.1"
-source = "git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1#b1514f261e41ad59c287256ba124c272585adeb1"
+source = "git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15#a95dadda8cb232be66b33e5caf038eb5c3495a15"
 dependencies = [
  "async-trait",
  "authz",
  "backoff",
  "common",
  "hex",
- "orbis-reporting 0.0.3 (git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1)",
+ "orbis-reporting 0.0.3 (git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15)",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1211,7 +1211,7 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 [[package]]
 name = "cli-tool"
 version = "0.0.1"
-source = "git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1#b1514f261e41ad59c287256ba124c272585adeb1"
+source = "git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15#a95dadda8cb232be66b33e5caf038eb5c3495a15"
 dependencies = [
  "anyhow",
  "authn",
@@ -1267,7 +1267,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.0.1"
-source = "git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1#b1514f261e41ad59c287256ba124c272585adeb1"
+source = "git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15#a95dadda8cb232be66b33e5caf038eb5c3495a15"
 dependencies = [
  "hex",
  "k256 0.14.0",
@@ -1895,7 +1895,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 [[package]]
 name = "crypto"
 version = "0.0.1"
-source = "git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1#b1514f261e41ad59c287256ba124c272585adeb1"
+source = "git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15#a95dadda8cb232be66b33e5caf038eb5c3495a15"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -4254,7 +4254,7 @@ dependencies = [
 [[package]]
 name = "orbis-reporting"
 version = "0.0.3"
-source = "git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1#b1514f261e41ad59c287256ba124c272585adeb1"
+source = "git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15#a95dadda8cb232be66b33e5caf038eb5c3495a15"
 dependencies = [
  "hex",
  "serde",
@@ -4567,7 +4567,7 @@ dependencies = [
 [[package]]
 name = "pre-share"
 version = "0.0.1"
-source = "git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1#b1514f261e41ad59c287256ba124c272585adeb1"
+source = "git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15#a95dadda8cb232be66b33e5caf038eb5c3495a15"
 dependencies = [
  "base64 0.22.1",
  "bs58",
@@ -4575,7 +4575,7 @@ dependencies = [
  "crypto 0.0.1",
  "hex",
  "k256 0.14.0",
- "orbis-reporting 0.0.3 (git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1)",
+ "orbis-reporting 0.0.3 (git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15)",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4775,7 +4775,7 @@ dependencies = [
 [[package]]
 name = "proto"
 version = "0.0.1"
-source = "git+https://github.com/sourcenetwork/orbis-rs?rev=b1514f261e41ad59c287256ba124c272585adeb1#b1514f261e41ad59c287256ba124c272585adeb1"
+source = "git+https://github.com/sourcenetwork/orbis-rs?rev=a95dadda8cb232be66b33e5caf038eb5c3495a15#a95dadda8cb232be66b33e5caf038eb5c3495a15"
 dependencies = [
  "prost",
  "tonic",

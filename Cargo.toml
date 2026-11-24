@@ -47,10 +47,10 @@ vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "8193ea
 vera-modules = { git = "https://github.com/sourcenetwork/vera.rs", rev = "8193eac0c0cf19421ad1920dd678963585259d72" }
 vera-crypto = { git = "https://github.com/sourcenetwork/vera.rs", rev = "8193eac0c0cf19421ad1920dd678963585259d72" }
 # Orbis at the revision `backbone.toml` builds its binaries from.
-bulletin = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "b1514f261e41ad59c287256ba124c272585adeb1", default-features = false }
-cli-tool = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "b1514f261e41ad59c287256ba124c272585adeb1" }
-crypto = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "b1514f261e41ad59c287256ba124c272585adeb1", default-features = false, features = ["bls12-381"] }
-proto = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "b1514f261e41ad59c287256ba124c272585adeb1" }
+bulletin = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "a95dadda8cb232be66b33e5caf038eb5c3495a15", default-features = false }
+cli-tool = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "a95dadda8cb232be66b33e5caf038eb5c3495a15" }
+crypto = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "a95dadda8cb232be66b33e5caf038eb5c3495a15", default-features = false, features = ["bls12-381"] }
+proto = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "a95dadda8cb232be66b33e5caf038eb5c3495a15" }
 
 # ── Full-stack integration tests ──────────────────────────────────────────────
 
