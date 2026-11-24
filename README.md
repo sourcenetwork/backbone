@@ -35,7 +35,7 @@ backbone/
 ├── crates/
 │   ├── test-infra/       # Shared primitives (process mgmt, ports, log tracking)
 │   ├── defra-harness/    # DefraDB node manager + CLI client + fixtures
-│   ├── vera-harness/     # Go Vera process harness
+│   ├── vera-support/     # Native Vera deployments and administration
 │   ├── acp-light-client/ # Native Rust Vera proof verification
 │   ├── soak/             # Mixed-runtime DefraDB workload harness
 │   └── orbis-harness/    # Orbis ring builder + DKG fixtures
@@ -62,11 +62,12 @@ Everything needed to start, configure, and interact with DefraDB nodes:
 - Test macros — `for_each_runtime!`, `for_each_p2p_topology!`
 - Fixtures — ACP policies, schemas, identity generators
 
-### Vera harnesses
+### vera-support
 
-The local `crates/vera-harness` manages Go Vera processes. Native Rust integration
-tests use the separately pinned `vera-harness` package from `sourcenetwork/vera.rs`.
-That package starts and observes Rust validator clusters:
+`VeraDeployment` starts a vera.rs validator cluster and names the trust
+material DefraDB and Orbis are configured with (deployment id, consensus key,
+genesis id); `VeraAccount` submits native requests to it. Clusters come from
+the `vera-harness` package of `sourcenetwork/vera.rs`, pinned in the workspace:
 
 - `TestClusterBuilder` — BFT-aware cluster setup with key generation
 - `KeySet` — deterministic ed25519 + BLS threshold scheme generation
@@ -77,9 +78,10 @@ That package starts and observes Rust validator clusters:
 
 Everything needed to orchestrate Orbis DKG rings:
 
-- `OrbisRingBuilder` — multi-node ring setup with threshold configuration
-- `DkgFixture` — complete Vera + Orbis ring with DKG ceremony
-- Event-based synchronization — WebSocket subscriptions for DKG completion
+- `OrbisRingBuilder` — orbis-node processes configured for a `VeraDeployment`
+- `RingAdmin` — node authorization, ring creation, documents and key
+  derivations through native Vera requests
+- `DkgFixture` — a deployment, a 3-node ring and its finalized key
 
 ### acp-light-client
 

@@ -46,7 +46,7 @@ See `docs/architecture.md` for the full security architecture.
 backbone/
 ├── crates/
 │   ├── test-infra/       # Shared primitives (ManagedProcess, ports, log tracking, run dirs)
-│   ├── vera-harness/     # Go Vera node manager used by defra-harness
+│   ├── vera-support/     # Native Vera deployments and administration
 │   ├── defra-harness/    # DefraDB node manager + CLI client + test fixtures
 │   ├── orbis-harness/    # Orbis ring builder + DKG fixtures for vera.rs
 │   ├── acp-light-client/ # Native Rust Vera proof verification
