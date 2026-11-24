@@ -15,6 +15,6 @@ serde_json.workspace = true
 rand.workspace = true
 futures.workspace = true
 eyre.workspace = true
-identity = { git = "https://github.com/sourcenetwork/defradb.rs", rev = "8d8bb299f" }
-crypto = { git = "https://github.com/sourcenetwork/defradb.rs", rev = "8d8bb299f" }
+identity = { git = "https://github.com/sourcenetwork/defradb.rs", rev = "19ac5f66dd3ee07d54a00df6ca96875efeab9a92" }
+crypto = { git = "https://github.com/sourcenetwork/defradb.rs", rev = "19ac5f66dd3ee07d54a00df6ca96875efeab9a92" }
 hex.workspace = true
