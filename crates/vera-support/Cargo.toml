@@ -8,11 +8,12 @@ publish = false
 
 [dependencies]
 vera-client.workspace = true
+vera-crypto.workspace = true
 vera-domain.workspace = true
 vera-harness.workspace = true
 vera-modules.workspace = true
 alloy-primitives.workspace = true
-alloy-sol-types = "1"
+rand.workspace = true
 commonware-codec.workspace = true
 eyre.workspace = true
 hex.workspace = true

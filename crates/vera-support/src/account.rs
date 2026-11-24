@@ -1,12 +1,15 @@
 use std::time::Duration;
 
 use alloy_primitives::{Address, Bytes, B256};
-use alloy_sol_types::SolCall as _;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use vera_client::{
-    parse_policy_id, predict_policy_id, random_policy_nonce, BlsSigner, PolicyMarshalingType,
-    PolicyNonce, TransactionReceipt, VeraClient, ACP_ADDRESS,
+    create_operation_token, parse_policy_id, predict_policy_id, random_policy_nonce, BlsSigner,
+    PolicyMarshalingType, PolicyNonce, PolicyOperation, Secp256k1SigningKey, TransactionReceipt,
+    VeraClient, ACP_ADDRESS,
 };
-use vera_modules::acp::abi::IAcp;
+use vera_crypto::operation::OperationId;
+use vera_modules::acp::types::PolicyCmd;
 
 /// The secret scalar of the account the tests administer Vera with.
 pub const ADMIN_KEY: [u8; 32] = [7; 32];
@@ -15,6 +18,8 @@ pub const ADMIN_KEY: [u8; 32] = [7; 32];
 const YAML: u8 = 1;
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(300);
 const RECEIPT_POLL_ATTEMPTS: u32 = 400;
+/// How long an owner's signed operation stays valid.
+const OPERATION_LIFETIME_SECS: u64 = 300;
 
 #[derive(Clone, Copy)]
 pub enum AcpRelationshipTxKind {
@@ -170,43 +175,55 @@ impl VeraAccount {
         Ok(serde_json::from_slice(&posts)?)
     }
 
-    /// Submit `txs` as one ACP batch, applied all or none, without waiting
-    /// for its receipt.
+    /// Submit `txs` as one ordered command list that `owner` signs once,
+    /// applied all or none under the owner's authority, without waiting for
+    /// its receipt. `genesis_id` names the deployment the operation binds to.
     pub async fn submit_relationship_batch(
         &self,
+        owner: &Secp256k1SigningKey,
+        genesis_id: B256,
         txs: &[AcpRelationshipTx<'_>],
     ) -> eyre::Result<B256> {
-        let calls = txs
+        let commands = txs
             .iter()
             .map(|tx| {
-                let policy_id = parse_policy_id(tx.policy_id)?;
-                let resource = tx.resource.to_string();
-                let object_id = tx.object_id.to_string();
-                let relation = tx.relation.to_string();
-                let actor = tx.actor.to_string();
-                Ok(match tx.kind {
-                    AcpRelationshipTxKind::Set => IAcp::setRelationshipCall {
-                        policyId: policy_id,
-                        resource,
-                        objectId: object_id,
-                        relation,
-                        actor,
+                let relationship = serde_json::json!({
+                    "resource": tx.resource,
+                    "object_id": tx.object_id,
+                    "relation": tx.relation,
+                    "subject": { "Entity": tx.actor },
+                });
+                let command = match tx.kind {
+                    AcpRelationshipTxKind::Set => {
+                        serde_json::json!({ "SetRelationship": relationship })
                     }
-                    .abi_encode(),
-                    AcpRelationshipTxKind::Delete => IAcp::deleteRelationshipCall {
-                        policyId: policy_id,
-                        resource,
-                        objectId: object_id,
-                        relation,
-                        actor,
+                    AcpRelationshipTxKind::Delete => {
+                        serde_json::json!({ "DeleteRelationship": relationship })
                     }
-                    .abi_encode(),
-                }
-                .into())
+                };
+                Ok((
+                    tx.policy_id.to_string(),
+                    serde_json::from_value::<PolicyCmd>(command)?,
+                ))
             })
             .collect::<eyre::Result<Vec<_>>>()?;
-        let calldata = IAcp::batchCallsCall { calls }.abi_encode();
-        self.send(ACP_ADDRESS, calldata.into()).await
+        let operation = PolicyOperation::list(commands)?;
+        let issued_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let identity = OperationId::new(issued_at + OPERATION_LIFETIME_SECS, rand::random());
+        let issuer = vera_crypto::secp256k1::did_from_secp256k1_pubkey(
+            owner.verifying_key().to_sec1_bytes().as_ref(),
+        )?;
+        let claims = operation.claims(
+            &issuer,
+            self.did(),
+            self.signer.chain_id(),
+            genesis_id.0,
+            identity,
+            issued_at,
+        )?;
+        let token = create_operation_token(owner, &claims)?;
+        self.send(ACP_ADDRESS, operation.calldata(&token)?.into())
+            .await
     }
 
     /// Sign `calldata` to the module at `target`, submit it and wait for a

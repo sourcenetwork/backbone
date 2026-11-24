@@ -90,6 +90,14 @@ struct ServiceIdentity {
 }
 
 impl ServiceIdentity {
+    /// The secp256k1 key the identity signs Vera operations with.
+    fn signing_key(&self) -> vera_client::Secp256k1SigningKey {
+        vera_client::Secp256k1SigningKey::from_slice(
+            &hex::decode(&self.private_key_hex).expect("service key hex"),
+        )
+        .expect("service key")
+    }
+
     fn new_file_keyring(label: &str, base_dir: &std::path::Path) -> Self {
         let keyring_dir = base_dir.join(label).join("keys");
         std::fs::create_dir_all(&keyring_dir)
@@ -641,8 +649,9 @@ async fn secure_training_data_compartments() {
         })
         .collect::<Vec<_>>();
     let submit_start = Instant::now();
+    // Each document's owner is its writer, TRAINING_SVC, who signs the grants.
     let grant_tx_hash = vera_account
-        .submit_relationship_batch(&grant_txs)
+        .submit_relationship_batch(&training_svc.signing_key(), vera.genesis_id(), &grant_txs)
         .await
         .unwrap_or_else(|e| panic!("submit Step 16c grant tx batch: {}", e));
     eprintln!(
@@ -962,7 +971,7 @@ async fn secure_training_data_compartments() {
         .map(|s| s.height)
         .unwrap_or(0);
     let t = Instant::now();
-    let mut audit_grant_txs = acme_doc_ids
+    let audit_grant_txs = acme_doc_ids
         .iter()
         .map(|doc_id| AcpRelationshipTx {
             kind: AcpRelationshipTxKind::Set,
@@ -973,28 +982,42 @@ async fn secure_training_data_compartments() {
             actor: &audit_svc.did_key,
         })
         .collect::<Vec<_>>();
-    audit_grant_txs.extend(globex_doc_ids.iter().map(|doc_id| AcpRelationshipTx {
-        kind: AcpRelationshipTxKind::Set,
-        policy_id: &globex_policy_id,
-        resource: "ticket",
-        object_id: doc_id.as_str(),
-        relation: "reader",
-        actor: &audit_svc.did_key,
-    }));
+    let globex_audit_grant_txs = globex_doc_ids
+        .iter()
+        .map(|doc_id| AcpRelationshipTx {
+            kind: AcpRelationshipTxKind::Set,
+            policy_id: &globex_policy_id,
+            resource: "ticket",
+            object_id: doc_id.as_str(),
+            relation: "reader",
+            actor: &audit_svc.did_key,
+        })
+        .collect::<Vec<_>>();
+    // Each compartment's documents are granted by their owner, its writer:
+    // one signed operation per owner, each applied all or none.
     let submit_start = Instant::now();
-    let audit_grant_hash = vera_account
-        .submit_relationship_batch(&audit_grant_txs)
-        .await
-        .unwrap_or_else(|e| panic!("submit Step 25 audit grant tx batch: {}", e));
-    eprintln!(
-        "[backbone]   Step 25 submitted {} audit grant ops in one tx in {:.2}s",
-        audit_grant_txs.len(),
-        submit_start.elapsed().as_secs_f64()
-    );
-    eprintln!("[backbone]   Step 25 batch tx={}", audit_grant_hash);
-    wait_for_tx_receipt(vera_account, audit_grant_hash, "Step 25")
-        .await
-        .unwrap_or_else(|e| panic!("wait for Step 25 audit grant receipt: {}", e));
+    for (owner, txs, label) in [
+        (&training_svc, &audit_grant_txs, "acme"),
+        (&globex_svc, &globex_audit_grant_txs, "globex"),
+    ] {
+        let audit_grant_hash = vera_account
+            .submit_relationship_batch(&owner.signing_key(), vera.genesis_id(), txs)
+            .await
+            .unwrap_or_else(|e| panic!("submit Step 25 {label} audit grant batch: {}", e));
+        eprintln!(
+            "[backbone]   Step 25 submitted {} {} audit grant ops in one request in {:.2}s",
+            txs.len(),
+            label,
+            submit_start.elapsed().as_secs_f64()
+        );
+        eprintln!(
+            "[backbone]   Step 25 {} batch tx={}",
+            label, audit_grant_hash
+        );
+        wait_for_tx_receipt(vera_account, audit_grant_hash, "Step 25")
+            .await
+            .unwrap_or_else(|e| panic!("wait for Step 25 {label} audit grant receipt: {}", e));
+    }
     eprintln!(
         "[backbone] Step 25: AUDIT_SVC granted reader on {} acme docs + {} globex docs in {:.2}s",
         acme_doc_ids.len(),
@@ -1115,7 +1138,7 @@ async fn secure_training_data_compartments() {
         .collect::<Vec<_>>();
     let submit_start = Instant::now();
     let revoke_tx_hash = vera_account
-        .submit_relationship_batch(&revoke_txs)
+        .submit_relationship_batch(&training_svc.signing_key(), vera.genesis_id(), &revoke_txs)
         .await
         .unwrap_or_else(|e| panic!("submit Step 29 revoke tx batch: {}", e));
     eprintln!(

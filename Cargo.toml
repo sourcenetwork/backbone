@@ -69,6 +69,7 @@ acp-light-client = { path = "crates/acp-light-client" }
 vera-support = { path = "crates/vera-support" }
 vera-harness.workspace = true
 cli-tool.workspace = true
+vera-client.workspace = true
 commonware-codec.workspace = true
 test-infra = { path = "crates/test-infra" }
 tokio = { workspace = true, features = ["full"] }

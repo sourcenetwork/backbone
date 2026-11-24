@@ -770,6 +770,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "vera-client",
  "vera-harness",
  "vera-support",
 ]
@@ -7150,13 +7151,14 @@ name = "vera-support"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "alloy-sol-types",
  "commonware-codec",
  "eyre",
  "hex",
+ "rand 0.8.5",
  "serde_json",
  "tokio",
  "vera-client",
+ "vera-crypto",
  "vera-domain",
  "vera-harness",
  "vera-modules",
