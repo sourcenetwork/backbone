@@ -97,18 +97,20 @@ fn extract_bulletin_post_event(
     // Check for bulletin post events
     let post_ids = events
         .get("bulletin_post.post_id")
-        .or_else(|| events.get("sourcehub.bulletin.v1beta1.EventBulletinPost.post_id"))
+        .or_else(|| events.get("vera.bulletin.EventPostCreated.post_id"))
         .and_then(|v| v.as_array())?;
 
     let namespaces = events
         .get("bulletin_post.namespace")
-        .or_else(|| events.get("sourcehub.bulletin.v1beta1.EventBulletinPost.namespace"))
+        .or_else(|| events.get("vera.bulletin.EventPostCreated.namespace_id"))
         .and_then(|v| v.as_array());
 
-    let post_id = post_ids.first()?.as_str()?;
+    // Typed event attributes carry JSON-encoded strings.
+    let post_id = post_ids.first()?.as_str()?.trim_matches('"');
     let namespace = namespaces
         .and_then(|ns| ns.first())
         .and_then(|v| v.as_str())
+        .map(|ns| ns.trim_matches('"'))
         .unwrap_or("orbis")
         .to_string();
 

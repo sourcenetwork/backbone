@@ -29,7 +29,7 @@ resources:
 "#;
 
 #[tokio::test]
-#[ignore = "requires sourcehubd on PATH and ~2 min runtime"]
+#[ignore = "requires verad on PATH and ~2 min runtime"]
 async fn dkg_store_pre_decrypt_full_pipeline() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -38,7 +38,7 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
 
     let fixture = setup_dkg().await;
     let orbis_cli = &fixture.orbis_cli;
-    let sourcehub_cli = &fixture.sourcehub_cli;
+    let vera_cli = &fixture.vera_cli;
     let endpoint = fixture.endpoint();
     let ring_pk_hex = &fixture.ring_pk_hex;
     let ring_id = &fixture.ring_id;
@@ -62,15 +62,15 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     let namespace = "e2e_pipeline_ns";
     let full_namespace = format!("bulletin/{}", namespace);
 
-    let policy_id = sourcehub_cli
+    let policy_id = vera_cli
         .create_policy(DEFAULT_ACP_POLICY_YAML)
         .expect("add policy");
 
-    sourcehub_cli
+    vera_cli
         .register_namespace(namespace)
         .expect("register user namespace");
 
-    sourcehub_cli
+    vera_cli
         .add_collaborator(namespace, &fixture.node_infos[0].public_address)
         .expect("add node as collaborator");
 
@@ -102,7 +102,7 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
             date: None,
         };
         let serialized: Vec<u8> = serde_json::to_vec(&payload).expect("serialize payload");
-        sourcehub_cli
+        vera_cli
             .create_post(namespace, &hex::encode(&serialized), &hex::encode(&proof))
             .expect("create_bulletin_post")
     };
@@ -126,7 +126,7 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
         )
         .expect("prepare_secret derived");
 
-    let sequence_before = sourcehub_cli
+    let sequence_before = vera_cli
         .get_account_sequence(node1_address)
         .expect("get sequence before store");
 
@@ -168,7 +168,7 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
 
     // Verify tx was broadcast
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let sequence_after = sourcehub_cli
+    let sequence_after = vera_cli
         .get_account_sequence(node1_address)
         .expect("get sequence after store");
     assert!(
@@ -179,10 +179,10 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     // ================================================================
     // Verify bulletin posts + BLS signature
     // ================================================================
-    let manual_bytes = sourcehub_cli
+    let manual_bytes = vera_cli
         .read_post(&full_namespace, &object_id_manual)
         .expect("read manual post");
-    let service_bytes = sourcehub_cli
+    let service_bytes = vera_cli
         .read_post(&full_namespace, &object_id_service)
         .expect("read service post");
 
@@ -213,11 +213,11 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     // ACP: register objects + set relationships
     // ================================================================
     for obj_id in [&object_id_manual, &object_id_derived] {
-        sourcehub_cli
+        vera_cli
             .register_object(&policy_id, obj_id, resource)
             .expect("register_object_to_chain");
 
-        sourcehub_cli
+        vera_cli
             .set_relationship(&policy_id, resource, obj_id, relation, did_pk_string)
             .expect("set_relationship_on_chain");
     }
@@ -259,7 +259,7 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
     // ================================================================
     // Idempotent store
     // ================================================================
-    let seq_before = sourcehub_cli
+    let seq_before = vera_cli
         .get_account_sequence(node1_address)
         .expect("seq before idempotent store");
 
@@ -279,7 +279,7 @@ async fn dkg_store_pre_decrypt_full_pipeline() {
         .expect("idempotent store");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let seq_after = sourcehub_cli
+    let seq_after = vera_cli
         .get_account_sequence(node1_address)
         .expect("seq after idempotent store");
 

@@ -2,20 +2,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use eyre::{eyre, Result};
-use sourcehub_harness::SourceHubNode;
+use vera_harness::VeraNode;
 
-pub struct SourceHubCliClient {
+pub struct VeraCliClient {
     binary_path: PathBuf,
     home_dir: PathBuf,
     node_url: String,
     chain_id: String,
 }
 
-impl SourceHubCliClient {
-    pub fn from_node(node: &SourceHubNode) -> Result<Self> {
-        let resolved = test_infra::BinaryResolver::new("SOURCEHUBD", "sourcehubd").resolve()?;
+impl VeraCliClient {
+    pub fn from_node(node: &VeraNode) -> Result<Self> {
         Ok(Self {
-            binary_path: resolved.path,
+            binary_path: vera_harness::resolve_binary()?,
             home_dir: node.home_dir.clone(),
             node_url: node.comet_rpc_url.clone(),
             chain_id: node.chain_id.clone(),
@@ -88,7 +87,7 @@ impl SourceHubCliClient {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             Err(eyre!(
-                "sourcehubd failed (exit {}): stderr={}, stdout={}",
+                "verad failed (exit {}): stderr={}, stdout={}",
                 output.status,
                 stderr.trim(),
                 stdout.trim(),

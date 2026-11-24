@@ -1,4 +1,4 @@
-//! Three-component smoke test: SourceHub + DefraDB + Orbis.
+//! Three-component smoke test: Vera + DefraDB + Orbis.
 
 use std::time::Duration;
 
@@ -6,9 +6,9 @@ use defra_harness::node::RustNode;
 use orbis_harness::cli::types::RingPayload;
 use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
-    allocate_source_hub_ports, generate_identity_keys, generate_run_id, start_node,
-    BulletinEventSubscription, KeyringBackend, NodeConfig, OrbisCliClient, SourceHubCliClient,
-    SourceHubConfig, SourceHubNode,
+    allocate_vera_ports, generate_identity_keys, generate_run_id, start_node,
+    BulletinEventSubscription, KeyringBackend, NodeConfig, OrbisCliClient, VeraCliClient,
+    VeraConfig, VeraNode,
 };
 
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
@@ -33,7 +33,7 @@ resources:
 "#;
 
 #[tokio::test]
-#[ignore = "requires sourcehubd and defra on PATH, ~2 min runtime"]
+#[ignore = "requires verad and defra on PATH, ~2 min runtime"]
 async fn three_component_smoke() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
@@ -54,15 +54,15 @@ async fn three_component_smoke() {
     eprintln!("[smoke] Run ID: {}", run_id);
 
     // ================================================================
-    // 1. Start SourceHub
+    // 1. Start Vera
     // ================================================================
-    eprintln!("[smoke] Starting SourceHub...");
-    let sh_ports = allocate_source_hub_ports().expect("allocate sourcehub ports");
-    let sh_home = run_dir.node_dir("sourcehub").expect("create sourcehub dir");
+    eprintln!("[smoke] Starting Vera...");
+    let sh_ports = allocate_vera_ports().expect("allocate vera ports");
+    let sh_home = run_dir.node_dir("vera").expect("create vera dir");
     let sh_log_dir = sh_home.join("logs");
-    std::fs::create_dir_all(&sh_log_dir).expect("create sourcehub log dir");
+    std::fs::create_dir_all(&sh_log_dir).expect("create vera log dir");
 
-    let sourcehub = SourceHubNode::start(
+    let vera = VeraNode::start(
         sh_home,
         sh_log_dir,
         &sh_ports,
@@ -70,15 +70,15 @@ async fn three_component_smoke() {
         Duration::from_secs(60),
     )
     .await
-    .expect("sourcehub should start");
+    .expect("vera should start");
 
     eprintln!(
-        "[smoke] SourceHub ready: LCD={}, gRPC={}, RPC={}",
-        sourcehub.lcd_url, sourcehub.grpc_url, sourcehub.comet_rpc_url
+        "[smoke] Vera ready: LCD={}, gRPC={}, RPC={}",
+        vera.lcd_url, vera.grpc_url, vera.comet_rpc_url
     );
 
     // ================================================================
-    // 2. Start DefraDB with identity + file keyring + SourceHub ACP
+    // 2. Start DefraDB with identity + file keyring + Vera ACP
     // ================================================================
     eprintln!("[smoke] Starting DefraDB with identity...");
     let defra_binary = test_infra::BinaryResolver::new("DEFRA", "defra")
@@ -100,8 +100,8 @@ async fn three_component_smoke() {
     );
     config.p2p_enabled = true;
     config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", ports[1]));
-    config.vera = Some(SourceHubConfig::from(&sourcehub));
-    config.acp_document_type = Some("source-hub".to_string());
+    config.vera = Some(VeraConfig::from(&vera));
+    config.acp_document_type = Some("vera".to_string());
     config.identity = Some(defra_key.clone());
     config.keyring = KeyringBackend::File {
         path: keyring_path,
@@ -110,7 +110,7 @@ async fn three_component_smoke() {
 
     let defra = start_node(&node, config, Duration::from_secs(30))
         .await
-        .expect("defra should start with identity + SourceHub ACP");
+        .expect("defra should start with identity + Vera ACP");
 
     eprintln!("[smoke] DefraDB ready: {}", defra.api_url);
 
@@ -124,14 +124,13 @@ async fn three_component_smoke() {
         .log_level("info")
         .base_dir(run_dir.path())
         .identity_keys(orbis_keys)
-        .sourcehub_config(SourceHubConfig::from(&sourcehub))
+        .vera_config(VeraConfig::from(&vera))
         .build()
         .await
         .expect("ring should start");
 
-    // Fund orbis nodes' generated signing keys via the SourceHub faucet.
-    let sourcehub_cli =
-        SourceHubCliClient::from_node(&sourcehub).expect("resolve sourcehubd binary");
+    // Fund orbis nodes' generated signing keys via the Vera faucet.
+    let vera_cli = VeraCliClient::from_node(&vera).expect("resolve verad binary");
     for i in 0..ring.node_count() {
         let pk_path = ring.node(i).data_dir().join("data/public_key.txt");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -148,7 +147,7 @@ async fn three_component_smoke() {
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
         eprintln!("[smoke]   Funding orbis node{}: {}", i, address);
-        sourcehub_cli
+        vera_cli
             .fund(&address)
             .unwrap_or_else(|e| panic!("fund node{}: {}", i, e));
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -170,17 +169,17 @@ async fn three_component_smoke() {
         node_infos.push(info);
     }
 
-    sourcehub_cli
+    vera_cli
         .register_namespace(BULLETIN_RING_NAMESPACE)
         .expect("register ring namespace");
 
     for info in &node_infos {
-        sourcehub_cli
+        vera_cli
             .add_collaborator(BULLETIN_RING_NAMESPACE, &info.public_address)
             .expect("add collaborator");
     }
 
-    let event_subscription = BulletinEventSubscription::connect(&sourcehub.comet_rpc_url)
+    let event_subscription = BulletinEventSubscription::connect(&vera.comet_rpc_url)
         .await
         .expect("event subscription");
 
@@ -197,7 +196,7 @@ async fn three_component_smoke() {
         .await
         .expect("DKG completion event");
 
-    let post_payload = sourcehub_cli
+    let post_payload = vera_cli
         .read_post(BULLETIN_RING_NAMESPACE, &post_event.post_id)
         .expect("read ring post");
 
@@ -277,7 +276,7 @@ async fn three_component_smoke() {
     // ================================================================
     eprintln!("[smoke] Testing Orbis secret storage...");
 
-    let policy_id = sourcehub_cli
+    let policy_id = vera_cli
         .create_policy(DEFAULT_ACP_POLICY_YAML)
         .expect("add policy");
 
@@ -285,10 +284,10 @@ async fn three_component_smoke() {
     let permission = "read";
     let namespace = "smoke_test_ns";
 
-    sourcehub_cli
+    vera_cli
         .register_namespace(namespace)
         .expect("register user namespace");
-    sourcehub_cli
+    vera_cli
         .add_collaborator(namespace, &node_infos[0].public_address)
         .expect("add node as collaborator");
 
@@ -321,7 +320,7 @@ async fn three_component_smoke() {
     // All three components verified!
     // ================================================================
     eprintln!("[smoke] === Three-component smoke test passed ===");
-    eprintln!("[smoke] SourceHub: LCD={}", sourcehub.lcd_url);
+    eprintln!("[smoke] Vera: LCD={}", vera.lcd_url);
     eprintln!("[smoke] DefraDB: HTTP={}", defra.api_url);
     eprintln!(
         "[smoke] Orbis: {} nodes, ring_pk={}...",
@@ -331,5 +330,5 @@ async fn three_component_smoke() {
 
     drop(ring);
     drop(defra);
-    drop(sourcehub);
+    drop(vera);
 }

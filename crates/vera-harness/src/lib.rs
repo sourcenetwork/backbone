@@ -5,13 +5,6 @@ mod node;
 pub use identity::vera_address;
 pub use node::VeraNode;
 
-// Keep existing Orbis harness consumers source-compatible.
-pub use allocate_vera_ports as allocate_source_hub_ports;
-pub use identity::vera_address as source_hub_address;
-pub use VeraConfig as SourceHubConfig;
-pub use VeraNode as SourceHubNode;
-pub use VeraPorts as SourceHubPorts;
-
 /// Connection info for a Vera node.
 ///
 /// A lightweight data carrier that can be passed to DefraDB or Orbis config

@@ -2,7 +2,7 @@
 
 The cryptographic and infrastructural foundation for the Source Network stack.
 
-Backbone wires together the three core Rust components — **defra.rs** (data), **hub.rs** (consensus + policy), and **orbis.rs** (identity + DKG) — into a unified system where data encryption, access control, and P2P replication work as autonomic infrastructure.
+Backbone wires together the three core Rust components — **defra.rs** (data), **vera.rs** (consensus + policy), and **orbis.rs** (identity + DKG) — into a unified system where data encryption, access control, and P2P replication work as autonomic infrastructure.
 
 ## The Stack
 
@@ -19,7 +19,7 @@ Backbone wires together the three core Rust components — **defra.rs** (data), 
    │                  │                  │
    ▼                  ▼                  ▼
 ┌────────┐     ┌────────────┐     ┌────────────┐
-│defra.rs│     │   hub.rs   │     │  orbis.rs  │
+│defra.rs│     │  vera.rs   │     │  orbis.rs  │
 │        │     │            │     │            │
 │ Data   │     │ Consensus  │     │ Identity   │
 │ CRDTs  │     │ Zanzibar   │     │ DKG        │
@@ -162,10 +162,6 @@ Each component repo imports its harness crate for integration tests:
 [dependencies]
 defra-harness = { git = "https://github.com/sourcenetwork/backbone" }
 
-# In hub.rs/crates/hub-e2e/Cargo.toml
-[dependencies]
-hub-harness = { git = "https://github.com/sourcenetwork/backbone" }
-
 # In orbis-rs/crates/orbis-e2e/Cargo.toml
 [dependencies]
 orbis-harness = { git = "https://github.com/sourcenetwork/backbone" }
@@ -205,8 +201,8 @@ Run `bash .github/scripts/test-native-stack.sh` with Rust 1.99.1 and protoc
 installed. The script uses a temporary source checkout and retains build artifacts
 under `target/native-stack` and per-curve logs and scenario evidence under
 `target/native-stack-runs`. Orbis state and logs remain in each attempt's private
-`orbis-clusters` directory and are not included in CI artifacts. The older
-`tests/full_stack.rs` fixture uses EVM
-administration and is not the native CI entry point. Native coverage checks
+`orbis-clusters` directory and are not included in CI artifacts. The
+`tests/full_stack.rs` fixture administers Vera through native requests from the
+test process and is not the native CI entry point. Native coverage checks
 Orbis authorization and signed document replication; it does not yet cover
 Defra collection-level strict ACP enforcement on replicated updates.

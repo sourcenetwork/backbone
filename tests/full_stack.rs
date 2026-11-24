@@ -248,7 +248,7 @@ async fn secure_training_data_compartments() {
             .log_level("info")
             .base_dir(run_dir.path())
             .identity_keys(orbis_operator_keys.clone())
-            .hub_rs_config(VeraRsNodeConfig {
+            .vera_rs_config(VeraRsNodeConfig {
                 rpc_url: vera_rpc_url.clone(),
                 ws_url: vera_ws_url.clone(),
                 chain_id: vera_chain_id,
@@ -525,8 +525,8 @@ async fn secure_training_data_compartments() {
     );
     acme_defra_config.p2p_enabled = true;
     acme_defra_config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", acme_defra_ports[1]));
-    acme_defra_config.hub_rs_address = Some(vera_cluster.node(0).rpc_url());
-    acme_defra_config.acp_document_type = Some("hub-rs".to_string());
+    acme_defra_config.vera_rs_address = Some(vera_cluster.node(0).rpc_url());
+    acme_defra_config.acp_document_type = Some("verars".to_string());
     acme_defra_config.identity = Some(acme_defra_svc.private_key_hex.clone());
     acme_defra_config.keyring = KeyringBackend::File {
         path: acme_keyring_path,
@@ -565,8 +565,8 @@ async fn secure_training_data_compartments() {
     platform_defra_config.p2p_enabled = true;
     platform_defra_config.p2p_addr =
         Some(format!("/ip4/127.0.0.1/tcp/{}", platform_defra_ports[1]));
-    platform_defra_config.hub_rs_address = Some(vera_cluster.node(0).rpc_url());
-    platform_defra_config.acp_document_type = Some("hub-rs".to_string());
+    platform_defra_config.vera_rs_address = Some(vera_cluster.node(0).rpc_url());
+    platform_defra_config.acp_document_type = Some("verars".to_string());
     platform_defra_config.identity = Some(platform_defra_svc.private_key_hex.clone());
     platform_defra_config.keyring = KeyringBackend::File {
         path: platform_keyring_path,
@@ -862,8 +862,8 @@ async fn secure_training_data_compartments() {
     );
     globex_defra_config.p2p_enabled = true;
     globex_defra_config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", globex_defra_ports[1]));
-    globex_defra_config.hub_rs_address = Some(vera_cluster.node(0).rpc_url());
-    globex_defra_config.acp_document_type = Some("hub-rs".to_string());
+    globex_defra_config.vera_rs_address = Some(vera_cluster.node(0).rpc_url());
+    globex_defra_config.acp_document_type = Some("verars".to_string());
     globex_defra_config.identity = Some(globex_defra_svc.private_key_hex.clone());
     globex_defra_config.keyring = KeyringBackend::File {
         path: globex_keyring_path,

@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use super::health::{self, HealthCheckConfig};
 use super::node::OrbisNode;
-use sourcehub_harness::SourceHubConfig;
+use vera_harness::VeraConfig;
 
-/// Configuration for connecting orbis nodes to a hub.rs cluster.
+/// Configuration for connecting orbis nodes to a vera.rs cluster.
 pub struct VeraRsNodeConfig {
     pub rpc_url: String,
     pub ws_url: String,
@@ -15,7 +15,7 @@ pub struct VeraRsNodeConfig {
 
 /// A running Orbis ring with managed node processes.
 ///
-/// Does not own infrastructure (SourceHub, DefraDB, TestRunDir).
+/// Does not own infrastructure (Vera, DefraDB, TestRunDir).
 /// The caller is responsible for managing those lifetimes and ensuring
 /// correct drop order (ring before infrastructure before run dir).
 pub struct OrbisRing {
@@ -76,8 +76,8 @@ pub struct OrbisRingBuilder {
     log_level: String,
     base_dir: Option<PathBuf>,
     identity_keys: Option<Vec<String>>,
-    sourcehub_config: Option<SourceHubConfig>,
-    hub_rs_config: Option<VeraRsNodeConfig>,
+    vera_config: Option<VeraConfig>,
+    vera_rs_config: Option<VeraRsNodeConfig>,
 }
 
 impl fmt::Debug for OrbisRingBuilder {
@@ -88,8 +88,8 @@ impl fmt::Debug for OrbisRingBuilder {
             .field("log_level", &self.log_level)
             .field("has_base_dir", &self.base_dir.is_some())
             .field("has_identity_keys", &self.identity_keys.is_some())
-            .field("has_sourcehub_config", &self.sourcehub_config.is_some())
-            .field("has_hub_rs_config", &self.hub_rs_config.is_some())
+            .field("has_vera_config", &self.vera_config.is_some())
+            .field("has_vera_rs_config", &self.vera_rs_config.is_some())
             .finish()
     }
 }
@@ -102,8 +102,8 @@ impl Default for OrbisRingBuilder {
             log_level: "info".to_string(),
             base_dir: None,
             identity_keys: None,
-            sourcehub_config: None,
-            hub_rs_config: None,
+            vera_config: None,
+            vera_rs_config: None,
         }
     }
 }
@@ -140,14 +140,14 @@ impl OrbisRingBuilder {
     }
 
     #[must_use]
-    pub fn sourcehub_config(mut self, config: SourceHubConfig) -> Self {
-        self.sourcehub_config = Some(config);
+    pub fn vera_config(mut self, config: VeraConfig) -> Self {
+        self.vera_config = Some(config);
         self
     }
 
     #[must_use]
-    pub fn hub_rs_config(mut self, config: VeraRsNodeConfig) -> Self {
-        self.hub_rs_config = Some(config);
+    pub fn vera_rs_config(mut self, config: VeraRsNodeConfig) -> Self {
+        self.vera_rs_config = Some(config);
         self
     }
 
@@ -158,7 +158,7 @@ impl OrbisRingBuilder {
     pub async fn build(self) -> eyre::Result<OrbisRing> {
         let n = self.node_count;
 
-        let mut resolver = if self.hub_rs_config.is_some() {
+        let mut resolver = if self.vera_rs_config.is_some() {
             test_infra::BinaryResolver::new("ORBIS", "orbis-node")
                 .cargo_package("orbis-node")
                 .cargo_features(&[
@@ -216,20 +216,20 @@ impl OrbisRingBuilder {
                 data_dir.to_str().unwrap_or("data").to_string(),
             ];
 
-            if let Some(ref hub) = self.hub_rs_config {
-                // Hub.rs mode: bulletin via EVM precompiles, ACP via light client.
+            if let Some(ref vera) = self.vera_rs_config {
+                // vera.rs mode: bulletin via native requests, ACP via light client.
                 // No --authz-grpc: DefraDB's SignRequest proto has no ACP fields,
                 // so orbis skips authz (logs warning, signs anyway).
                 args_owned.extend([
                     "--hub-rpc".to_string(),
-                    hub.rpc_url.clone(),
+                    vera.rpc_url.clone(),
                     "--hub-ws".to_string(),
-                    hub.ws_url.clone(),
+                    vera.ws_url.clone(),
                     "--hub-chain-id".to_string(),
-                    hub.chain_id.to_string(),
+                    vera.chain_id.to_string(),
                 ]);
-            } else if let Some(ref sh) = self.sourcehub_config {
-                // Legacy SourceHub mode: all services via SourceHub
+            } else if let Some(ref sh) = self.vera_config {
+                // Legacy Vera mode: all services via Vera
                 args_owned.extend([
                     "--authz-grpc".to_string(),
                     sh.grpc_url.clone(),

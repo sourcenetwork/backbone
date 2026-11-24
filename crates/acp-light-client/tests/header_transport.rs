@@ -87,9 +87,9 @@ async fn connection_failures_keep_their_text() {
         .map(|_| ())
         .unwrap_err();
     let (message, chain) = text(error);
-    assert_eq!(message, "connecting to hub.rs WebSocket");
+    assert_eq!(message, "connecting to Vera WebSocket");
     assert!(
-        chain.starts_with("connecting to hub.rs WebSocket: IO error: "),
+        chain.starts_with("connecting to Vera WebSocket: IO error: "),
         "{chain}"
     );
 
@@ -113,8 +113,8 @@ async fn connection_failures_keep_their_text() {
     assert_eq!(
         text(error),
         (
-            "connecting to hub.rs WebSocket".to_string(),
-            "connecting to hub.rs WebSocket: HTTP error: 404 Not Found".to_string()
+            "connecting to Vera WebSocket".to_string(),
+            "connecting to Vera WebSocket: HTTP error: 404 Not Found".to_string()
         )
     );
 }

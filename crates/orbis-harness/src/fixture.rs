@@ -3,32 +3,32 @@
 //! Running DKG is expensive (~30-40s). This module provides a helper that
 //! starts a 3-node ring, runs DKG, and returns the results.
 //!
-//! The returned `DkgFixture` owns the ring, SourceHub, and run directory
-//! independently. Drop order is: ring -> sourcehub -> run_dir (by field order).
+//! The returned `DkgFixture` owns the ring, Vera, and run directory
+//! independently. Drop order is: ring -> vera -> run_dir (by field order).
 
-use sourcehub_harness::SourceHubNode;
 use std::time::Duration;
+use vera_harness::VeraNode;
 
 use crate::cli::types::{NodeInfoResult, RingPayload};
-use crate::cli::{BulletinEventSubscription, OrbisCliClient, SourceHubCliClient};
+use crate::cli::{BulletinEventSubscription, OrbisCliClient, VeraCliClient};
 use crate::ring::OrbisRing;
-use crate::{allocate_source_hub_ports, generate_identity_keys, generate_run_id};
-use sourcehub_harness::SourceHubConfig;
+use crate::{allocate_vera_ports, generate_identity_keys, generate_run_id};
+use vera_harness::VeraConfig;
 
 /// The bulletin namespace used for ring payloads (must match orbis-node constant).
 const BULLETIN_RING_NAMESPACE: &str = "orbis";
 
 /// Results of a completed DKG ceremony, ready for use by tests.
 ///
-/// Field drop order: ring (orbis nodes killed first) -> sourcehub -> run_dir (cleaned last).
+/// Field drop order: ring (orbis nodes killed first) -> vera -> run_dir (cleaned last).
 pub struct DkgFixture {
     pub ring: OrbisRing,
-    pub sourcehub: SourceHubNode,
+    pub vera: VeraNode,
     pub ring_pk_hex: String,
     pub ring_id: String,
     pub node_infos: Vec<NodeInfoResult>,
     pub orbis_cli: OrbisCliClient,
-    pub sourcehub_cli: SourceHubCliClient,
+    pub vera_cli: VeraCliClient,
     _run_dir: test_infra::TestRunDir,
 }
 
@@ -38,12 +38,12 @@ impl DkgFixture {
     }
 }
 
-/// Start a 3-node ring with SourceHub, run DKG, and return the fixture.
+/// Start a 3-node ring with Vera, run DKG, and return the fixture.
 ///
 /// This takes ~30-40s. The returned fixture owns all processes — they are
 /// killed when the fixture is dropped.
 pub async fn setup_dkg() -> DkgFixture {
-    eprintln!("[fixture] Starting DKG fixture (3 nodes + SourceHub)...");
+    eprintln!("[fixture] Starting DKG fixture (3 nodes + Vera)...");
 
     let run_id = generate_run_id();
     let base_dir = crate::e2e_base_dir();
@@ -51,15 +51,13 @@ pub async fn setup_dkg() -> DkgFixture {
         test_infra::TestRunDir::new(&base_dir, "ORBIS_E2E_KEEP").expect("fixture: create run dir");
     let identity_keys = generate_identity_keys(&run_id, 3);
 
-    // Start SourceHub
-    let sh_ports = allocate_source_hub_ports().expect("fixture: allocate sourcehub ports");
-    let sh_home = run_dir
-        .node_dir("sourcehub")
-        .expect("fixture: create sourcehub dir");
+    // Start Vera
+    let sh_ports = allocate_vera_ports().expect("fixture: allocate vera ports");
+    let sh_home = run_dir.node_dir("vera").expect("fixture: create vera dir");
     let sh_log_dir = sh_home.join("logs");
-    std::fs::create_dir_all(&sh_log_dir).expect("fixture: create sourcehub log dir");
+    std::fs::create_dir_all(&sh_log_dir).expect("fixture: create vera log dir");
 
-    let sourcehub = SourceHubNode::start(
+    let vera = VeraNode::start(
         sh_home,
         sh_log_dir,
         &sh_ports,
@@ -67,7 +65,7 @@ pub async fn setup_dkg() -> DkgFixture {
         Duration::from_secs(60),
     )
     .await
-    .expect("fixture: sourcehub should start");
+    .expect("fixture: vera should start");
 
     // Build the ring
     let ring = OrbisRing::builder()
@@ -76,14 +74,13 @@ pub async fn setup_dkg() -> DkgFixture {
         .log_level("info")
         .base_dir(run_dir.path())
         .identity_keys(identity_keys)
-        .sourcehub_config(SourceHubConfig::from(&sourcehub))
+        .vera_config(VeraConfig::from(&vera))
         .build()
         .await
         .expect("fixture: ring should start");
 
-    // Fund orbis nodes' generated signing keys via the SourceHub faucet.
-    let sourcehub_cli =
-        SourceHubCliClient::from_node(&sourcehub).expect("fixture: resolve sourcehubd binary");
+    // Fund orbis nodes' generated signing keys via the Vera faucet.
+    let vera_cli = VeraCliClient::from_node(&vera).expect("fixture: resolve verad binary");
     for i in 0..ring.node_count() {
         let pk_path = ring.node(i).data_dir().join("data/public_key.txt");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
@@ -100,7 +97,7 @@ pub async fn setup_dkg() -> DkgFixture {
             tokio::time::sleep(Duration::from_millis(200)).await;
         };
         eprintln!("[fixture]   Funding orbis node{}: {}", i, address);
-        sourcehub_cli
+        vera_cli
             .fund(&address)
             .unwrap_or_else(|e| panic!("fixture: fund node{}: {}", i, e));
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -122,18 +119,18 @@ pub async fn setup_dkg() -> DkgFixture {
     }
 
     // Register ring namespace + add all nodes as collaborators
-    sourcehub_cli
+    vera_cli
         .register_namespace(BULLETIN_RING_NAMESPACE)
         .expect("fixture: register ring namespace");
 
     for info in &node_infos {
-        sourcehub_cli
+        vera_cli
             .add_collaborator(BULLETIN_RING_NAMESPACE, &info.public_address)
             .expect("fixture: add collaborator");
     }
 
     // Subscribe to events BEFORE starting DKG
-    let event_subscription = BulletinEventSubscription::connect(&sourcehub.comet_rpc_url)
+    let event_subscription = BulletinEventSubscription::connect(&vera.comet_rpc_url)
         .await
         .expect("fixture: event subscription");
 
@@ -152,7 +149,7 @@ pub async fn setup_dkg() -> DkgFixture {
         .expect("fixture: DKG completion event");
 
     // Read ring payload
-    let post_payload = sourcehub_cli
+    let post_payload = vera_cli
         .read_post(BULLETIN_RING_NAMESPACE, &post_event.post_id)
         .expect("fixture: read ring post");
 
@@ -169,12 +166,12 @@ pub async fn setup_dkg() -> DkgFixture {
 
     DkgFixture {
         ring,
-        sourcehub,
+        vera,
         ring_pk_hex,
         ring_id,
         node_infos,
         orbis_cli,
-        sourcehub_cli,
+        vera_cli,
         _run_dir: run_dir,
     }
 }

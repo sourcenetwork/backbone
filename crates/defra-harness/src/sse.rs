@@ -144,7 +144,7 @@ pub async fn open_acp_events_sse(api_url: &str) -> (JoinHandle<()>, Arc<Mutex<Ve
 
 /// Wait until an `acp-cache-invalidated` event arrives with `height > min_height`.
 ///
-/// Used after hub.rs ACP mutations (set_relationship, register_object) to wait
+/// Used after Vera ACP mutations (set_relationship, register_object) to wait
 /// for DefraDB's light client to pick up the state root change and invalidate
 /// its cache, so subsequent queries reflect the new permissions.
 pub async fn wait_for_acp_invalidation(
