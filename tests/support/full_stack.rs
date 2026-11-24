@@ -10,7 +10,9 @@ use orbis_harness::defradb::identity::DefraHttpClient;
 use orbis_harness::{OrbisCliClient, OrbisRing};
 use vera_harness::observe::ClusterState;
 
-use super::hubd::HubdCli;
+use alloy_primitives::B256;
+
+use super::vera::VeraAccount;
 
 pub struct OrbisNodeIdentity {
     pub address: String,
@@ -18,47 +20,45 @@ pub struct OrbisNodeIdentity {
 }
 
 pub async fn wait_for_dkg_post(
-    vera_cli: &HubdCli,
+    vera_account: &VeraAccount,
     namespace: &str,
     timeout: Duration,
 ) -> eyre::Result<(String, Vec<u8>)> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if let Ok(output) = vera_cli.list_posts(namespace) {
-            if let Ok(posts) = serde_json::from_str::<serde_json::Value>(&output) {
-                if let Some(arr) = posts.as_array() {
-                    for post in arr {
-                        let payload_bytes = match post.get("payload") {
-                            Some(serde_json::Value::Array(byte_arr)) => {
-                                let bytes: Vec<u8> = byte_arr
-                                    .iter()
-                                    .filter_map(|v| v.as_u64().map(|n| n as u8))
-                                    .collect();
-                                if bytes.is_empty() {
-                                    continue;
-                                }
-                                bytes
+        if let Ok(posts) = vera_account.list_posts(namespace).await {
+            if let Some(arr) = posts.as_array() {
+                for post in arr {
+                    let payload_bytes = match post.get("payload") {
+                        Some(serde_json::Value::Array(byte_arr)) => {
+                            let bytes: Vec<u8> = byte_arr
+                                .iter()
+                                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                                .collect();
+                            if bytes.is_empty() {
+                                continue;
                             }
-                            Some(serde_json::Value::String(s)) if !s.is_empty() => {
-                                hex::decode(s).unwrap_or_else(|_| s.as_bytes().to_vec())
-                            }
-                            _ => continue,
-                        };
+                            bytes
+                        }
+                        Some(serde_json::Value::String(s)) if !s.is_empty() => {
+                            hex::decode(s).unwrap_or_else(|_| s.as_bytes().to_vec())
+                        }
+                        _ => continue,
+                    };
 
-                        let post_id = post
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                    let post_id = post
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
 
-                        return Ok((post_id, payload_bytes));
-                    }
+                    return Ok((post_id, payload_bytes));
                 }
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            if let Ok(output) = vera_cli.list_posts(namespace) {
-                eprintln!("[backbone]   FINAL list-posts output: {}", output);
+            if let Ok(posts) = vera_account.list_posts(namespace).await {
+                eprintln!("[backbone]   FINAL list-posts output: {}", posts);
             }
             return Err(eyre::eyre!(
                 "timeout waiting for DKG post in namespace '{}'",
@@ -358,9 +358,13 @@ pub async fn poll_replicated_doc_ids(
     }
 }
 
-pub fn wait_for_tx_receipt(vera_cli: &HubdCli, tx_hash: &str, label: &str) -> eyre::Result<()> {
+pub async fn wait_for_tx_receipt(
+    vera_account: &VeraAccount,
+    tx_hash: B256,
+    label: &str,
+) -> eyre::Result<()> {
     let t = Instant::now();
-    vera_cli.wait_for_tx_receipt(tx_hash)?;
+    vera_account.wait_for_success(tx_hash).await?;
     eprintln!(
         "[backbone]   {} receipt confirmed in {:.2}s",
         label,
