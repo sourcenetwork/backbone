@@ -3585,7 +3585,7 @@ dependencies = [
 [[package]]
 name = "jsonrpsee-server"
 version = "0.26.1"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "futures-util",
  "http",
@@ -6786,7 +6786,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 [[package]]
 name = "vera-acp"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "async-trait",
  "serde",
@@ -6801,7 +6801,7 @@ dependencies = [
 [[package]]
 name = "vera-app"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "commonware-codec",
@@ -6827,7 +6827,7 @@ dependencies = [
 [[package]]
 name = "vera-backend"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "bytes",
@@ -6849,7 +6849,7 @@ dependencies = [
 [[package]]
 name = "vera-cli"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "libc",
 ]
@@ -6857,7 +6857,7 @@ dependencies = [
 [[package]]
 name = "vera-client"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -6890,7 +6890,7 @@ dependencies = [
 [[package]]
 name = "vera-config"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "commonware-codec",
  "commonware-cryptography",
@@ -6905,7 +6905,7 @@ dependencies = [
 [[package]]
 name = "vera-consensus"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "commonware-codec",
  "parking_lot",
@@ -6916,7 +6916,7 @@ dependencies = [
 [[package]]
 name = "vera-crypto"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -6941,7 +6941,7 @@ dependencies = [
 [[package]]
 name = "vera-domain"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -6961,7 +6961,7 @@ dependencies = [
 [[package]]
 name = "vera-executor"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -6982,7 +6982,7 @@ dependencies = [
 [[package]]
 name = "vera-genesis"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "commonware-codec",
@@ -7000,7 +7000,7 @@ dependencies = [
 [[package]]
 name = "vera-harness"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "commonware-codec",
@@ -7029,7 +7029,7 @@ dependencies = [
 [[package]]
 name = "vera-identity"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -7038,7 +7038,7 @@ dependencies = [
 [[package]]
 name = "vera-indexer"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "parking_lot",
@@ -7050,7 +7050,7 @@ dependencies = [
 [[package]]
 name = "vera-jsonrpc"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "async-trait",
@@ -7074,7 +7074,7 @@ dependencies = [
 [[package]]
 name = "vera-modules"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -7100,7 +7100,7 @@ dependencies = [
 [[package]]
 name = "vera-node"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -7152,7 +7152,7 @@ dependencies = [
 [[package]]
 name = "vera-permission"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "alloy-primitives",
  "bytes",
@@ -7189,7 +7189,7 @@ dependencies = [
 [[package]]
 name = "vera-test-infra"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "eyre",
  "libc",
@@ -7202,7 +7202,7 @@ dependencies = [
 [[package]]
 name = "vera-zanzibar"
 version = "0.2.0"
-source = "git+https://github.com/sourcenetwork/vera.rs?rev=8193eac0c0cf19421ad1920dd678963585259d72#8193eac0c0cf19421ad1920dd678963585259d72"
+source = "git+https://github.com/sourcenetwork/vera.rs?rev=fc0bd8e47019a5f3175239884ab4ae935f3b973f#fc0bd8e47019a5f3175239884ab4ae935f3b973f"
 dependencies = [
  "async-lock",
  "async-trait",
