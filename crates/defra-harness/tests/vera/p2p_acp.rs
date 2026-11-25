@@ -1,7 +1,8 @@
 use std::time::Duration;
 
-use defra_harness::node::{DefraNode, RustNode};
-use defra_harness::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
+use defra_harness::{
+    generate_identity, users_schema_with_policy, BinarySource, TestCluster, USER_ACP_POLICY,
+};
 
 /// P2P replication preserving Vera ACP.
 ///
@@ -12,13 +13,12 @@ use defra_harness::{generate_identity, users_schema_with_policy, TestCluster, US
 /// The cluster is started with Jack's identity so Vera transactions work.
 #[tokio::test]
 async fn rust_vera_p2p_acp() {
-    let binary = RustNode::from_workspace().binary_path().to_path_buf();
-    RustNode::build().expect("build rust binary");
+    let binary = super::vera_binary();
     let jack = generate_identity(&binary).expect("Jack identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(2)
-        .skip_build()
+        .with_rust_binary(BinarySource::Path(binary.clone()))
         .with_vera()
         .with_identity(&jack.private_key_hex)
         .with_p2p()
@@ -78,7 +78,7 @@ async fn rust_vera_p2p_acp() {
     // Create document as Jack on node 0
     node0
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Jack", age: 30}) { _docID } }"#,
+            r#"mutation { add_User(input: {name: "Jack", age: 30}) { _docID } }"#,
             &jack.private_key_hex,
         )
         .expect("create user on node0");

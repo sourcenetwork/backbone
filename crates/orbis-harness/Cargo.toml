@@ -1,14 +1,22 @@
 [package]
 name = "orbis-harness"
 version = "0.1.0"
-description = "Orbis ring builder, DKG fixtures, and event subscriptions"
+description = "Orbis rings on a native Vera deployment for integration tests"
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 test-infra = { path = "../test-infra" }
-sourcehub-harness = { package = "vera-harness", path = "../vera-harness" }
 defra-harness = { path = "../defra-harness" }
+vera-support = { path = "../vera-support" }
+vera-client.workspace = true
+vera-crypto.workspace = true
+vera-domain.workspace = true
+vera-modules.workspace = true
+alloy-sol-types = "1"
+cli-tool.workspace = true
+crypto.workspace = true
+proto.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -17,15 +25,13 @@ tracing.workspace = true
 eyre.workspace = true
 rand.workspace = true
 hex.workspace = true
-futures.workspace = true
 
 k256 = { version = "0.13", features = ["ecdsa"] }
 bs58 = "0.5"
 base64 = "0.22"
 ed25519-dalek = "2"
-tokio-tungstenite = "0.26"
 
 [dev-dependencies]
-crypto = { git = "https://github.com/sourcenetwork/orbis-rs", branch = "jack/integration-testing", default-features = false, features = ["bls12-381"] }
+bulletin.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

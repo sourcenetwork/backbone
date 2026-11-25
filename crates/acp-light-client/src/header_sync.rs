@@ -49,7 +49,7 @@ pub struct HeaderChain {
 }
 
 impl HeaderChain {
-    /// Connect to a hub.rs node's WebSocket endpoint and start syncing headers.
+    /// Connect to a Vera node's WebSocket endpoint and start syncing headers.
     pub async fn connect(ws_url: &str, proof_client: ProofClient) -> eyre::Result<Self> {
         Self::connect_with_freshness(ws_url, proof_client, FreshnessPolicy::default()).await
     }
@@ -282,7 +282,7 @@ pub(crate) async fn websocket_headers(ws_url: &str) -> Result<HeaderStream, Tran
     )
     .await
     .map_err(|elapsed| TransportError::context("header WebSocket connection timeout", elapsed))?
-    .map_err(|error| TransportError::context("connecting to hub.rs WebSocket", error))?;
+    .map_err(|error| TransportError::context("connecting to Vera WebSocket", error))?;
 
     let subscribe_msg = serde_json::json!({
         "jsonrpc": "2.0",
@@ -425,7 +425,6 @@ mod tests {
             parent_hash: Default::default(),
             timestamp: 1,
             term: 0,
-            state_root: Default::default(),
             module_state_root: Default::default(),
             tx_count: 0,
             publisher_index: 0,

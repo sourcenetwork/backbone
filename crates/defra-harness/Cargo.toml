@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 test-infra = { path = "../test-infra" }
-vera-harness = { path = "../vera-harness" }
+vera-support = { path = "../vera-support" }
 tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true

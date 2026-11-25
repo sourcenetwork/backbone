@@ -8,9 +8,10 @@ use reqwest::Client;
 use crate::divergences::NodeKind;
 use crate::node::{
     start_node, BinarySource, GoNode, KeyringBackend, NodeConfig, PortConflict, RustNode,
+    VeraNodeConfig,
 };
 use crate::ports::allocate_node_ports;
-use vera_harness::{allocate_vera_ports, VeraConfig, VeraNode};
+use vera_support::VeraDeployment;
 
 use super::health::health_check_all;
 use super::runtime::TestCluster;
@@ -19,6 +20,10 @@ use super::runtime::TestCluster;
 /// TOCTOU window (another host process stealing the freed port). Each retry
 /// re-allocates fresh ports, so consecutive collisions are vanishingly rare.
 const PORT_CONFLICT_ATTEMPTS: usize = 3;
+
+/// Validator key seed and deployment identifier of the deployment `with_vera` starts.
+const VERA_SEED: u64 = 42;
+const VERA_DEPLOYMENT_ID: u64 = 9003;
 
 static RUST_BUILD_DONE: OnceLock<()> = OnceLock::new();
 static IROH_BUILD_DONE: OnceLock<()> = OnceLock::new();
@@ -274,9 +279,13 @@ impl TestClusterBuilder {
         self
     }
 
+    /// Start a vera.rs deployment and point every Rust node
+    /// at it through DefraDB's native Vera provider. The provider journals
+    /// its worker's key in the node's keyring, so nodes get a File keyring.
     pub fn with_vera(mut self) -> Self {
         self.vera_enabled = true;
-        self.acp_document_type = Some("vera".to_string());
+        self.file_keyring = true;
+        self.acp_document_type = Some(crate::node::VERA_ACP_DOCUMENT_TYPE.to_string());
         self
     }
 
@@ -451,30 +460,16 @@ impl TestClusterBuilder {
 
         // Start Vera if enabled
         let vera = if self.vera_enabled {
-            let sh_ports = allocate_vera_ports().wrap_err("allocating Vera ports")?;
-
-            let sh_home = run_dir.node_dir("vera")?;
-            let sh_log_dir = sh_home.join("logs");
-            std::fs::create_dir_all(&sh_log_dir)?;
-
-            let identity_keys: Vec<String> = self.node_identity.iter().cloned().collect();
-
-            let sh_node = VeraNode::start(
-                sh_home,
-                sh_log_dir,
-                &sh_ports,
-                &identity_keys,
-                Duration::from_secs(60),
+            Some(
+                VeraDeployment::start(VERA_SEED, VERA_DEPLOYMENT_ID)
+                    .await
+                    .wrap_err("failed to start Vera deployment")?,
             )
-            .await
-            .wrap_err("failed to start Vera node")?;
-
-            Some(sh_node)
         } else {
             None
         };
 
-        let sh_config: Option<VeraConfig> = vera.as_ref().map(VeraConfig::from);
+        let vera_config: Option<VeraNodeConfig> = vera.as_ref().map(VeraNodeConfig::from);
 
         let mut nodes = Vec::with_capacity(total);
 
@@ -519,8 +514,7 @@ impl TestClusterBuilder {
                 encryption_enabled: self.encryption_enabled,
                 signing_enabled: self.signing_enabled,
                 nac_enabled: self.nac_enabled,
-                vera: sh_config.clone(),
-                hub_rs_address: None,
+                vera: vera_config.clone(),
                 orbis_signer: None,
                 keyring,
                 development: self.development,
@@ -619,8 +613,7 @@ impl TestClusterBuilder {
                 encryption_enabled: self.encryption_enabled,
                 signing_enabled: self.signing_enabled,
                 nac_enabled: self.nac_enabled,
-                vera: sh_config.clone(),
-                hub_rs_address: None,
+                vera: vera_config.clone(),
                 orbis_signer: None,
                 keyring,
                 development: self.development,

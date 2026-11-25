@@ -1,10 +1,11 @@
-use defra_harness::node::{DefraNode, RustNode};
-use defra_harness::{generate_identity, users_schema_with_policy, TestCluster, USER_ACP_POLICY};
+use defra_harness::{
+    generate_identity, users_schema_with_policy, BinarySource, TestCluster, USER_ACP_POLICY,
+};
 
 /// Full on-chain policy lifecycle test.
 ///
 /// 1. Create policy on Vera -> get policy ID
-/// 2. Verify policy exists on-chain via LCD query
+/// 2. Verify policy exists on Vera
 /// 3. Use policy ID in DefraDB schema
 /// 4. Create documents governed by policy
 /// 5. Grant/revoke relationships (on-chain transactions)
@@ -13,13 +14,12 @@ use defra_harness::{generate_identity, users_schema_with_policy, TestCluster, US
 /// The node is started with Alice's identity so Vera transactions work.
 #[tokio::test]
 async fn rust_vera_policy_lifecycle() {
-    let binary = RustNode::from_workspace().binary_path().to_path_buf();
-    RustNode::build().expect("build rust binary");
+    let binary = super::vera_binary();
     let alice = generate_identity(&binary).expect("Alice identity");
 
     let cluster = TestCluster::builder()
         .rust_nodes(1)
-        .skip_build()
+        .with_rust_binary(BinarySource::Path(binary.clone()))
         .with_vera()
         .with_identity(&alice.private_key_hex)
         .build()
@@ -41,18 +41,14 @@ async fn rust_vera_policy_lifecycle() {
         .expect("PolicyID")
         .to_string();
 
-    // Step 2: Verify policy exists on Vera via LCD
-    let client = reqwest::Client::new();
-    let policy_url = format!("{}/sourcenetwork/vera/acp/policy/{}", sh.lcd_url, policy_id);
-    let resp = client
-        .get(&policy_url)
-        .send()
-        .await
-        .expect("LCD policy query");
+    // Step 2: Verify the policy exists on Vera
+    let policy_ids = sh.client().get_policy_ids().await.expect("Vera policy ids");
+    let wanted = policy_id.trim_start_matches("0x").to_lowercase();
     assert!(
-        resp.status().is_success(),
-        "policy should exist on-chain (HTTP {})",
-        resp.status()
+        policy_ids
+            .iter()
+            .any(|id| id.trim_start_matches("0x").to_lowercase() == wanted),
+        "policy {policy_id} should exist on Vera, found {policy_ids:?}"
     );
 
     // Step 3: Deploy schema with policy
@@ -63,11 +59,11 @@ async fn rust_vera_policy_lifecycle() {
     // Step 4: Create a document as Alice
     let data = node
         .query_with_identity(
-            r#"mutation { create_User(input: {name: "Alice", age: 25}) { _docID name } }"#,
+            r#"mutation { add_User(input: {name: "Alice", age: 25}) { _docID name } }"#,
             &alice.private_key_hex,
         )
         .expect("create user");
-    let doc_id = data["create_User"][0]["_docID"].as_str().expect("_docID");
+    let doc_id = data["add_User"][0]["_docID"].as_str().expect("_docID");
 
     // Bob initially cannot see the document
     let bob_before = node

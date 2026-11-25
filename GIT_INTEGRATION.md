@@ -1,7 +1,7 @@
 # Git Integration Architecture
 
 DefraDB.rs acts as the **Git signing and encryption backend**, mediating all
-interactions between Git, the Orbis DKG ring, and Source Hub policy engine.
+interactions between Git, the Orbis DKG ring, and the Vera policy engine.
 The result is end-to-end encrypted, identity-aware version control where
 every commit is cryptographically tied to a real identity and every file is
 encrypted to authorized recipients — with no single point of key custody.
@@ -14,11 +14,11 @@ encrypted to authorized recipients — with no single point of key custody.
 │                                                  │
 │  Distributed Key Generation for real identities  │
 │  Threshold signatures (no single key holder)     │
-│  Uses Source Hub as its bulletin board            │
+│  Uses Vera as its bulletin board                 │
 └────────────────────────┬─────────────────────────┘
                          │
 ┌────────────────────────▼─────────────────────────┐
-│                   Source Hub                      │
+│                      Vera                        │
 │                                                  │
 │  Source of truth for access control policies     │
 │  Bulletin board for Orbis DKG ceremonies         │
@@ -104,7 +104,7 @@ Working Directory          Git Index/Objects         Remote
 ```
 
 1. **Clean filter (staging)**: When `git add` stages a file, defra.rs encrypts
-   it to the set of authorized Orbis identities (determined by Source Hub policy).
+   it to the set of authorized Orbis identities (determined by Vera policy).
 2. **Smudge filter (checkout)**: When `git checkout` materializes a file,
    defra.rs decrypts it using the local identity's DKG key share via Orbis.
 3. **At rest**: Repository content on disk (in `.git/objects/`) and on any
@@ -112,8 +112,8 @@ Working Directory          Git Index/Objects         Remote
 
 ### Policy-Driven Encryption Recipients
 
-Source Hub policies determine **who** can decrypt each file or path pattern.
-This is configured via `.gitattributes` patterns mapped to Source Hub policy
+Vera policies determine **who** can decrypt each file or path pattern.
+This is configured via `.gitattributes` patterns mapped to Vera policy
 resources:
 
 ```gitattributes
@@ -125,9 +125,9 @@ contracts/**        filter=defra-crypt-legal
 infrastructure/**   filter=defra-crypt-ops
 ```
 
-Each filter name maps to a Source Hub policy that defines which identities
+Each filter name maps to a Vera policy that defines which identities
 (individuals, teams, roles) are encryption recipients. When policy changes
-in Source Hub (e.g., a team member is removed), the next commit re-encrypts
+in Vera (e.g., a team member is removed), the next commit re-encrypts
 affected files to the updated recipient set.
 
 ### Deterministic Ciphertext
@@ -174,7 +174,7 @@ commits are signed by both.
 
 ## Access Control Integration
 
-Source Hub policies govern three dimensions of Git access:
+Vera policies govern three dimensions of Git access:
 
 | Dimension     | Controlled By              | Enforcement Point           |
 |---------------|----------------------------|-----------------------------|
@@ -183,7 +183,7 @@ Source Hub policies govern three dimensions of Git access:
 | **Verify**    | Orbis public key set       | Any node with Orbis access  |
 
 This maps directly to the existing ACP infrastructure in defra.rs
-(`crates/acp/`), which already supports both local and Source Hub policy
+(`crates/acp/`), which already supports both local and Vera policy
 engines.
 
 ## Value Proposition
@@ -194,7 +194,7 @@ engines.
   and on remotes. Only authorized identities decrypt.
 - **No key management overhead**: Orbis handles key lifecycle. No GPG key
   ceremonies, no "who has access to the deploy key" questions.
-- **Policy-driven access**: Source Hub policies are the single source of
+- **Policy-driven access**: Vera policies are the single source of
   truth. Revoke access in one place, enforcement is immediate.
 - **Hardware-rooted trust**: Every machine that touches code is
   authenticated via its secure enclave. No credential theft via malware.
@@ -205,7 +205,7 @@ engines.
 
 - **Agent identity**: Every AI agent has an Orbis identity. Its actions
   (commits, data generation, API calls) are cryptographically attributable.
-- **Scoped access**: Agents only decrypt what their Source Hub policy allows.
+- **Scoped access**: Agents only decrypt what their Vera policy allows.
   An agent working on frontend code cannot read infrastructure secrets.
 - **Provenance**: Human and agent contributions are distinguishable and
   verifiable. Code review can verify "this was written by agent X under
@@ -253,13 +253,13 @@ Serving node (A's identity)           Serving node (B's identity)
 ```
 
 **Data ingestion**: Each company's voice data is stored in DefraDB, encrypted
-to that company's Orbis identity. Source Hub ACP policies enforce that only
+to that company's Orbis identity. Vera ACP policies enforce that only
 identities authorized by Company A can read Company A's data. The data is
 physically co-located but cryptographically isolated — even a database
 administrator without the right Orbis identity cannot decrypt it.
 
 **Model training**: A training agent receives an Orbis identity authorized
-by Company A's Source Hub policy. It pulls Company A's data from DefraDB
+by Company A's Vera policy. It pulls Company A's data from DefraDB
 (decrypted via its authorized identity), trains a QLoRA adapter, and commits
 the resulting weights to an encrypted Git repo. The adapter repo is encrypted
 to Company A's identities. The training agent's identity cannot access
@@ -325,7 +325,7 @@ local ACP engine.
 ### Phase 3: Orbis DKG Integration
 
 Replace local signing keys with DKG threshold signatures from Orbis.
-Encryption recipients resolve to Orbis identities. Source Hub becomes the
+Encryption recipients resolve to Orbis identities. Vera becomes the
 policy authority for Git access control.
 
 ### Phase 4: Hardware Root of Trust

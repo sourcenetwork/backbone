@@ -9,7 +9,7 @@ use crate::divergences::NodeKind;
 use crate::node::{start_node, DefraNode, NodeConfig, PortConflict, RunningNode, RustNode};
 use crate::observe::LogTracker;
 use crate::ports::{multiaddr_ports, reserve_ports, ReservedPorts};
-use vera_harness::VeraNode;
+use vera_support::VeraDeployment;
 
 use super::health::health_check;
 
@@ -112,7 +112,7 @@ pub struct StoppedNode {
 
 pub struct TestCluster {
     pub nodes: Vec<RunningNode>,
-    vera: Option<VeraNode>,
+    vera: Option<VeraDeployment>,
     #[allow(dead_code)]
     run_dir: test_infra::TestRunDir,
     startup_identity: Option<String>,
@@ -125,7 +125,7 @@ impl TestCluster {
         run_dir: test_infra::TestRunDir,
         startup_identity: Option<String>,
         node_identities: Vec<Option<String>>,
-        vera: Option<VeraNode>,
+        vera: Option<VeraDeployment>,
     ) -> Self {
         Self {
             nodes,
@@ -171,11 +171,11 @@ impl TestCluster {
         self.nodes.is_empty()
     }
 
-    pub fn vera(&self) -> Option<&VeraNode> {
+    pub fn vera(&self) -> Option<&VeraDeployment> {
         self.vera.as_ref()
     }
 
-    /// Stop the Vera process. Drops the node, sending SIGTERM.
+    /// Stop the Vera deployment. Drops its cluster, stopping every validator.
     pub fn stop_vera(&mut self) -> Result<()> {
         if self.vera.take().is_some() {
             Ok(())

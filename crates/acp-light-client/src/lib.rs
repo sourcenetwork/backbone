@@ -49,7 +49,7 @@ pub struct AcpLightClient {
 }
 
 impl AcpLightClient {
-    /// Create a new light client connected to a hub.rs node.
+    /// Create a new light client connected to a Vera node.
     ///
     /// `rpc_url` — HTTP JSON-RPC endpoint (e.g., `http://127.0.0.1:9944`)
     /// `ws_url` — WebSocket endpoint (e.g., `ws://127.0.0.1:9944`)

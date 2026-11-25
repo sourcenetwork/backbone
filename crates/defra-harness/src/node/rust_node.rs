@@ -29,9 +29,9 @@ impl RustNode {
         }
     }
 
-    /// The default workspace binary path (`target/debug/defra`).
+    /// The default workspace binary path (`target/debug/defradb`).
     pub fn workspace_binary_path() -> PathBuf {
-        workspace_root().join("target/debug/defra")
+        workspace_root().join("target/debug/defradb")
     }
 
     /// Build the Rust binary via cargo (debug mode for fast iteration).
@@ -61,7 +61,7 @@ impl RustNode {
 
     /// Verify the Rust binary is built and returns parseable version info.
     pub fn check_available() -> Result<()> {
-        let binary = workspace_root().join("target/debug/defra");
+        let binary = workspace_root().join("target/debug/defradb");
 
         let output = Command::new(&binary)
             .args(["version", "--format", "json"])
@@ -130,11 +130,19 @@ impl DefraNode for RustNode {
                 "orbis".into(),
                 "--signer-orbis-endpoint".into(),
                 signer.endpoint.clone(),
-                "--signer-orbis-ring-id".into(),
-                signer.ring_id.clone(),
-                "--signer-orbis-derivation".into(),
-                signer.derivation.clone(),
+                "--signer-orbis-derivation-id".into(),
+                signer.derivation_id.clone(),
+                "--signer-orbis-public-key".into(),
+                signer.public_key.clone(),
+                "--signer-orbis-identity".into(),
+                signer.identity.clone(),
             ]);
+            // An Orbis ring signs with BLS, which Go peers cannot verify;
+            // the clusters that sign through a ring are Rust-only.
+            envs.push((
+                "DEFRA_ALLOW_NON_GO_VERIFIABLE_SIGNING".to_string(),
+                "1".to_string(),
+            ));
         } else if !config.signing_enabled {
             args.push("--no-signing".to_string());
         }
@@ -168,22 +176,18 @@ impl DefraNode for RustNode {
 
         // DIVERGENCE: Only Rust supports --vera-* flags
         if divergences::supports_vera_flags(NodeKind::Rust) {
-            if let Some(ref sh) = config.vera {
+            if let Some(ref vera) = config.vera {
                 args.extend([
                     "--vera-address".into(),
-                    sh.lcd_url.clone(),
-                    "--vera-grpc-address".into(),
-                    sh.grpc_url.clone(),
-                    "--vera-comet-address".into(),
-                    sh.comet_rpc_url.clone(),
-                    "--vera-chain-id".into(),
-                    sh.chain_id.clone(),
+                    vera.address.clone(),
+                    "--vera-consensus-key".into(),
+                    vera.consensus_key.clone(),
+                    "--vera-genesis-id".into(),
+                    vera.genesis_id.clone(),
+                    "--vera-deployment-id".into(),
+                    vera.deployment_id.to_string(),
                 ]);
             }
-        }
-
-        if let Some(ref hub_rs) = config.hub_rs_address {
-            args.extend(["--hub-rs-address".into(), hub_rs.clone()]);
         }
 
         if let Some(ref transport) = config.p2p_transport {
@@ -268,27 +272,28 @@ mod tests {
     }
 
     #[test]
-    fn vera_passes_distinct_lcd_and_grpc_addresses() {
+    fn vera_passes_the_deployment_trust_material() {
         let node = RustNode::from_binary("/nonexistent/defra");
         let mut config = test_config();
-        config.vera = Some(vera_harness::VeraConfig {
-            lcd_url: "http://127.0.0.1:1317".to_string(),
-            comet_rpc_url: "http://127.0.0.1:26657".to_string(),
-            grpc_url: "http://127.0.0.1:9090".to_string(),
-            chain_id: "vera-test".to_string(),
+        config.vera = Some(super::super::VeraNodeConfig {
+            address: "http://127.0.0.1:8545".to_string(),
+            consensus_key: "aabb".to_string(),
+            genesis_id: "cc".repeat(32),
+            deployment_id: 9003,
         });
 
         let (_binary, args, _envs) = node.command_parts(&config);
 
-        let grpc_flag = args
-            .iter()
-            .position(|argument| argument == "--vera-grpc-address")
-            .expect("gRPC address flag should be present");
-        assert_eq!(args[grpc_flag + 1], "http://127.0.0.1:9090");
-        let lcd_flag = args
-            .iter()
-            .position(|argument| argument == "--vera-address")
-            .expect("LCD address flag should be present");
-        assert_eq!(args[lcd_flag + 1], "http://127.0.0.1:1317");
+        let value = |flag: &str| {
+            let position = args
+                .iter()
+                .position(|argument| argument == flag)
+                .unwrap_or_else(|| panic!("{flag} should be present"));
+            args[position + 1].clone()
+        };
+        assert_eq!(value("--vera-address"), "http://127.0.0.1:8545");
+        assert_eq!(value("--vera-consensus-key"), "aabb");
+        assert_eq!(value("--vera-genesis-id"), "cc".repeat(32));
+        assert_eq!(value("--vera-deployment-id"), "9003");
     }
 }

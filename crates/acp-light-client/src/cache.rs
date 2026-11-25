@@ -116,7 +116,7 @@ impl AcpCache {
 
 /// ACP key builder helpers.
 ///
-/// These match hub-modules `acp::keys` patterns for constructing ACP
+/// These match vera-modules `acp::keys` patterns for constructing ACP
 /// state keys to prove against.
 pub mod keys {
     /// Build a policy record key: `"policy/objs/" + policy_id`.

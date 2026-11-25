@@ -14,7 +14,7 @@ Three primitives make this work:
 
 **Cryptographic identity** — Every agent, human, and service gets a decentralized identifier (DID) backed by real cryptographic keys. Agent identities are not API tokens. They are key pairs rooted in hardware (secure enclaves, HSMs) or distributed across a DKG ring, where no single machine ever holds the complete private key.
 
-**Consensus-backed access control** — Permissions are not database rows. They are recorded on a Commonware-consensus chain with EVM execution, where every grant, revocation, and policy change requires consensus. This produces an immutable, auditable record of who was authorized to do what, and when. The access control model is Google Zanzibar — the same relation-based system that governs permissions across Google's infrastructure — running on a dedicated consensus layer.
+**Consensus-backed access control** — Permissions are not database rows. They are recorded on a Commonware-consensus chain of native modules, where every grant, revocation, and policy change requires consensus. This produces an immutable, auditable record of who was authorized to do what, and when. The access control model is Google Zanzibar — the same relation-based system that governs permissions across Google's infrastructure — running on a dedicated consensus layer.
 
 **Identity-based encryption** — Data is encrypted to identities, not to servers or storage locations. Data encrypted to a specific agent identity can be replicated, cached, backed up, or stored anywhere. It remains ciphertext to everyone except identities with verified permissions. When an authorized reader needs access, the Orbis ring performs **proxy re-encryption** — transforming the ciphertext for that reader without ever reconstructing the plaintext. There is no master key.
 
@@ -42,16 +42,16 @@ The conventional approach to agent governance treats it as an add-on: build the 
    │                                      │
    ▼                                      ▼
 ┌──────────────┐                    ┌──────────────┐
-│    Hub.rs    │                    │    Orbis     │
+│   vera.rs    │                    │    Orbis     │
 │              │                    │              │
 │  Commonware  │                    │   DKG ring   │
 │  consensus   │                    │              │
-│  + EVM exec  │                    │  Proxy re-   │
+│  + native    │                    │  Proxy re-   │
 │              │                    │  encryption  │
 │  ACP /       │                    │              │
 │  Bulletin /  │                    │  Threshold   │
 │  Identity    │                    │  signing     │
-│  precompiles │                    │              │
+│  modules     │                    │              │
 │              │                    │  No single   │
 │  Zanzibar    │                    │  key holder  │
 └──────────────┘                    └──────────────┘
@@ -134,9 +134,9 @@ Every step produces a governed document. The agent's operational record *is* the
 
 Governance has two surfaces: **what data can the agent access**, and **what is the agent permitted to do**. Both are enforced at the data layer, not the application layer.
 
-**Data access** — DefraDB enforces access control on every read and every write. When an agent queries for documents, the query gate checks the agent's permissions against a local ACP cache validated by Hub.rs consensus proofs. Unauthorized reads return nothing. Unauthorized writes fail. Data the agent is not authorized for remains encrypted — the cryptographic path to the plaintext does not exist.
+**Data access** — DefraDB enforces access control on every read and every write. When an agent queries for documents, the query gate checks the agent's permissions against a local ACP cache validated by vera.rs consensus proofs. Unauthorized reads return nothing. Unauthorized writes fail. Data the agent is not authorized for remains encrypted — the cryptographic path to the plaintext does not exist.
 
-**Permissions** — The signing gate governs what the agent can produce. When an agent writes a document, DefraDB requests the Orbis threshold ring to sign the operation. Each ring node independently checks the agent's permissions against Hub.rs. If a threshold of nodes agree the agent is authorized, the signature is produced. If not, the operation cannot be signed. Unsigned operations are rejected by all other nodes on merge.
+**Permissions** — The signing gate governs what the agent can produce. When an agent writes a document, DefraDB requests the Orbis threshold ring to sign the operation. Each ring node independently checks the agent's permissions against vera.rs. If a threshold of nodes agree the agent is authorized, the signature is produced. If not, the operation cannot be signed. Unsigned operations are rejected by all other nodes on merge.
 
 The combination means: an agent cannot read data it is not authorized for (encryption + query gate), and it cannot produce valid operations without authorization (signing gate). Both checks are performed by independent infrastructure, not by the agent's own runtime.
 
@@ -178,9 +178,9 @@ Every action in the system produces a cryptographically verifiable record:
 | Agent request | Client identity | "User X requested Agent Y to perform task Z" |
 | Tool execution | Agent's service identity + Orbis ring | "Agent Y executed Tool W with these arguments at time T" |
 | Agent response | Agent's service identity + Orbis ring | "Agent Y produced this output, authorized by policy P" |
-| Data read | ACP proof from Hub.rs consensus | "Agent Y was authorized to read this data at time T" |
-| Permission grant | Hub.rs validator consensus | "Human X granted Agent Y access at time T" |
-| Permission revocation | Hub.rs validator consensus | "Human X revoked Agent Y's access at time T" |
+| Data read | ACP proof from vera.rs consensus | "Agent Y was authorized to read this data at time T" |
+| Permission grant | vera.rs validator consensus | "Human X granted Agent Y access at time T" |
+| Permission revocation | vera.rs validator consensus | "Human X revoked Agent Y's access at time T" |
 | Delegation approval | Human's device key (signed transaction) | "Human X approved Agent Y's delegation request at time T" |
 
 This is not application-level logging. Every entry is backed by consensus and threshold cryptography. An auditor can independently verify the entire chain — which agent executed which operations, what data it had access to, who authorized that access, and when access was revoked — without trusting any single system component.
@@ -193,7 +193,7 @@ This is not application-level logging. Every entry is backed by consensus and th
 
 **Real-time revocation** — When an agent's authorization is revoked (employee offboarded, contract expired, agent decommissioned), the permission change propagates through the consensus protocol and invalidates local caches within seconds. The agent's cryptographic path to the data is severed. This is not a "please stop" — it is a key that stops working.
 
-**P2P replication with confidentiality** — Data encrypted to identities can be replicated peer-to-peer across nodes without compromising confidentiality. The ciphertext is safe to distribute because only authorized identities can decrypt. This enables distributed architectures where data is replicated for availability but access is still governed centrally by Hub.rs policy.
+**P2P replication with confidentiality** — Data encrypted to identities can be replicated peer-to-peer across nodes without compromising confidentiality. The ciphertext is safe to distribute because only authorized identities can decrypt. This enables distributed architectures where data is replicated for availability but access is still governed centrally by vera.rs policy.
 
 **Compatible with existing infrastructure** — DefraDB exposes standard interfaces that existing agent frameworks and tooling can connect to without modification. Organizations do not need to rewrite their agent infrastructure. They connect it to DefraDB, and every operation is automatically encrypted, access-controlled, and auditable.
 
@@ -264,7 +264,7 @@ Part 1 described the identity model for *key material* — Orbis, Node, and Serv
 
 | Concept | Role |
 |---------|------|
-| **Principal** | DID-backed identity. The permission and audit boundary. What Hub.rs recognizes. What signs documents. |
+| **Principal** | DID-backed identity. The permission and audit boundary. What vera.rs recognizes. What signs documents. |
 | **Behavior** | Prompt, tools, model, backend policy. One principal can have many behaviors. |
 | **Deployment** | Where a principal's behavior actually runs. Binds hardware. |
 
@@ -358,7 +358,7 @@ The desktop client pairs with a local runtime over iroh P2P on localhost, then r
 | Component | Role | Key Property |
 |-----------|------|-------------|
 | **DefraDB** | CRDT document store, iroh P2P replication, agent operation backend | Every operation is ACP-gated; data encrypted to identities |
-| **Hub.rs** | Commonware-consensus chain with EVM execution; ACP, Bulletin, and Identity precompile modules; native BLS transaction path | Immutable permission records, validator consensus, state proofs |
+| **vera.rs** | Commonware-consensus chain with ACP, Bulletin, and Identity modules; native BLS requests | Immutable permission records, validator consensus, state proofs |
 | **Orbis** | DKG-generated ring keys, proxy re-encryption for authorized readers, threshold signing | No single key holder, ring survives node loss, hardware-rooted |
 | **defra-agent** | Formally verified agent runtime over DefraDB, document-driven control plane | Every operation is a governed document; lifecycle is a Lean-proved state machine |
 
@@ -368,8 +368,8 @@ The desktop client pairs with a local runtime over iroh P2P on localhost, then r
 Agent Identity (hardware-rooted or DKG-distributed)
   → Authenticates to DefraDB via signed JWT
     → DefraDB requests Orbis ring to sign the operation
-      → Each ring node independently checks ACP on Hub.rs
-        → Hub.rs validators reach consensus on authorization
+      → Each ring node independently checks ACP on vera.rs
+        → vera.rs validators reach consensus on authorization
           → Ring threshold-signs the operation (BLS12-381)
             → Any node can independently verify the signature
               → Valid signature = ACP was enforced, provenance is proven
@@ -379,4 +379,4 @@ An attacker who compromises a single node cannot forge a threshold signature. Ot
 
 ## Current State
 
-Source Network's agentic governance framework runs across every layer. **DefraDB** runs as a CRDT document store with iroh P2P replication and a local ACP gate backed by Hub.rs consensus proofs. **Hub.rs** runs on Commonware consensus with EVM execution, native BLS transactions, and the ACP, Bulletin, and Identity precompile modules exercising the full Zanzibar policy engine. **Orbis** runs as a DKG ring with proxy re-encryption and threshold signing, open-sourced. **defra-agent** runs as a Rust agent runtime with a formally verified lifecycle, a document-driven control plane, a CLI, and a desktop client that pairs over iroh P2P. The full trust chain — cryptographic identity, consensus-backed access control, identity-based encryption, and governed-by-construction operation — is exercised end-to-end through Backbone's integration harnesses.
+Source Network's agentic governance framework runs across every layer. **DefraDB** runs as a CRDT document store with iroh P2P replication and a local ACP gate backed by vera.rs consensus proofs. **vera.rs** runs on Commonware consensus with native BLS requests and the ACP, Bulletin, and Identity modules exercising the full Zanzibar policy engine. **Orbis** runs as a DKG ring with proxy re-encryption and threshold signing, open-sourced. **defra-agent** runs as a Rust agent runtime with a formally verified lifecycle, a document-driven control plane, a CLI, and a desktop client that pairs over iroh P2P. The full trust chain — cryptographic identity, consensus-backed access control, identity-based encryption, and governed-by-construction operation — is exercised end-to-end through Backbone's integration harnesses.

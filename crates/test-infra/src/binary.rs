@@ -1,6 +1,6 @@
 //! Version-aware binary resolution for integration test dependencies.
 //!
-//! Each component in the stack (defra, hubd, orbis-node, verad) needs to be
+//! Each component in the stack (defra, orbis-node, verad) needs to be
 //! resolved at test time. The resolution order supports both local development
 //! (dirty working tree) and CI (pinned versions):
 //!
@@ -57,9 +57,9 @@ pub struct ResolvedBinary {
 /// | `{PREFIX}_GIT_REPO` | `DEFRA_GIT_REPO=https://...` | Clone and build from source |
 /// | `{PREFIX}_GIT_REF` | `DEFRA_GIT_REF=v0.5.0` | Git ref to checkout |
 pub struct BinaryResolver {
-    /// Env var prefix (e.g., "DEFRA", "HUBD", "ORBIS").
+    /// Env var prefix (e.g., "DEFRA", "VERAD", "ORBIS").
     prefix: String,
-    /// Binary name on PATH (e.g., "defra", "hubd", "orbis-node").
+    /// Binary name on PATH (e.g., "defra", "verad", "orbis-node").
     binary_name: String,
     /// Default cargo package name for workspace builds.
     default_cargo_package: Option<String>,

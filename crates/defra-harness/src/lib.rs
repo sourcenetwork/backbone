@@ -27,6 +27,7 @@ pub use identity::{
 };
 pub use node::{
     start_node, BinarySource, KeyringBackend, NodeConfig, OrbisSignerConfig, RunningNode,
+    VeraNodeConfig, VERA_ACP_DOCUMENT_TYPE,
 };
 pub use p2p_helpers::{
     extract_doc_id, extract_p2p_addr, extract_p2p_addr_with_identity, extract_peer_id,

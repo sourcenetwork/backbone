@@ -177,10 +177,40 @@ pub enum KeyringBackend {
 pub struct OrbisSignerConfig {
     /// gRPC endpoint of an Orbis node (e.g. `"http://127.0.0.1:8081"`).
     pub endpoint: String,
-    /// Ring ID to sign with (from DKG bulletin post).
-    pub ring_id: String,
-    /// Derivation label (e.g. `"x-archive"`) for derived key signing.
-    pub derivation: String,
+    /// Id of the key derivation registered on Vera that the node signs with.
+    pub derivation_id: String,
+    /// The derived BLS public key (hex), provisioned independently of the ring.
+    pub public_key: String,
+    /// Hex Ed25519 key (seed followed by public key) the node authenticates
+    /// to the ring with; the ring accepts only EdDSA tokens.
+    pub identity: String,
+}
+
+/// The `--document-acp-type` selector of DefraDB's native Vera provider.
+pub const VERA_ACP_DOCUMENT_TYPE: &str = "vera";
+
+/// How a Rust node reaches its Vera deployment, as operators configure it.
+#[derive(Clone, Debug)]
+pub struct VeraNodeConfig {
+    /// JSON-RPC endpoint of a Vera node.
+    pub address: String,
+    /// The deployment's consensus public key (hex).
+    pub consensus_key: String,
+    /// The deployment's genesis block identifier (hex).
+    pub genesis_id: String,
+    /// The deployment identifier that signed submissions bind to.
+    pub deployment_id: u64,
+}
+
+impl From<&vera_support::VeraDeployment> for VeraNodeConfig {
+    fn from(deployment: &vera_support::VeraDeployment) -> Self {
+        Self {
+            address: deployment.rpc_url(),
+            consensus_key: deployment.consensus_key_hex(),
+            genesis_id: deployment.genesis_id_hex(),
+            deployment_id: deployment.deployment_id(),
+        }
+    }
 }
 
 /// Configuration for a single DefraDB node.
@@ -198,8 +228,7 @@ pub struct NodeConfig {
     pub encryption_enabled: bool,
     pub signing_enabled: bool,
     pub nac_enabled: bool,
-    pub vera: Option<vera_harness::VeraConfig>,
-    pub hub_rs_address: Option<String>,
+    pub vera: Option<VeraNodeConfig>,
     pub orbis_signer: Option<OrbisSignerConfig>,
     pub keyring: KeyringBackend,
     pub development: bool,
@@ -245,7 +274,6 @@ impl NodeConfig {
             signing_enabled: false,
             nac_enabled: false,
             vera: None,
-            hub_rs_address: None,
             orbis_signer: None,
             keyring: KeyringBackend::None,
             development: false,

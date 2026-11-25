@@ -78,6 +78,16 @@ pub fn generate_defra_jwt(private_key_hex: &str, audience: &str) -> Result<Strin
     Ok(format!("{}.{}", message, sig_b64))
 }
 
+/// How long a delegation a request carries stays valid.
+const DELEGATION_LIFETIME_SECS: u64 = 900;
+
+/// The worker and deployment a caller's delegation names.
+#[derive(serde::Deserialize)]
+struct DelegationAudience {
+    worker: String,
+    deployment: u64,
+}
+
 /// HTTP client that adds Bearer JWT for identity-authenticated DefraDB requests.
 pub struct DefraHttpClient {
     http: reqwest::Client,
@@ -104,8 +114,8 @@ impl DefraHttpClient {
         let mut request = self.http.post(&url).json(&body);
 
         if let Some(key_hex) = identity_hex {
-            let jwt = generate_defra_jwt(key_hex, &self.base_url)?;
-            request = request.header("Authorization", format!("Bearer {}", jwt));
+            let bearer = self.bearer(key_hex).await?;
+            request = request.header("Authorization", format!("Bearer {}", bearer));
         }
 
         let resp = request
@@ -124,9 +134,59 @@ impl DefraHttpClient {
             .map_err(|e| eyre!("failed to parse graphql response: {}", e))
     }
 
+    /// The credential `key_hex` signs in with: on a node whose document ACP
+    /// acts on Vera, a delegation to the node's worker, so the node may
+    /// register on Vera what the caller creates; otherwise an identity token.
+    async fn bearer(&self, key_hex: &str) -> Result<String> {
+        let Some(audience) = self.delegation_audience().await? else {
+            return generate_defra_jwt(key_hex, &self.base_url);
+        };
+        let key_bytes = hex::decode(key_hex).map_err(|e| eyre!("invalid hex key: {}", e))?;
+        let key = vera_client::Secp256k1SigningKey::from_slice(&key_bytes)
+            .map_err(|e| eyre!("invalid secp256k1 key: {}", e))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| eyre!("system time error: {}", e))?
+            .as_secs();
+        vera_client::create_scoped_bearer_token(
+            &key,
+            &audience.worker,
+            audience.deployment,
+            now,
+            now + DELEGATION_LIFETIME_SECS,
+            vera_client::DelegationScope::PolicyCommands,
+        )
+        .map_err(|e| eyre!("create delegation: {}", e))
+    }
+
+    /// The worker and deployment the node's Vera ACP submits as, when it has one.
+    async fn delegation_audience(&self) -> Result<Option<DelegationAudience>> {
+        let url = format!("{}/api/v0/acp/status", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| eyre!("acp status request failed: {}", e))?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let status: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| eyre!("failed to parse acp status response: {}", e))?;
+        match status.get("delegation") {
+            Some(delegation) if !delegation.is_null() => Ok(Some(
+                serde_json::from_value(delegation.clone())
+                    .map_err(|e| eyre!("acp status delegation: {}", e))?,
+            )),
+            _ => Ok(None),
+        }
+    }
+
     /// Add a schema (SDL string) to DefraDB.
     pub async fn schema_add(&self, sdl: &str) -> Result<()> {
-        let url = format!("{}/api/v0/schema", self.base_url);
+        let url = format!("{}/api/v0/collections", self.base_url);
         let resp = self
             .http
             .post(&url)

@@ -1,34 +1,39 @@
 //! DKG fixture for e2e tests.
 //!
 //! Running DKG is expensive (~30-40s). This module provides a helper that
-//! starts a 3-node ring, runs DKG, and returns the results.
+//! starts a Vera deployment and a 3-node ring, runs DKG, and returns the
+//! results.
 //!
-//! The returned `DkgFixture` owns the ring, SourceHub, and run directory
-//! independently. Drop order is: ring -> sourcehub -> run_dir (by field order).
+//! The returned `DkgFixture` owns the ring, the deployment and the run
+//! directory. Drop order is: ring -> vera -> run_dir (by field order).
 
-use sourcehub_harness::SourceHubNode;
 use std::time::Duration;
 
-use crate::cli::types::{NodeInfoResult, RingPayload};
-use crate::cli::{BulletinEventSubscription, OrbisCliClient, SourceHubCliClient};
-use crate::ring::OrbisRing;
-use crate::{allocate_source_hub_ports, generate_identity_keys, generate_run_id};
-use sourcehub_harness::SourceHubConfig;
+use cli_tool::NodeInfoResult;
+use vera_support::VeraDeployment;
 
-/// The bulletin namespace used for ring payloads (must match orbis-node constant).
-const BULLETIN_RING_NAMESPACE: &str = "orbis";
+use crate::admin::{RingAdmin, RING_POLICY_YAML};
+use crate::ring::OrbisRing;
+use crate::vera::OrbisVeraConfig;
+use crate::{generate_identity_keys, generate_run_id};
+
+const VERA_SEED: u64 = 42;
+const VERA_DEPLOYMENT_ID: u64 = 9003;
+const READY_TIMEOUT: Duration = Duration::from_secs(90);
+const FINALIZE_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// Results of a completed DKG ceremony, ready for use by tests.
 ///
-/// Field drop order: ring (orbis nodes killed first) -> sourcehub -> run_dir (cleaned last).
+/// Field drop order: ring (orbis nodes killed first) -> vera -> run_dir (cleaned last).
 pub struct DkgFixture {
     pub ring: OrbisRing,
-    pub sourcehub: SourceHubNode,
+    pub admin: RingAdmin,
+    pub vera: VeraDeployment,
     pub ring_pk_hex: String,
     pub ring_id: String,
+    /// The policy the ring was created under, which also governs its documents.
+    pub policy_id: String,
     pub node_infos: Vec<NodeInfoResult>,
-    pub orbis_cli: OrbisCliClient,
-    pub sourcehub_cli: SourceHubCliClient,
     _run_dir: test_infra::TestRunDir,
 }
 
@@ -38,12 +43,12 @@ impl DkgFixture {
     }
 }
 
-/// Start a 3-node ring with SourceHub, run DKG, and return the fixture.
+/// Start a Vera deployment and a 3-node ring, run DKG, and return the fixture.
 ///
-/// This takes ~30-40s. The returned fixture owns all processes — they are
-/// killed when the fixture is dropped.
+/// The returned fixture owns all processes — they are killed when the
+/// fixture is dropped.
 pub async fn setup_dkg() -> DkgFixture {
-    eprintln!("[fixture] Starting DKG fixture (3 nodes + SourceHub)...");
+    eprintln!("[fixture] Starting DKG fixture (3 nodes + Vera)...");
 
     let run_id = generate_run_id();
     let base_dir = crate::e2e_base_dir();
@@ -51,115 +56,58 @@ pub async fn setup_dkg() -> DkgFixture {
         test_infra::TestRunDir::new(&base_dir, "ORBIS_E2E_KEEP").expect("fixture: create run dir");
     let identity_keys = generate_identity_keys(&run_id, 3);
 
-    // Start SourceHub
-    let sh_ports = allocate_source_hub_ports().expect("fixture: allocate sourcehub ports");
-    let sh_home = run_dir
-        .node_dir("sourcehub")
-        .expect("fixture: create sourcehub dir");
-    let sh_log_dir = sh_home.join("logs");
-    std::fs::create_dir_all(&sh_log_dir).expect("fixture: create sourcehub log dir");
+    let vera = VeraDeployment::start(VERA_SEED, VERA_DEPLOYMENT_ID)
+        .await
+        .expect("fixture: Vera should start");
+    let admin = RingAdmin::new(&vera)
+        .await
+        .expect("fixture: connect the ring administrator");
 
-    let sourcehub = SourceHubNode::start(
-        sh_home,
-        sh_log_dir,
-        &sh_ports,
-        &identity_keys,
-        Duration::from_secs(60),
-    )
-    .await
-    .expect("fixture: sourcehub should start");
-
-    // Build the ring
     let ring = OrbisRing::builder()
         .nodes(3)
         .threshold(2)
         .log_level("info")
         .base_dir(run_dir.path())
         .identity_keys(identity_keys)
-        .sourcehub_config(SourceHubConfig::from(&sourcehub))
+        .vera(OrbisVeraConfig::from(&vera))
+        .controller_key(admin.controller_key_hex())
         .build()
         .await
         .expect("fixture: ring should start");
 
-    // Fund orbis nodes' generated signing keys via the SourceHub faucet.
-    let sourcehub_cli =
-        SourceHubCliClient::from_node(&sourcehub).expect("fixture: resolve sourcehubd binary");
-    for i in 0..ring.node_count() {
-        let pk_path = ring.node(i).data_dir().join("data/public_key.txt");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        let address = loop {
-            if let Ok(addr) = std::fs::read_to_string(&pk_path) {
-                let addr = addr.trim().to_string();
-                if !addr.is_empty() {
-                    break addr;
-                }
-            }
-            if tokio::time::Instant::now() >= deadline {
-                panic!("fixture: node{} did not write public_key.txt within 15s", i);
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        };
-        eprintln!("[fixture]   Funding orbis node{}: {}", i, address);
-        sourcehub_cli
-            .fund(&address)
-            .unwrap_or_else(|e| panic!("fixture: fund node{}: {}", i, e));
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-
-    ring.wait_ready(Duration::from_secs(60))
+    let node_infos = ring
+        .wait_ready(READY_TIMEOUT)
         .await
-        .expect("fixture: all nodes should be healthy");
+        .expect("fixture: all nodes should be ready");
 
-    let orbis_cli = OrbisCliClient::new().expect("fixture: resolve cli-tool binary");
-
-    // Query node info
-    let mut node_infos = Vec::with_capacity(ring.node_count());
-    for i in 0..ring.node_count() {
-        let info = orbis_cli
-            .query_node_info(&ring.node(i).grpc_addr())
-            .unwrap_or_else(|e| panic!("fixture: query node{} info: {}", i, e));
-        node_infos.push(info);
-    }
-
-    // Register ring namespace + add all nodes as collaborators
-    sourcehub_cli
-        .register_namespace(BULLETIN_RING_NAMESPACE)
-        .expect("fixture: register ring namespace");
-
+    let policy_id = admin
+        .account()
+        .create_policy(RING_POLICY_YAML)
+        .await
+        .expect("fixture: create ring policy");
     for info in &node_infos {
-        sourcehub_cli
-            .add_collaborator(BULLETIN_RING_NAMESPACE, &info.public_address)
-            .expect("fixture: add collaborator");
+        admin
+            .authorize_node(&info.node_key, &info.p2p_address, &policy_id, READY_TIMEOUT)
+            .await
+            .expect("fixture: authorize node");
     }
-
-    // Subscribe to events BEFORE starting DKG
-    let event_subscription = BulletinEventSubscription::connect(&sourcehub.comet_rpc_url)
+    let node_keys: Vec<String> = node_infos
+        .iter()
+        .map(|info| info.node_key.clone())
+        .collect();
+    let ring_id = admin
+        .create_ring(&policy_id, &node_keys, ring.threshold())
         .await
-        .expect("fixture: event subscription");
+        .expect("fixture: create ring");
 
-    let peer_ids: Vec<String> = node_infos.iter().map(|n| n.p2p_address.clone()).collect();
-
-    // Run DKG
     eprintln!("[fixture] Running DKG...");
-    let dkg_result = orbis_cli
-        .do_dkg(&ring.node(0).grpc_addr(), ring.threshold(), &peer_ids)
-        .expect("fixture: DKG should succeed");
-
-    let session_id = dkg_result.session_id;
-    let post_event = event_subscription
-        .wait_for_artifact(&session_id, Duration::from_secs(120))
+    cli_tool::do_dkg(ring.node(0).grpc_addr(), ring_id.clone())
         .await
-        .expect("fixture: DKG completion event");
-
-    // Read ring payload
-    let post_payload = sourcehub_cli
-        .read_post(BULLETIN_RING_NAMESPACE, &post_event.post_id)
-        .expect("fixture: read ring post");
-
-    let ring_payload: RingPayload =
-        serde_json::from_slice(&post_payload).expect("fixture: parse RingPayload");
-    let ring_pk_hex = ring_payload.ring_pk;
-    let ring_id = post_event.post_id;
+        .expect("fixture: DKG should start");
+    let ring_pk_hex = admin
+        .wait_for_ring_key(&ring_id, FINALIZE_TIMEOUT)
+        .await
+        .expect("fixture: DKG should finalize");
 
     eprintln!(
         "[fixture] DKG complete. Ring PK: {}..., Ring ID: {}",
@@ -169,12 +117,12 @@ pub async fn setup_dkg() -> DkgFixture {
 
     DkgFixture {
         ring,
-        sourcehub,
+        admin,
+        vera,
         ring_pk_hex,
         ring_id,
+        policy_id,
         node_infos,
-        orbis_cli,
-        sourcehub_cli,
         _run_dir: run_dir,
     }
 }

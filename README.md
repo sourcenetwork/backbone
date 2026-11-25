@@ -2,7 +2,7 @@
 
 The cryptographic and infrastructural foundation for the Source Network stack.
 
-Backbone wires together the three core Rust components — **defra.rs** (data), **hub.rs** (consensus + policy), and **orbis.rs** (identity + DKG) — into a unified system where data encryption, access control, and P2P replication work as autonomic infrastructure.
+Backbone wires together the three core Rust components — **defra.rs** (data), **vera.rs** (consensus + policy), and **orbis.rs** (identity + DKG) — into a unified system where data encryption, access control, and P2P replication work as autonomic infrastructure.
 
 ## The Stack
 
@@ -19,7 +19,7 @@ Backbone wires together the three core Rust components — **defra.rs** (data), 
    │                  │                  │
    ▼                  ▼                  ▼
 ┌────────┐     ┌────────────┐     ┌────────────┐
-│defra.rs│     │   hub.rs   │     │  orbis.rs  │
+│defra.rs│     │  vera.rs   │     │  orbis.rs  │
 │        │     │            │     │            │
 │ Data   │     │ Consensus  │     │ Identity   │
 │ CRDTs  │     │ Zanzibar   │     │ DKG        │
@@ -35,7 +35,7 @@ backbone/
 ├── crates/
 │   ├── test-infra/       # Shared primitives (process mgmt, ports, log tracking)
 │   ├── defra-harness/    # DefraDB node manager + CLI client + fixtures
-│   ├── vera-harness/     # Go Vera process harness
+│   ├── vera-support/     # Native Vera deployments and administration
 │   ├── acp-light-client/ # Native Rust Vera proof verification
 │   ├── soak/             # Mixed-runtime DefraDB workload harness
 │   └── orbis-harness/    # Orbis ring builder + DKG fixtures
@@ -62,11 +62,12 @@ Everything needed to start, configure, and interact with DefraDB nodes:
 - Test macros — `for_each_runtime!`, `for_each_p2p_topology!`
 - Fixtures — ACP policies, schemas, identity generators
 
-### Vera harnesses
+### vera-support
 
-The local `crates/vera-harness` manages Go Vera processes. Native Rust integration
-tests use the separately pinned `vera-harness` package from `sourcenetwork/vera.rs`.
-That package starts and observes Rust validator clusters:
+`VeraDeployment` starts a vera.rs validator cluster and names the trust
+material DefraDB and Orbis are configured with (deployment id, consensus key,
+genesis id); `VeraAccount` submits native requests to it. Clusters come from
+the `vera-harness` package of `sourcenetwork/vera.rs`, pinned in the workspace:
 
 - `TestClusterBuilder` — BFT-aware cluster setup with key generation
 - `KeySet` — deterministic ed25519 + BLS threshold scheme generation
@@ -77,9 +78,10 @@ That package starts and observes Rust validator clusters:
 
 Everything needed to orchestrate Orbis DKG rings:
 
-- `OrbisRingBuilder` — multi-node ring setup with threshold configuration
-- `DkgFixture` — complete Vera + Orbis ring with DKG ceremony
-- Event-based synchronization — WebSocket subscriptions for DKG completion
+- `OrbisRingBuilder` — orbis-node processes configured for a `VeraDeployment`
+- `RingAdmin` — node authorization, ring creation, documents and key
+  derivations through native Vera requests
+- `DkgFixture` — a deployment, a 3-node ring and its finalized key
 
 ### acp-light-client
 
@@ -162,10 +164,6 @@ Each component repo imports its harness crate for integration tests:
 [dependencies]
 defra-harness = { git = "https://github.com/sourcenetwork/backbone" }
 
-# In hub.rs/crates/hub-e2e/Cargo.toml
-[dependencies]
-hub-harness = { git = "https://github.com/sourcenetwork/backbone" }
-
 # In orbis-rs/crates/orbis-e2e/Cargo.toml
 [dependencies]
 orbis-harness = { git = "https://github.com/sourcenetwork/backbone" }
@@ -205,8 +203,8 @@ Run `bash .github/scripts/test-native-stack.sh` with Rust 1.99.1 and protoc
 installed. The script uses a temporary source checkout and retains build artifacts
 under `target/native-stack` and per-curve logs and scenario evidence under
 `target/native-stack-runs`. Orbis state and logs remain in each attempt's private
-`orbis-clusters` directory and are not included in CI artifacts. The older
-`tests/full_stack.rs` fixture uses EVM
-administration and is not the native CI entry point. Native coverage checks
+`orbis-clusters` directory and are not included in CI artifacts. The
+`tests/full_stack.rs` fixture administers Vera through native requests from the
+test process and is not the native CI entry point. Native coverage checks
 Orbis authorization and signed document replication; it does not yet cover
 Defra collection-level strict ACP enforcement on replicated updates.
