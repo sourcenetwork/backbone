@@ -79,9 +79,9 @@ if [[ $(cat "$WORK/orbis/docker/VERA_REF") != "$vera_ref" ]]; then
     exit 1
 fi
 vera_sdk_ref=$(cargo +1.99.1 metadata --frozen --no-deps --format-version 1 \
-    --manifest-path "$ROOT/crates/acp-light-client/Cargo.toml" | \
-    jq -er '.packages[] | select(.name == "acp-light-client") | .dependencies[]
-        | select(.name == "vera-domain") | .source
+    --manifest-path "$ROOT/Cargo.toml" | \
+    jq -er '.packages[] | select(.name == "backbone") | .dependencies[]
+        | select(.name == "vera-light-client") | .source
         | capture("^git\\+https://github\\.com/sourcenetwork/vera\\.rs[?]rev=(?<rev>[0-9a-f]{40})$").rev')
 check_fixture_pin vera.rs "$vera_sdk_ref"
 check_fixture_pin defradb.rs "$defra_ref"
@@ -109,18 +109,16 @@ docker build --file "$ROOT/.github/scripts/native-runtime.Dockerfile" \
 built_images+=("$ORBIS_VERA_IMAGE")
 export ORBIS_VERA_IMAGE
 docker image inspect --format '{{.Id}}' "$ORBIS_VERA_IMAGE" > "$RUN/vera-image-id.txt"
-# Exercise this PR's proof client, including through Defra and Orbis consumers.
-patch="patch.'https://github.com/sourcenetwork/backbone.git'.acp-light-client.path='$ROOT/crates/acp-light-client'"
 for curve in bls12-381 jubjub; do
-    native=(--manifest-path "$WORK/orbis/Cargo.toml" --config "$patch" -p orbis-node
+    native=(--manifest-path "$WORK/orbis/Cargo.toml" -p orbis-node
         --no-default-features --features "vera,redb,iroh,$curve")
-    native_test=(--manifest-path "$WORK/orbis/Cargo.toml" --config "$patch" -p orbis-node
+    native_test=(--manifest-path "$WORK/orbis/Cargo.toml" -p orbis-node
         --no-default-features --features "integration-test,vera,redb,iroh,$curve")
     echo "curve=$curve profile=release orbis_features=vera,redb,iroh,$curve default_features=false" \
         | tee "$RUN/provenance-$curve.log"
-    # The local override changes the disposable lockfile. Stage each curve's
-    # production binary before test dev-dependencies can enable extra features.
-    cargo +1.99.1 build --release "${native[@]}" --bin orbis-node \
+    # Stage each curve's production binary before test dev-dependencies can
+    # enable extra features.
+    cargo +1.99.1 build --release --locked "${native[@]}" --bin orbis-node \
         2>&1 | tee "$RUN/build-orbis-$curve.log"
     mkdir -p "$WORK/bin/$curve"
     cp "$CARGO_TARGET_DIR/release/orbis-node" "$WORK/bin/$curve/orbis-node"
