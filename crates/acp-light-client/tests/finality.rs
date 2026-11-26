@@ -134,8 +134,8 @@ fn build_fixture(
                         .await
                         .unwrap();
                         let object = vera_permission::Object {
-                            resource: record.relationship.resource.clone(),
-                            id: record.relationship.object_id.clone(),
+                            resource: record.relationship.object.resource.to_string(),
+                            id: record.relationship.object.id.to_string(),
                         };
                         let mut prefixes = vec![
                             key.clone(),
@@ -151,7 +151,9 @@ fn build_fixture(
                             let current: vera_modules::acp::types::PolicyRecord =
                                 serde_json::from_slice(value).unwrap();
                             if let Ok(pair) = current.relations.pair(&record.relationship) {
-                                let incarnation = if record.relationship.relation == "owner" {
+                                let incarnation = if record.relationship.relation.as_str()
+                                    == "owner"
+                                {
                                     0
                                 } else {
                                     let point = native::record_proof_at(
@@ -685,7 +687,8 @@ async fn verify_permission_records(owner: &str) {
         )
         .unwrap()
         .policy
-        .id;
+        .id
+        .to_string();
     module
         .direct_policy_cmd(
             &owner,

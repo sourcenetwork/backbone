@@ -30,6 +30,7 @@ fn certificate(term: u64, cut: &LightBlock, signer: &SigningKey) -> TermCertific
         approvals: vec![TermApproval {
             signer: 0,
             signature: alloy_primitives::FixedBytes::from_slice(&signature.to_bytes()),
+            webauthn: None,
         }],
     }
 }

@@ -21,7 +21,8 @@ async fn retained_relationships_do_not_restore_retired_policy_ownership() {
         )
         .unwrap()
         .policy
-        .id;
+        .id
+        .to_string();
     let object = Object {
         resource: "file".into(),
         id: "report".into(),
@@ -172,6 +173,7 @@ resources:
   - name: document
     relations:
       - name: reader
+        types: [\"*\"]
   - name: group
     relations:
       - name: member
@@ -187,7 +189,7 @@ resources:
                 PolicyNonce::default(),
             )
             .unwrap();
-        let id = &policy.policy.id;
+        let id = policy.policy.id.as_str();
         let object = Object {
             resource: "document".into(),
             id: "report".into(),
@@ -203,7 +205,7 @@ resources:
             .relationship;
         relationship.relation = "reader".into();
         relationship.subject = serde_json::from_value(serde_json::json!({
-            "EntitySet": {"resource": "group", "object_id": "staff", "relation": "member"}
+            "actor_set": {"object": {"resource": "group", "id": "staff"}, "relation": "member"}
         }))
         .unwrap();
         module
@@ -260,7 +262,15 @@ resources:
             .unwrap()
             .objects = original_objects.clone();
 
-        let stripped = SCHEMA.replace(&format!("    relations:\n      - name: {removed}\n"), "");
+        let types = if removed == "reader" {
+            "        types: [\"*\"]\n"
+        } else {
+            ""
+        };
+        let stripped = SCHEMA.replace(
+            &format!("    relations:\n      - name: {removed}\n{types}"),
+            "",
+        );
         assert_eq!(
             module
                 .edit_policy(&owner, id, &stripped, PolicyMarshalingType::ShortYaml)
@@ -486,7 +496,7 @@ async fn assignments_are_bound_to_the_tracked_finalized_root() {
         PolicyMarshalingType::ShortYaml,
         PolicyNonce::default(),
     ).unwrap();
-    let id = &policy.policy.id;
+    let id = policy.policy.id.as_str();
     let mut grant = |resource: &str, object_id: &str, relation: &str| {
         let object = Object {
             resource: resource.into(),
@@ -496,8 +506,8 @@ async fn assignments_are_bound_to_the_tracked_finalized_root() {
             .direct_policy_cmd(&issuer, id, PolicyCmd::RegisterObject(object))
             .unwrap();
         let relationship = serde_json::from_value(serde_json::json!({
-            "resource": resource, "object_id": object_id, "relation": relation,
-            "subject": { "Entity": subject },
+            "object": { "resource": resource, "id": object_id }, "relation": relation,
+            "subject": { "actor": subject },
         }))
         .unwrap();
         module
@@ -523,7 +533,7 @@ async fn assignments_are_bound_to_the_tracked_finalized_root() {
                 .as_secs(),
             height,
             0,
-            Some((id.clone(), prefix.clone())),
+            Some((id.to_owned(), prefix.clone())),
         )
     };
     let fixture = at(&module, HEIGHT);
@@ -551,7 +561,7 @@ async fn assignments_are_bound_to_the_tracked_finalized_root() {
         )
         .unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].relationship.object_id, "revision-1");
+    assert_eq!(records[0].relationship.object.id.as_str(), "revision-1");
     assert_eq!(revision.height, evidence.revision.height);
     server
         .fixture
@@ -643,7 +653,7 @@ async fn assignment_read_during_revision_change(change_state: bool) {
         PolicyMarshalingType::ShortYaml,
         PolicyNonce::default(),
     ).unwrap();
-    let id = &policy.policy.id;
+    let id = policy.policy.id.as_str();
     let object = Object {
         resource: "host_specs".into(),
         id: "revision-1".into(),
@@ -657,8 +667,8 @@ async fn assignment_read_during_revision_change(change_state: bool) {
             id,
             PolicyCmd::SetRelationship(
                 serde_json::from_value(serde_json::json!({
-                    "resource": "host_specs", "object_id": "revision-1", "relation": "assigned",
-                    "subject": { "Entity": subject },
+                    "object": { "resource": "host_specs", "id": "revision-1" }, "relation": "assigned",
+                    "subject": { "actor": subject },
                 }))
                 .unwrap(),
             ),

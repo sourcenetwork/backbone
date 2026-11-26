@@ -188,10 +188,9 @@ impl VeraAccount {
             .iter()
             .map(|tx| {
                 let relationship = serde_json::json!({
-                    "resource": tx.resource,
-                    "object_id": tx.object_id,
+                    "object": { "resource": tx.resource, "id": tx.object_id },
                     "relation": tx.relation,
-                    "subject": { "Entity": tx.actor },
+                    "subject": { "actor": tx.actor },
                 });
                 let command = match tx.kind {
                     AcpRelationshipTxKind::Set => {

@@ -62,7 +62,7 @@ impl ProofClient {
             .as_ref()
             .ok_or(AssignmentReadError::Invalid("policy is absent"))?;
         let record: PolicyRecord = serde_json::from_slice(bytes)?;
-        if record.policy.id != policy
+        if record.policy.id.as_str() != policy
             || record.derived_id() != policy
             || record.relations.validate(&record.policy).is_err()
         {
@@ -131,7 +131,7 @@ impl ProofClient {
                 .as_ref()
                 .ok_or(AssignmentReadError::Overtaken)?,
         )?;
-        if current.policy.id != policy
+        if current.policy.id.as_str() != policy
             || current.derived_id() != policy
             || current.relations.validate(&current.policy).is_err()
         {
