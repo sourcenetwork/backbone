@@ -41,11 +41,11 @@ commonware-codec = "=2026.10.0"
 commonware-consensus = "=2026.10.0"
 commonware-cryptography = "=2026.10.0"
 commonware-utils = "=2026.10.0"
-vera-client = { git = "https://github.com/sourcenetwork/vera.rs", rev = "96abb96d3b2823d63a99857f730fc5d69e0ce03f" }
-vera-domain = { git = "https://github.com/sourcenetwork/vera.rs", rev = "96abb96d3b2823d63a99857f730fc5d69e0ce03f" }
-vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "96abb96d3b2823d63a99857f730fc5d69e0ce03f" }
-vera-modules = { git = "https://github.com/sourcenetwork/vera.rs", rev = "96abb96d3b2823d63a99857f730fc5d69e0ce03f" }
-vera-crypto = { git = "https://github.com/sourcenetwork/vera.rs", rev = "96abb96d3b2823d63a99857f730fc5d69e0ce03f" }
+vera-client = { git = "https://github.com/sourcenetwork/vera.rs", rev = "faf4a4f094c1b4f5786bce0cbeb6567966e27999" }
+vera-domain = { git = "https://github.com/sourcenetwork/vera.rs", rev = "faf4a4f094c1b4f5786bce0cbeb6567966e27999" }
+vera-harness = { git = "https://github.com/sourcenetwork/vera.rs", rev = "faf4a4f094c1b4f5786bce0cbeb6567966e27999" }
+vera-modules = { git = "https://github.com/sourcenetwork/vera.rs", rev = "faf4a4f094c1b4f5786bce0cbeb6567966e27999" }
+vera-crypto = { git = "https://github.com/sourcenetwork/vera.rs", rev = "faf4a4f094c1b4f5786bce0cbeb6567966e27999" }
 # Orbis at the revision `backbone.toml` builds its binaries from.
 bulletin = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "7b68773ce246ab6406e496cf5d653ce4fddf612e", default-features = false }
 cli-tool = { git = "https://github.com/sourcenetwork/orbis-rs", rev = "7b68773ce246ab6406e496cf5d653ce4fddf612e" }
