@@ -114,6 +114,12 @@ ordered operations. It also checks issuance metadata and revision-based expiry a
 fresh authenticated state. This proves authorization at issuance; callers still
 need to bind any payload or ticket use and enforce later revocation semantics.
 
+`read_object_registration` tells a live object, an archived one and one never
+registered apart at a fresh certified revision, verifying complete owner evidence
+with Vera's `verify_object_registration`. Only a live object has an owner; an archived
+object authorizes nothing and cannot be registered again unless its previous owner
+unarchives it.
+
 Headers and responses carry the term of the device that proposed the revision.
 A header is published only when its term matches the certified block, and a later
 revision whose term is below an observed revision's term is refused.

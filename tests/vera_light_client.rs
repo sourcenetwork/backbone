@@ -8,7 +8,7 @@ use std::time::Duration;
 
 mod support;
 
-use acp_light_client::AcpLightClient;
+use acp_light_client::{AcpLightClient, ObjectRegistration};
 use commonware_codec::Encode as _;
 use vera_harness::cluster::{ConsensusPreset, GenesisBuilder, KeySet, TestCluster};
 use vera_support::{VeraAccount, ADMIN_KEY};
@@ -262,6 +262,46 @@ async fn vera_acp_light_client() {
         "[vera-lc] PASSED: Receipt verified at height {}",
         verified.revision.height
     );
+
+    // Step 13. Tell a live, an archived and a never-registered object apart
+    eprintln!("[vera-lc] Step 13: Reading object registrations...");
+    let transcript = |id: &str| acp_light_client::Object {
+        resource: "transcript".into(),
+        id: id.into(),
+    };
+    account
+        .register_object(policy_id_str, "transcript", "archived-transcripts")
+        .await
+        .expect("register the object to archive");
+    let archive = account
+        .archive_object(policy_id_str, "transcript", "archived-transcripts")
+        .await
+        .expect("archive_object");
+    light_client
+        .wait_for_height(archive.block_number, Duration::from_secs(30))
+        .await
+        .expect("light client should reach the archiving revision");
+    let owner = acp_light_client::Actor(account.did().parse().expect("account DID"));
+    for (id, expected) in [
+        ("test-transcripts", ObjectRegistration::Live(owner)),
+        ("archived-transcripts", ObjectRegistration::Archived),
+        ("never-registered", ObjectRegistration::Absent),
+    ] {
+        let registration = light_client
+            .read_object_registration(policy_id_str, &transcript(id))
+            .await
+            .expect("registration evidence should verify");
+        assert_eq!(registration, expected, "{id}");
+    }
+    assert_eq!(
+        light_client
+            .read_object_owner(policy_id_str, &transcript("archived-transcripts"))
+            .await
+            .expect("ownership evidence should verify"),
+        None,
+        "an archived object has no owner"
+    );
+    eprintln!("[vera-lc] PASSED: Live, archived and absent objects read apart");
 
     drop(vera_cluster);
     eprintln!("[vera-lc] === All steps passed ===");

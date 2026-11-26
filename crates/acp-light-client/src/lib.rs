@@ -27,8 +27,9 @@ pub use types::{
 };
 pub use vera_modules::acp::types::RelationPair;
 pub use vera_permission::{
-    AccessDecision, AccessRequest, Actor, AssignmentSelector, DecisionRequest, Object, Operation,
-    PermissionProof, RecordProof, RecordResponse, Timestamp, PERMISSION_LIMITS,
+    AccessDecision, AccessRequest, Actor, AssignmentSelector, DecisionRequest, Object,
+    ObjectRegistration, Operation, PermissionProof, RecordProof, RecordResponse, Timestamp,
+    PERMISSION_LIMITS,
 };
 pub use verify::{verify_finalized_block, verify_light_block, LightBlockError};
 
@@ -184,6 +185,22 @@ impl AcpLightClient {
             .await?;
         self.header_chain.accept_response(revision).await?;
         Ok(owner)
+    }
+
+    /// Read whether an object is live, archived or absent from fresh complete
+    /// ownership evidence. Only a live object has an owner.
+    pub async fn read_object_registration(
+        &self,
+        policy: &str,
+        object: &Object,
+    ) -> eyre::Result<ObjectRegistration> {
+        let minimum = self.header_chain.fresh_state()?.height;
+        let (revision, registration) = self
+            .proof_client
+            .read_current_object_registration(policy, object, minimum)
+            .await?;
+        self.header_chain.accept_response(revision).await?;
+        Ok(registration)
     }
 
     /// Read complete direct assignment evidence at a fresh active revision.

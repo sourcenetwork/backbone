@@ -434,7 +434,9 @@ resources:
     }
 }
 
-async fn connect_current(server: &Server) -> (AcpLightClient, tokio::task::JoinHandle<()>) {
+pub(super) async fn connect_current(
+    server: &Server,
+) -> (AcpLightClient, tokio::task::JoinHandle<()>) {
     let light = server.fixture.read().light.clone();
     let height = light.height;
     let trusted = server.fixture.read().key.clone();

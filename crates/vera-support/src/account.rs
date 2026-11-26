@@ -109,6 +109,23 @@ impl VeraAccount {
             .await?)
     }
 
+    pub async fn archive_object(
+        &self,
+        policy_id: &str,
+        resource: &str,
+        object_id: &str,
+    ) -> eyre::Result<TransactionReceipt> {
+        Ok(self
+            .client
+            .native_archive_object(
+                &self.signer,
+                parse_policy_id(policy_id)?,
+                object_id,
+                resource,
+            )
+            .await?)
+    }
+
     pub async fn set_relationship(
         &self,
         policy_id: &str,

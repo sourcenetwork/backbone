@@ -10,6 +10,7 @@ use commonware_codec::DecodeExt as _;
 use eyre::{ensure, WrapErr};
 use vera_domain::TermCertificate;
 use vera_modules::vera::administration;
+use vera_permission::ObjectRegistration;
 
 use crate::header_sync::SyncState;
 use crate::rpc;
@@ -149,13 +150,39 @@ impl ProofClient {
         object: &vera_permission::Object,
         minimum_height: u64,
     ) -> eyre::Result<(SyncState, Option<vera_permission::Actor>)> {
+        let (revision, registration) = self
+            .read_current_object_registration(policy, object, minimum_height)
+            .await?;
+        let owner = match registration {
+            ObjectRegistration::Live(owner) => Some(owner),
+            ObjectRegistration::Archived | ObjectRegistration::Absent => None,
+        };
+        Ok((revision, owner))
+    }
+
+    /// Classify an object as live, archived or absent from complete owner evidence
+    /// and policy liveness at one certified revision.
+    ///
+    /// An absent policy reads as `Absent`. An archived object has no owner and
+    /// authorizes nothing; it differs from an absent one in that it cannot be
+    /// registered again unless its previous owner unarchives it.
+    pub async fn read_current_object_registration(
+        &self,
+        policy: &str,
+        object: &vera_permission::Object,
+        minimum_height: u64,
+    ) -> eyre::Result<(SyncState, ObjectRegistration)> {
         let prefix = vera_permission::object_owner_prefix(policy, object)?;
         let response =
             rpc::policy_prefix_proof(self.transport.as_ref(), policy, &prefix, minimum_height)
                 .await?;
-        let owner =
-            response.verify_object_owner(policy, object, minimum_height, &self.trusted_key)?;
-        Ok((revision_state(&response.revision)?, owner))
+        let registration = response.verify_object_registration(
+            policy,
+            object,
+            minimum_height,
+            &self.trusted_key,
+        )?;
+        Ok((revision_state(&response.revision)?, registration))
     }
 
     /// Read an exact v5 relationship key only while its policy, relation generations

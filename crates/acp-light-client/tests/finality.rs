@@ -1060,6 +1060,9 @@ async fn an_unreachable_node_is_reported_with_the_method_and_the_http_error() {
     assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_connect());
 }
 
+#[path = "support/object_registration.rs"]
+mod object_registration;
+
 #[path = "support/policy_liveness.rs"]
 mod policy_liveness;
 

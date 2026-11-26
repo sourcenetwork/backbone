@@ -36,6 +36,15 @@ owner pair and incarnation zero. Non-owner suffixes require the authenticated cu
 object incarnation. A retained inactive exact key is an error, while certified absence is
 returned as `None`; neither authorizes access.
 
+`read_object_owner` returns an object's live owner, or `None` when it has none.
+`read_object_registration` reads the same complete owner evidence and classifies it
+with Vera's `verify_object_registration` at one certified revision: `Live(owner)`,
+`Archived` or `Absent`. An archived object has no owner and authorizes nothing, but
+unlike an absent one it cannot be registered again unless its previous owner
+unarchives it. An object without an owner record, or whose policy is absent, is
+`Absent`. `ProofClient::read_current_object_registration` performs the same read at a
+caller-chosen minimum height and also returns the revision.
+
 `read_policy`, `read_relationship` and `read_access_decision` return authenticated
 record data, not an authorization decision. `verify_access` evaluates the full
 request with the shared ACP evaluator. `verify_access_decision` checks a persisted
