@@ -809,33 +809,33 @@ impl DefraClient {
 
     /// Get collection version info including VersionID.
     ///
-    /// DIVERGENCE: Rust has REST endpoint, Go uses CLI only.
+    /// A Rust node answers with the active version as one object, read from
+    /// Go's `GET /api/v0/collections?name=<name>`; a Go node answers with the
+    /// CLI's array.
     pub fn collection_describe_version(&self, name: &str) -> Result<Value> {
         match self.kind {
             NodeKind::Rust => {
-                let url = format!("{}/api/v0/collections/{}/describe", self.url, name);
+                let url = format!("{}/api/v0/collections?name={}", self.url, name);
                 let output = Command::new("curl")
                     .arg("-s")
                     .arg("-f")
                     .arg(&url)
                     .output()
                     .wrap_err_with(|| format!("failed to curl {}", url))?;
-
-                if output.status.success() {
-                    let body = String::from_utf8_lossy(&output.stdout);
-                    if let Ok(val) = serde_json::from_str::<Value>(body.trim()) {
-                        return Ok(val);
-                    }
+                if !output.status.success() {
+                    eyre::bail!(
+                        "GET {} failed ({}): {}",
+                        url,
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
                 }
-                // Fall back to CLI
-                let out = self.exec(&[
-                    "client",
-                    "collection",
-                    "describe",
-                    "--collection-name",
-                    name,
-                ])?;
-                serde_json::from_str(&out).wrap_err("failed to parse collection describe output")
+                let versions: Vec<Value> = serde_json::from_slice(&output.stdout)
+                    .wrap_err("failed to parse collections output")?;
+                versions
+                    .into_iter()
+                    .next()
+                    .wrap_err_with(|| format!("collection '{}' not found", name))
             }
             NodeKind::Go => {
                 let out = self.exec(&[
@@ -848,6 +848,40 @@ impl DefraClient {
                 serde_json::from_str(&out).wrap_err("failed to parse collection describe output")
             }
         }
+    }
+
+    /// The VersionID of every version named `name`, active or not, read from
+    /// `GET /api/v0/collections?name=<name>&get_inactive=true`.
+    pub fn collection_version_ids(&self, name: &str) -> Result<Vec<String>> {
+        let url = format!(
+            "{}/api/v0/collections?name={}&get_inactive=true",
+            self.url, name
+        );
+        let output = Command::new("curl")
+            .arg("-s")
+            .arg("-f")
+            .arg(&url)
+            .output()
+            .wrap_err_with(|| format!("failed to curl {}", url))?;
+        if !output.status.success() {
+            eyre::bail!(
+                "GET {} failed ({}): {}",
+                url,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let versions: Vec<Value> = serde_json::from_slice(&output.stdout)
+            .wrap_err("failed to parse collections output")?;
+        versions
+            .iter()
+            .map(|version| {
+                version["VersionID"]
+                    .as_str()
+                    .map(str::to_string)
+                    .wrap_err_with(|| format!("no VersionID in {}", version))
+            })
+            .collect()
     }
 
     /// Get collection version info using an identity (for NAC-enabled nodes).
