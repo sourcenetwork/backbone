@@ -11,7 +11,6 @@ use crate::node::{
     VeraNodeConfig,
 };
 use crate::ports::allocate_node_ports;
-use vera_support::VeraDeployment;
 
 use super::health::health_check_all;
 use super::runtime::TestCluster;
@@ -20,10 +19,6 @@ use super::runtime::TestCluster;
 /// TOCTOU window (another host process stealing the freed port). Each retry
 /// re-allocates fresh ports, so consecutive collisions are vanishingly rare.
 const PORT_CONFLICT_ATTEMPTS: usize = 3;
-
-/// Validator key seed and deployment identifier of the deployment `with_vera` starts.
-const VERA_SEED: u64 = 42;
-const VERA_DEPLOYMENT_ID: u64 = 9003;
 
 static RUST_BUILD_DONE: OnceLock<()> = OnceLock::new();
 static IROH_BUILD_DONE: OnceLock<()> = OnceLock::new();
@@ -62,7 +57,7 @@ pub struct TestClusterBuilder {
     encryption_enabled: bool,
     signing_enabled: bool,
     nac_enabled: bool,
-    vera_enabled: bool,
+    vera: Option<VeraNodeConfig>,
     development: bool,
     store: Option<String>,
     query_timeout: Option<u64>,
@@ -103,7 +98,7 @@ impl TestClusterBuilder {
             encryption_enabled: false,
             signing_enabled: false,
             nac_enabled: false,
-            vera_enabled: false,
+            vera: None,
             development: false,
             store: None,
             query_timeout: None,
@@ -279,11 +274,12 @@ impl TestClusterBuilder {
         self
     }
 
-    /// Start a vera.rs deployment and point every Rust node
-    /// at it through DefraDB's native Vera provider. The provider journals
+    /// Point every Rust node at a running vera.rs deployment through
+    /// DefraDB's native Vera provider. The caller starts the deployment and
+    /// keeps it alive for as long as the nodes need it. The provider journals
     /// its worker's key in the node's keyring, so nodes get a File keyring.
-    pub fn with_vera(mut self) -> Self {
-        self.vera_enabled = true;
+    pub fn with_vera(mut self, vera: VeraNodeConfig) -> Self {
+        self.vera = Some(vera);
         self.file_keyring = true;
         self.acp_document_type = Some(crate::node::VERA_ACP_DOCUMENT_TYPE.to_string());
         self
@@ -430,7 +426,7 @@ impl TestClusterBuilder {
         };
 
         // Vera or NAC requires an identity at startup.
-        if (self.nac_enabled || self.vera_enabled) && self.node_identity.is_none() {
+        if (self.nac_enabled || self.vera.is_some()) && self.node_identity.is_none() {
             let binary = if let Some(ref p) = go_binary_path {
                 p.clone()
             } else if let Some(ref p) = rust_binary_path {
@@ -458,18 +454,7 @@ impl TestClusterBuilder {
             "DEFRA_E2E_KEEP",
         )?;
 
-        // Start Vera if enabled
-        let vera = if self.vera_enabled {
-            Some(
-                VeraDeployment::start(VERA_SEED, VERA_DEPLOYMENT_ID)
-                    .await
-                    .wrap_err("failed to start Vera deployment")?,
-            )
-        } else {
-            None
-        };
-
-        let vera_config: Option<VeraNodeConfig> = vera.as_ref().map(VeraNodeConfig::from);
+        let vera_config = self.vera.clone();
 
         let mut nodes = Vec::with_capacity(total);
 
@@ -693,7 +678,6 @@ impl TestClusterBuilder {
             run_dir,
             self.node_identity,
             effective_identities,
-            vera,
         ))
     }
 }

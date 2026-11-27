@@ -17,17 +17,17 @@ async fn rust_vera_policy_lifecycle() {
     let binary = super::vera_binary();
     let alice = generate_identity(&binary).expect("Alice identity");
 
+    let vera = super::start_vera().await;
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .with_rust_binary(BinarySource::Path(binary.clone()))
-        .with_vera()
+        .with_vera(super::node_config(&vera))
         .with_identity(&alice.private_key_hex)
         .build()
         .await
         .expect("failed to build cluster");
 
     let node = cluster.client(0);
-    let sh = cluster.vera().expect("Vera not available");
 
     let bob = generate_identity(&binary).expect("Bob identity");
 
@@ -42,7 +42,11 @@ async fn rust_vera_policy_lifecycle() {
         .to_string();
 
     // Step 2: Verify the policy exists on Vera
-    let policy_ids = sh.client().get_policy_ids().await.expect("Vera policy ids");
+    let policy_ids = vera
+        .client()
+        .get_policy_ids()
+        .await
+        .expect("Vera policy ids");
     let wanted = policy_id.trim_start_matches("0x").to_lowercase();
     assert!(
         policy_ids

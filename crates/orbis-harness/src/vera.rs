@@ -1,6 +1,17 @@
 //! How an Orbis node reaches its Vera deployment.
 
+use defra_harness::VeraNodeConfig;
 use vera_support::VeraDeployment;
+
+/// How a DefraDB node reaches `deployment`.
+pub fn defra_node_config(deployment: &VeraDeployment) -> VeraNodeConfig {
+    VeraNodeConfig {
+        address: deployment.rpc_url(),
+        consensus_key: deployment.consensus_key_hex(),
+        genesis_id: deployment.genesis_id_hex(),
+        deployment_id: deployment.deployment_id(),
+    }
+}
 
 /// The trust material and endpoint an Orbis node's `--services-config`
 /// names for its authorization and bulletin backends.

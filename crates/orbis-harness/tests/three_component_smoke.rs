@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use defra_harness::node::RustNode;
-use defra_harness::{VeraNodeConfig, VERA_ACP_DOCUMENT_TYPE};
+use defra_harness::VERA_ACP_DOCUMENT_TYPE;
 use orbis_harness::fixture::setup_dkg;
 use orbis_harness::{
     generate_identity_keys, generate_run_id, start_node, KeyringBackend, NodeConfig,
@@ -76,7 +76,7 @@ async fn three_component_smoke() {
     );
     config.p2p_enabled = true;
     config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", ports[1]));
-    config.vera = Some(VeraNodeConfig::from(&fixture.vera));
+    config.vera = Some(orbis_harness::defra_node_config(&fixture.vera));
     config.acp_document_type = Some(VERA_ACP_DOCUMENT_TYPE.to_string());
     config.identity = Some(defra_key);
     config.keyring = KeyringBackend::File {

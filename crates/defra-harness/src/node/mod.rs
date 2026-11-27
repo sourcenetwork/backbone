@@ -202,17 +202,6 @@ pub struct VeraNodeConfig {
     pub deployment_id: u64,
 }
 
-impl From<&vera_support::VeraDeployment> for VeraNodeConfig {
-    fn from(deployment: &vera_support::VeraDeployment) -> Self {
-        Self {
-            address: deployment.rpc_url(),
-            consensus_key: deployment.consensus_key_hex(),
-            genesis_id: deployment.genesis_id_hex(),
-            deployment_id: deployment.deployment_id(),
-        }
-    }
-}
-
 /// Configuration for a single DefraDB node.
 #[derive(Clone, Debug)]
 pub struct NodeConfig {

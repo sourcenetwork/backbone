@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use defra_harness::node::RustNode;
 use defra_harness::sse::{open_acp_events_sse, wait_for_acp_invalidation};
-use defra_harness::{DefraClient, NodeKind, VeraNodeConfig, VERA_ACP_DOCUMENT_TYPE};
+use defra_harness::{DefraClient, NodeKind, VERA_ACP_DOCUMENT_TYPE};
 use orbis_harness::defradb::identity::{did_key_from_secp256k1, DefraHttpClient};
 use orbis_harness::ring::OrbisRing;
 use orbis_harness::{
@@ -418,7 +418,7 @@ async fn secure_training_data_compartments() {
     );
     acme_defra_config.p2p_enabled = true;
     acme_defra_config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", acme_defra_ports[1]));
-    acme_defra_config.vera = Some(VeraNodeConfig::from(&vera));
+    acme_defra_config.vera = Some(orbis_harness::defra_node_config(&vera));
     acme_defra_config.acp_document_type = Some(VERA_ACP_DOCUMENT_TYPE.to_string());
     acme_defra_config.identity = Some(acme_defra_svc.private_key_hex.clone());
     acme_defra_config.keyring = KeyringBackend::File {
@@ -459,7 +459,7 @@ async fn secure_training_data_compartments() {
     platform_defra_config.p2p_enabled = true;
     platform_defra_config.p2p_addr =
         Some(format!("/ip4/127.0.0.1/tcp/{}", platform_defra_ports[1]));
-    platform_defra_config.vera = Some(VeraNodeConfig::from(&vera));
+    platform_defra_config.vera = Some(orbis_harness::defra_node_config(&vera));
     platform_defra_config.acp_document_type = Some(VERA_ACP_DOCUMENT_TYPE.to_string());
     platform_defra_config.identity = Some(platform_defra_svc.private_key_hex.clone());
     platform_defra_config.keyring = KeyringBackend::File {
@@ -757,7 +757,7 @@ async fn secure_training_data_compartments() {
     );
     globex_defra_config.p2p_enabled = true;
     globex_defra_config.p2p_addr = Some(format!("/ip4/127.0.0.1/tcp/{}", globex_defra_ports[1]));
-    globex_defra_config.vera = Some(VeraNodeConfig::from(&vera));
+    globex_defra_config.vera = Some(orbis_harness::defra_node_config(&vera));
     globex_defra_config.acp_document_type = Some(VERA_ACP_DOCUMENT_TYPE.to_string());
     globex_defra_config.identity = Some(globex_defra_svc.private_key_hex.clone());
     globex_defra_config.keyring = KeyringBackend::File {
