@@ -67,9 +67,10 @@ assert tool == "cargo" and args.pop(0) == "+1.99.1", (tool, args)
 command = args.pop(0)
 if command == "metadata":
     assert "--no-deps" in args and "--frozen" in args
-    assert args[-1].endswith("/crates/acp-light-client/Cargo.toml")
-    print(json.dumps({"packages": [{"name": "acp-light-client", "dependencies": [
-        {"name": "vera-domain", "source": "git+https://github.com/sourcenetwork/vera.rs?rev=" + "5" * 40}
+    assert args[-1].endswith("/repo/Cargo.toml"), args
+    print(json.dumps({"packages": [{"name": "backbone", "dependencies": [
+        {"name": "vera-light-client", "rename": "acp-light-client",
+         "source": "git+https://github.com/sourcenetwork/vera.rs?rev=" + "5" * 40}
     ]}]}))
     sys.exit(0)
 for variable in os.environ:
@@ -95,11 +96,10 @@ else:
     assert features.startswith(expected_prefix), features
     curve = features.removeprefix(expected_prefix)
     assert curve in ("bls12-381", "jubjub"), features
-    assert "--no-default-features" in args and "--config" in args
-    assert "acp-light-client.path=" in args[args.index("--config") + 1]
+    assert "--no-default-features" in args and "--config" not in args
     event = command + " " + curve
     if command == "build":
-        assert args[args.index("--bin") + 1] == "orbis-node"
+        assert args[args.index("--bin") + 1] == "orbis-node" and "--locked" in args
         (release / "orbis-node").write_text(curve + " production\n")
     elif command == "tree":
         assert "--locked" in args and args[args.index("--edges") + 1] == "normal,build"

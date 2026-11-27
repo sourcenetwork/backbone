@@ -5,7 +5,7 @@ use defra_harness::{
 };
 
 /// How long a verified state stands without a newer one
-/// (`acp_light_client::FreshnessPolicy::default().max_age`).
+/// (`vera_light_client::FreshnessPolicy::default().max_age`).
 const FRESHNESS_LIMIT: Duration = Duration::from_secs(30);
 
 /// Circuit breaker fail-closed: when Vera becomes unreachable after

@@ -44,11 +44,10 @@ resources:
           - actor
     permissions:
       - name: read
-        expr: owner + writer + reader
+        expr: writer + reader
       - name: update
-        expr: owner + writer
+        expr: writer
       - name: delete
-        expr: owner
 "#;
 
 const GLOBEX_POLICY_YAML: &str = r#"
@@ -64,11 +63,10 @@ resources:
           - actor
     permissions:
       - name: read
-        expr: owner + writer + reader
+        expr: writer + reader
       - name: update
-        expr: owner + writer
+        expr: writer
       - name: delete
-        expr: owner
 "#;
 
 /// The resource and permission a compartment's signing key is bound to.

@@ -23,7 +23,7 @@ Service Identity (P-256/secp256k1, hardware keyring)
 
 ```
 vera.rs #61 (state proofs) + #44 (event gossip) + #68 (query wrappers)
-  → Shared ACP Light Client crate (backbone #18)
+  → Shared ACP light client (vera.rs `vera-light-client`)
     → defradb.rs #516 (query gate) + orbis-rs PR #60 (signing gate)
       → defradb.rs #530 (BLS verification on merge)
         → backbone tests/full_stack.rs (the canonical e2e test)
@@ -49,7 +49,6 @@ backbone/
 │   ├── vera-support/     # Native Vera deployments and administration
 │   ├── defra-harness/    # DefraDB node manager + CLI client + test fixtures
 │   ├── orbis-harness/    # Orbis ring builder + DKG fixtures for vera.rs
-│   ├── acp-light-client/ # Native Rust Vera proof verification
 │   └── soak/             # Mixed-runtime DefraDB workload harness
 ├── tests/                # Full-stack integration tests (all components wired)
 │                         # vera.rs clusters come from vera.rs's own vera-harness crate
