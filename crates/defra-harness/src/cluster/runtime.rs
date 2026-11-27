@@ -9,7 +9,6 @@ use crate::divergences::NodeKind;
 use crate::node::{start_node, DefraNode, NodeConfig, PortConflict, RunningNode, RustNode};
 use crate::observe::LogTracker;
 use crate::ports::{multiaddr_ports, reserve_ports, ReservedPorts};
-use vera_support::VeraDeployment;
 
 use super::health::health_check;
 
@@ -94,7 +93,7 @@ async fn reserve_until_free(
 
 /// A cluster of running DefraDB nodes.
 ///
-/// Field order matters: `nodes` and `vera` are dropped before `run_dir`,
+/// Field order matters: `nodes` are dropped before `run_dir`,
 /// ensuring processes are killed before their data directories are removed.
 /// A node stopped by [`TestCluster::stop_node`]: everything needed to start
 /// it again on the same ports, which stay reserved meanwhile.
@@ -112,7 +111,6 @@ pub struct StoppedNode {
 
 pub struct TestCluster {
     pub nodes: Vec<RunningNode>,
-    vera: Option<VeraDeployment>,
     #[allow(dead_code)]
     run_dir: test_infra::TestRunDir,
     startup_identity: Option<String>,
@@ -125,11 +123,9 @@ impl TestCluster {
         run_dir: test_infra::TestRunDir,
         startup_identity: Option<String>,
         node_identities: Vec<Option<String>>,
-        vera: Option<VeraDeployment>,
     ) -> Self {
         Self {
             nodes,
-            vera,
             run_dir,
             startup_identity,
             node_identities,
@@ -169,19 +165,6 @@ impl TestCluster {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
-    }
-
-    pub fn vera(&self) -> Option<&VeraDeployment> {
-        self.vera.as_ref()
-    }
-
-    /// Stop the Vera deployment. Drops its cluster, stopping every validator.
-    pub fn stop_vera(&mut self) -> Result<()> {
-        if self.vera.take().is_some() {
-            Ok(())
-        } else {
-            eyre::bail!("no Vera node to stop");
-        }
     }
 
     /// Wait for a named log pattern on the node at `index`.

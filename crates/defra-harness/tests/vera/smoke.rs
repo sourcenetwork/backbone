@@ -16,10 +16,11 @@ async fn rust_vera_smoke() {
     let binary = super::vera_binary();
     let jack = generate_identity(&binary).expect("failed to generate Jack identity");
 
+    let vera = super::start_vera().await;
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .with_rust_binary(BinarySource::Path(binary.clone()))
-        .with_vera()
+        .with_vera(super::node_config(&vera))
         .with_identity(&jack.private_key_hex)
         .build()
         .await

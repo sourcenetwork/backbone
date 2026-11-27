@@ -20,7 +20,7 @@ pub use defradb::identity::DefraHttpClient;
 pub use did::{derived_public_key, ed25519_identity_hex, signer_did_for_pk};
 pub use fixture::DkgFixture;
 pub use ring::{OrbisNode, OrbisRing, OrbisRingBuilder};
-pub use vera::OrbisVeraConfig;
+pub use vera::{defra_node_config, OrbisVeraConfig};
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

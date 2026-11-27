@@ -23,10 +23,11 @@ async fn rust_circuit_breaker_trip_recovery() {
     let binary = super::vera_binary();
     let jack = generate_identity(&binary).expect("Jack identity");
 
-    let mut cluster = TestCluster::builder()
+    let vera = super::start_vera().await;
+    let cluster = TestCluster::builder()
         .rust_nodes(1)
         .with_rust_binary(BinarySource::Path(binary.clone()))
-        .with_vera()
+        .with_vera(super::node_config(&vera))
         .with_identity(&jack.private_key_hex)
         .build()
         .await
@@ -64,7 +65,7 @@ async fn rust_circuit_breaker_trip_recovery() {
     );
 
     // Phase 2: Stop Vera — kill every validator
-    cluster.stop_vera().expect("failed to stop Vera");
+    drop(vera);
 
     // Decisions stand while the newest verified state is fresh; wait until
     // the state the node holds is older than the freshness limit.
@@ -106,10 +107,11 @@ async fn rust_policy_cache_ttl_expiry() {
     let alice = generate_identity(&binary).expect("Alice identity");
     let bob = generate_identity(&binary).expect("Bob identity");
 
+    let vera = super::start_vera().await;
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .with_rust_binary(BinarySource::Path(binary.clone()))
-        .with_vera()
+        .with_vera(super::node_config(&vera))
         .with_identity(&alice.private_key_hex)
         .build()
         .await

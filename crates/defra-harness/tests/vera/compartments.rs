@@ -34,10 +34,11 @@ async fn rust_vera_compartments() {
     let binary = super::vera_binary();
     let jack = generate_identity(&binary).expect("Jack identity");
 
+    let vera = super::start_vera().await;
     let cluster = TestCluster::builder()
         .rust_nodes(1)
         .with_rust_binary(BinarySource::Path(binary.clone()))
-        .with_vera()
+        .with_vera(super::node_config(&vera))
         .with_identity(&jack.private_key_hex)
         .build()
         .await
